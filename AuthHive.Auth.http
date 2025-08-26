@@ -1,0 +1,6 @@
+@AuthHive.Auth_HostAddress = http://localhost:5256
+
+GET {{AuthHive.Auth_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
