@@ -35,7 +35,7 @@ namespace AuthHive.Auth.Data.Context
         // OAuth
         public DbSet<OAuthClient> OAuthClients { get; set; }
         public DbSet<OAuthAccessToken> OAuthAccessTokens { get; set; }
-        public DbSet<OAuthRefreshToken> OAuthRefreshTokens { get; set; }
+        public DbSet<RefreshToken> RefreshTokens { get; set; }
         
         // Organization (기본)
         public DbSet<Organization> Organizations { get; set; }

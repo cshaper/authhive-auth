@@ -95,11 +95,5 @@ namespace AuthHive.Auth.Controllers.v1
         
         // Logout과 같은 다른 엔드포인트들은 필요에 따라 여기에 추가할 수 있습니다.
     }
-    
-    // Core 프로젝트로 옮기기 전 임시 DTO
-    public class ValidateTokenRequest
-    {
-        [Required]
-        public string Token { get; set; } = string.Empty;
-    }
+
 }

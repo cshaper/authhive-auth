@@ -4,6 +4,8 @@ using AuthHive.Auth.Services.Authentication;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using Serilog;
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Auth.Repositories;
 
 // Serilog 설정
 Log.Logger = new LoggerConfiguration()
@@ -27,7 +29,7 @@ try
     
     // Token Service (PASETO)
     builder.Services.AddSingleton<ITokenService, TokenService>();
-    
+    builder.Services.AddScoped<IUserRepository, UserRepository>();
     // Authentication Service 등록
     builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 

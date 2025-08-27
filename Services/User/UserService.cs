@@ -1,0 +1,261 @@
+using AuthHive.Core.Entities.User;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Service;
+using AuthHive.Core.Models.Common;
+using AuthHive.Core.Models.Common.Requests;
+using AuthHive.Core.Models.User;
+using AuthHive.Core.Models.User.Requests;
+using static AuthHive.Core.Enums.Core.UserEnums;
+
+namespace AuthHive.Auth.Services
+{
+    public class UserService : IUserService
+    {
+        private readonly IUserRepository _userRepository;
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly ILogger<UserService> _logger;
+
+        public UserService(
+            IUserRepository userRepository,
+            IUnitOfWork unitOfWork,
+            ILogger<UserService> logger)
+        {
+            _userRepository = userRepository;
+            _unitOfWork = unitOfWork;
+            _logger = logger;
+        }
+
+        #region IService (Non-Generic) Implementation
+        public Task<bool> IsHealthyAsync()
+        {
+            return Task.FromResult(true);
+        }
+
+        public Task InitializeAsync()
+        {
+            _logger.LogInformation("UserService initialized.");
+            return Task.CompletedTask;
+        }
+        #endregion
+
+        #region IService<T> Generic Implementation
+        public async Task<ServiceResult<UserDto>> GetByIdAsync(Guid id)
+        {
+            var user = await _userRepository.GetByIdAsync(id);
+            if (user == null) return ServiceResult<UserDto>.Failure("User not found.");
+            return ServiceResult<UserDto>.Success(MapToDto(user)!);
+        }
+
+        public async Task<ServiceResult<IEnumerable<UserDto>>> GetAllAsync()
+        {
+            var users = await _userRepository.GetAllAsync();
+            var dtos = users.Select(MapToDto).Where(dto => dto is not null).ToList();
+            return ServiceResult<IEnumerable<UserDto>>.Success(dtos!);
+        }
+
+        public async Task<ServiceResult<PagedResult<UserDto>>> GetPagedAsync(PaginationRequest request)
+        {
+            var (items, totalCount) = await _userRepository.GetPagedAsync(request.PageNumber, request.PageSize);
+            var dtoList = items.Select(MapToDto).Where(dto => dto is not null).ToList();
+            var result = new PagedResult<UserDto> { Items = dtoList!, TotalCount = totalCount, PageNumber = request.PageNumber, PageSize = request.PageSize };
+            return ServiceResult<PagedResult<UserDto>>.Success(result);
+        }
+
+        public async Task<ServiceResult<UserDto>> CreateAsync(CreateUserRequest request)
+        {
+            var validation = await ValidateCreateAsync(request);
+            if (!validation.IsSuccess || !validation.Data) return ServiceResult<UserDto>.Failure(validation.ErrorMessage ?? "Validation failed.");
+
+            var newUser = new User
+            {
+                Email = request.Email,
+                Username = request.Username,
+                DisplayName = request.DisplayName,
+                Status = UserStatus.Active
+            };
+
+            var createdUser = await _userRepository.AddAsync(newUser);
+            return ServiceResult<UserDto>.Success(MapToDto(createdUser)!);
+        }
+
+        public async Task<ServiceResult<UserDto>> UpdateAsync(Guid id, UpdateUserRequest request)
+        {
+            var validation = await ValidateUpdateAsync(id, request);
+            if (!validation.IsSuccess || !validation.Data) return ServiceResult<UserDto>.Failure(validation.ErrorMessage ?? "Validation failed.");
+
+            var userToUpdate = await _userRepository.GetByIdAsync(id);
+            if (userToUpdate == null) return ServiceResult<UserDto>.Failure("User not found.");
+
+            userToUpdate.DisplayName = request.DisplayName;
+            if (request.Status.HasValue) userToUpdate.Status = request.Status.Value;
+            if (request.IsTwoFactorEnabled.HasValue) userToUpdate.IsTwoFactorEnabled = request.IsTwoFactorEnabled.Value;
+
+            await _userRepository.UpdateAsync(userToUpdate);
+            return ServiceResult<UserDto>.Success(MapToDto(userToUpdate)!);
+        }
+
+        public async Task<ServiceResult> DeleteAsync(Guid id)
+        {
+            await _userRepository.SoftDeleteAsync(id);
+            return ServiceResult.Success();
+        }
+
+        public async Task<ServiceResult<bool>> ExistsAsync(Guid id)
+        {
+            var exists = await _userRepository.ExistsAsync(id);
+            return ServiceResult<bool>.Success(exists);
+        }
+
+        public async Task<ServiceResult<int>> CountAsync()
+        {
+            var count = await _userRepository.CountAsync();
+            return ServiceResult<int>.Success(count);
+        }
+
+        public async Task<ServiceResult<IEnumerable<UserDto>>> CreateBulkAsync(IEnumerable<CreateUserRequest> requests)
+        {
+            var newUsers = new List<User>();
+            foreach (var request in requests)
+            {
+                 newUsers.Add(new User { Email = request.Email, Username = request.Username, DisplayName = request.DisplayName, Status = UserStatus.Active });
+            }
+            await _userRepository.AddRangeAsync(newUsers);
+            return ServiceResult<IEnumerable<UserDto>>.Success(newUsers.Select(MapToDto).Where(dto => dto is not null)!);
+        }
+
+        public async Task<ServiceResult<IEnumerable<UserDto>>> UpdateBulkAsync(IEnumerable<(Guid Id, UpdateUserRequest Request)> updates)
+        {
+            var updatedUsers = new List<User>();
+            foreach (var (id, request) in updates)
+            {
+                var user = await _userRepository.GetByIdAsync(id);
+                if (user != null)
+                {
+                    user.DisplayName = request.DisplayName;
+                    if (request.Status.HasValue) user.Status = request.Status.Value;
+                    if (request.IsTwoFactorEnabled.HasValue) user.IsTwoFactorEnabled = request.IsTwoFactorEnabled.Value;
+                    updatedUsers.Add(user);
+                }
+            }
+            await _userRepository.UpdateRangeAsync(updatedUsers);
+            return ServiceResult<IEnumerable<UserDto>>.Success(updatedUsers.Select(MapToDto).Where(dto => dto is not null)!);
+        }
+
+        public async Task<ServiceResult> DeleteBulkAsync(IEnumerable<Guid> ids)
+        {
+            foreach (var id in ids) { await _userRepository.SoftDeleteAsync(id); }
+            return ServiceResult.Success();
+        }
+
+        public async Task<ServiceResult<bool>> ValidateCreateAsync(CreateUserRequest request)
+        {
+            var emailAvailable = await IsEmailAvailableAsync(request.Email);
+            if (!emailAvailable.IsSuccess || !emailAvailable.Data) return ServiceResult<bool>.Failure(emailAvailable.ErrorMessage ?? "Email is already in use.");
+            
+            if (!string.IsNullOrEmpty(request.Username))
+            {
+                var usernameAvailable = await IsUsernameAvailableAsync(request.Username);
+                if (!usernameAvailable.IsSuccess || !usernameAvailable.Data) return ServiceResult<bool>.Failure(usernameAvailable.ErrorMessage ?? "Username is already in use.");
+            }
+            return ServiceResult<bool>.Success(true);
+        }
+
+        public async Task<ServiceResult<bool>> ValidateUpdateAsync(Guid id, UpdateUserRequest request)
+        {
+            var userExists = await _userRepository.ExistsAsync(id);
+            if (!userExists) return ServiceResult<bool>.Failure("User does not exist.");
+            return ServiceResult<bool>.Success(true);
+        }
+
+        #endregion
+
+        #region IUserService Specific Implementations
+        
+        public async Task<ServiceResult<UserDto>> GetByEmailAsync(string email)
+        {
+            var user = await _userRepository.GetByEmailAsync(email);
+            if (user == null) return ServiceResult<UserDto>.Failure("User not found.");
+            return ServiceResult<UserDto>.Success(MapToDto(user)!);
+        }
+
+        public async Task<ServiceResult<UserDto>> GetByUsernameAsync(string username)
+        {
+            var user = await _userRepository.GetByUsernameAsync(username);
+            if (user == null) return ServiceResult<UserDto>.Failure("User not found.");
+            return ServiceResult<UserDto>.Success(MapToDto(user)!);
+        }
+
+        public async Task<ServiceResult<UserDto>> GetByExternalIdAsync(string externalSystemType, string externalUserId)
+        {
+            var user = await _userRepository.GetByExternalIdAsync(externalSystemType, externalUserId);
+            if (user == null) return ServiceResult<UserDto>.Failure("External user not found.");
+            return ServiceResult<UserDto>.Success(MapToDto(user)!);
+        }
+
+        public async Task<ServiceResult<PagedResult<UserDto>>> SearchUsersAsync(SearchUserRequest request)
+        {
+            var pagedResult = await _userRepository.SearchAsync(request);
+            var dtoList = pagedResult.Items.Select(MapToDto).Where(dto => dto is not null).ToList();
+            var pagedDtoResult = new PagedResult<UserDto> { Items = dtoList!, PageNumber = pagedResult.PageNumber, PageSize = pagedResult.PageSize, TotalCount = pagedResult.TotalCount };
+            return ServiceResult<PagedResult<UserDto>>.Success(pagedDtoResult);
+        }
+        
+        public async Task<ServiceResult<UserDto>> CreateOrGetByExternalAsync(ExternalUserRequest request)
+        {
+            var user = await _userRepository.GetByExternalIdAsync(request.ExternalSystemType, request.ExternalUserId);
+            if (user != null) return ServiceResult<UserDto>.Success(MapToDto(user)!);
+            
+            if (string.IsNullOrEmpty(request.Email))
+                return ServiceResult<UserDto>.Failure("Email is required for external user creation.");
+
+            var createUserRequest = new CreateUserRequest 
+            { 
+                Email = request.Email, 
+                DisplayName = request.DisplayName, 
+                ExternalSystemType = request.ExternalSystemType, 
+                ExternalUserId = request.ExternalUserId, 
+                Username = request.Email
+            };
+            return await CreateAsync(createUserRequest);
+        }
+
+        public async Task<ServiceResult<bool>> IsEmailAvailableAsync(string email, Guid? excludeUserId = null)
+        {
+            var isTaken = await _userRepository.IsEmailExistsAsync(email, excludeUserId);
+            return ServiceResult<bool>.Success(!isTaken);
+        }
+
+        public async Task<ServiceResult<bool>> IsUsernameAvailableAsync(string username, Guid? excludeUserId = null)
+        {
+            if (string.IsNullOrEmpty(username)) return ServiceResult<bool>.Success(true);
+            var isTaken = await _userRepository.IsUsernameExistsAsync(username, excludeUserId);
+            return ServiceResult<bool>.Success(!isTaken);
+        }
+
+        #endregion
+
+        private UserDto? MapToDto(User? user)
+        {
+            if (user == null) return null;
+
+            return new UserDto
+            {
+                Id = user.Id,
+                Email = user.Email,
+                Username = user.Username,
+                DisplayName = user.DisplayName,
+                Status = user.Status,
+                EmailVerified = user.IsEmailVerified,
+                IsTwoFactorEnabled = user.IsTwoFactorEnabled,
+                LastLoginAt = user.LastLoginAt,
+                LastLoginIp = user.LastLoginIp,
+                CreatedAt = user.CreatedAt,
+                // UpdatedAt이 null일 경우, 대신 CreatedAt 값을 사용하도록 수정
+                UpdatedAt = user.UpdatedAt ?? user.CreatedAt,
+                ExternalSystemType = user.ExternalSystemType,
+                ExternalUserId = user.ExternalUserId
+            };
+        }
+    }
+}

@@ -94,7 +94,7 @@ CREATE TABLE auth."Users" (
     "ExternalUserId" varchar,
     "ExternalSystemType" varchar,
     "EmailVerified" boolean NOT NULL,
-    "TwoFactorEnabled" boolean NOT NULL,
+    "IsTwoFactorEnabled" boolean NOT NULL,
     "LastLoginAt" timestamp with time zone,
     "IsDeleted" boolean NOT NULL,
     "DeletedAt" timestamp with time zone,
