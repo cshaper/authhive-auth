@@ -39,7 +39,7 @@ namespace AuthHive.Auth.Services.Authentication
         public Task InitializeAsync() => Task.CompletedTask;
 
         // Session 엔티티를 받는 버전 (기존 호환성)
-        public string GenerateToken(ConnectedId connectedId, Session session)
+        public string GenerateToken(ConnectedId connectedId, SessionEntity session)
         {
             var tokenResult = _tokenProvider.GenerateAccessTokenAsync(
                 session.UserId,

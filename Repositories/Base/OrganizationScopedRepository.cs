@@ -10,7 +10,7 @@ namespace AuthHive.Auth.Repositories.Base
     /// <summary>
     /// 조직 스코프 Repository 기본 구현
     /// </summary>
-    public class OrganizationScopedRepository<TEntity> : Repository<TEntity>, IOrganizationScopedRepository<TEntity> 
+    public class OrganizationScopedRepository<TEntity> : BaseRepository<TEntity>, IOrganizationScopedRepository<TEntity> 
         where TEntity : OrganizationScopedEntity
     {
         public OrganizationScopedRepository(AuthDbContext context) : base(context) { }

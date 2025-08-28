@@ -12,7 +12,7 @@ namespace AuthHive.Auth.Controllers.v1
     [Produces("application/json")]
     public class AuthController : ControllerBase
     {
-        private readonly IAuthenticationService _authService;
+    
         private readonly ILogger<AuthController> _logger;
 
         public AuthController(IAuthenticationService authService, ILogger<AuthController> logger)

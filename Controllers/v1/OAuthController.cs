@@ -11,13 +11,12 @@ namespace AuthHive.Auth.Controllers
     [Route("auth")]
     public class OAuthController : ControllerBase
     {
-        private readonly IAuthenticationService _authService;
+
         private readonly IConfiguration _configuration;
         private readonly ILogger<OAuthController> _logger;
         private readonly HttpClient _httpClient;
 
         public OAuthController(
-            IAuthenticationService authService,
             IConfiguration configuration,
             ILogger<OAuthController> logger,
             IHttpClientFactory httpClientFactory)
