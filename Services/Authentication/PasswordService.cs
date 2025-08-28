@@ -15,6 +15,7 @@ using AuthHive.Core.Models.Auth.ConnectedId.Requests;
 using AuthHive.Core.Models.Auth.Session.Requests;
 using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Enums.Core;
+using Microsoft.Extensions.Logging;
 // PasswordAuthenticationService.cs 상단에 추가
 
 

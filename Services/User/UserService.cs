@@ -6,6 +6,7 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Common.Requests;
 using AuthHive.Core.Models.User;
 using AuthHive.Core.Models.User.Requests;
+using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Core.UserEnums;
 
 namespace AuthHive.Auth.Services

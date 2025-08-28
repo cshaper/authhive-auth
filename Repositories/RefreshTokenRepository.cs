@@ -2,6 +2,7 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using System.Linq.Expressions;
 
 namespace AuthHive.Auth.Repositories

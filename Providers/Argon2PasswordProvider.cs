@@ -5,7 +5,8 @@ using System.Security.Cryptography;
 using System.Text;
 using AuthHive.Core.Interfaces.User.Repository; // IUserRepository 사용
 using AuthHive.Core.Interfaces.Base; // IUnitOfWork 사용
-using AuthHive.Core.Entities.User; // User 엔티티 사용
+using AuthHive.Core.Entities.User;
+using Microsoft.Extensions.Logging; // User 엔티티 사용
 
 namespace AuthHive.Auth.Providers
 {

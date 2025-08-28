@@ -10,6 +10,7 @@ using System.Security.Cryptography;
 using System.Text;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Enums.Auth;
+using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Services.Authentication
 {
