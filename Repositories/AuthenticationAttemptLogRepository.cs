@@ -18,7 +18,7 @@ namespace AuthHive.Auth.Repositories
     /// AuthenticationAttemptLog는 AuditableEntity를 직접 상속받으므로
     /// Repository를 직접 상속합니다.
     /// </summary>
-    public class AuthenticationAttemptLogRepository : Repository<AuthenticationAttemptLog>, 
+    public class AuthenticationAttemptLogRepository : BaseRepository<AuthenticationAttemptLog>, 
         IAuthenticationAttemptLogRepository
     {
         private readonly ILogger<AuthenticationAttemptLogRepository> _logger;

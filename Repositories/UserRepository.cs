@@ -11,7 +11,7 @@ using AuthHive.Core.Entities.Auth;
 
 namespace AuthHive.Auth.Repositories
 {
-    public class UserRepository : Repository<User>, IUserRepository
+    public class UserRepository : BaseRepository<User>, IUserRepository
     {
         // 부모 클래스에서 이미 _context와 _dbSet이 정의되어 있으므로 제거
         // private readonly AuthDbContext _context; // 제거

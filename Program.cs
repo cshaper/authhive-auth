@@ -1,11 +1,14 @@
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Auth.Provider;
+using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Auth.Services.Authentication;
+using AuthHive.Auth.Repositories;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using Serilog;
-using AuthHive.Core.Interfaces.User.Repository;
-using AuthHive.Auth.Repositories;
+using AuthHive.Auth.Services.Session;
 
 // Serilog 설정
 Log.Logger = new LoggerConfiguration()
@@ -27,16 +30,23 @@ try
     builder.Services.AddSwaggerGen();
     builder.Services.AddHttpClient();
     
-    // Token Service (PASETO)
-    builder.Services.AddSingleton<ITokenService, TokenService>();
-    builder.Services.AddScoped<IUserRepository, UserRepository>();
-    // Authentication Service 등록
-    builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
-
+    // Memory Cache 추가
+    builder.Services.AddMemoryCache();
+    
     // Database
     builder.Services.AddDbContext<AuthDbContext>(options =>
         options.UseNpgsql(builder.Configuration.GetConnectionString("AuthDb")));
 
+    // Repositories
+    builder.Services.AddScoped<IUserRepository, UserRepository>();
+    builder.Services.AddScoped<ISessionRepository, SessionRepository>(); 
+    builder.Services.AddScoped<IConnectedIdRepository, ConnectedIdRepository>();
+    
+    // Services - ITokenProvider 구현 필요 시 임시로 주석 처리
+    // builder.Services.AddSingleton<ITokenProvider, TokenProvider>();
+    builder.Services.AddSingleton<ITokenService, TokenService>();
+    builder.Services.AddScoped<ISessionService, SessionService>();
+    
     // Redis
     builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
     {

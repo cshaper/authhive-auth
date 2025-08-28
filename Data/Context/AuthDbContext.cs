@@ -19,7 +19,7 @@ namespace AuthHive.Auth.Data.Context
         public DbSet<ConnectedId> ConnectedIds { get; set; }
         public DbSet<ConnectedIdContext> ConnectedIdContexts { get; set; }
         public DbSet<ConnectedIdRole> ConnectedIdRoles { get; set; }
-        public DbSet<Session> Sessions { get; set; }
+        public DbSet<SessionEntity> Sessions { get; set; }
         public DbSet<SessionActivityLog> SessionActivityLogs { get; set; }
         
         // 권한 관리
@@ -153,7 +153,7 @@ namespace AuthHive.Auth.Data.Context
                 .HasIndex(c => new { c.UserId, c.OrganizationId })
                 .IsUnique();
 
-            modelBuilder.Entity<Session>()
+            modelBuilder.Entity<SessionEntity>()
                 .HasIndex(s => s.SessionToken)
                 .IsUnique();
 
