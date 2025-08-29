@@ -9,6 +9,10 @@ using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using Serilog;
 using AuthHive.Auth.Services.Session;
+using AuthHive.Auth.Providers;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Auth.Data;
+using AuthHive.Auth.Services.Context;
 
 // Serilog 설정
 Log.Logger = new LoggerConfiguration()
@@ -41,12 +45,18 @@ try
     builder.Services.AddScoped<IUserRepository, UserRepository>();
     builder.Services.AddScoped<ISessionRepository, SessionRepository>(); 
     builder.Services.AddScoped<IConnectedIdRepository, ConnectedIdRepository>();
+    builder.Services.AddScoped<IOrganizationContext, OrganizationContext>();
+    builder.Services.AddScoped<IConnectedIdContext, ConnectedIdContext>();
     
-    // Services - ITokenProvider 구현 필요 시 임시로 주석 처리
-    // builder.Services.AddSingleton<ITokenProvider, TokenProvider>();
-    builder.Services.AddSingleton<ITokenService, TokenService>();
     builder.Services.AddScoped<ISessionService, SessionService>();
-    
+    //Provider 등록 
+    builder.Services.AddScoped<ITokenProvider, PasetoTokenProvider>();
+    builder.Services.AddSingleton<ITokenService, TokenService>();
+    builder.Services.AddScoped<IPasswordProvider, Argon2PasswordProvider>();
+    builder.Services.AddScoped<ISessionRepository, SessionRepository>();
+    builder.Services.AddScoped<ISessionActivityLogRepository, SessionActivityLogRepository>();
+    builder.Services.AddScoped<IOAuthTokenRepository, OAuthTokenRepository>();
+    builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
     // Redis
     builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
     {
