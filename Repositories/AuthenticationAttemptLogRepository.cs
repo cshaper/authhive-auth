@@ -18,14 +18,14 @@ namespace AuthHive.Auth.Repositories
     /// AuthenticationAttemptLog는 AuditableEntity를 직접 상속받으므로
     /// Repository를 직접 상속합니다.
     /// </summary>
-    public class AuthenticationAttemptLogRepository : BaseRepository<AuthenticationAttemptLog>, 
+    public class AuthenticationAttemptLogRepository : BaseRepository<AuthenticationAttemptLog>,
         IAuthenticationAttemptLogRepository
     {
         private readonly ILogger<AuthenticationAttemptLogRepository> _logger;
 
         public AuthenticationAttemptLogRepository(
             AuthDbContext context,
-            ILogger<AuthenticationAttemptLogRepository> logger) 
+            ILogger<AuthenticationAttemptLogRepository> logger)
             : base(context)
         {
             _logger = logger;
@@ -37,13 +37,39 @@ namespace AuthHive.Auth.Repositories
         /// 사용자의 최근 인증 시도 조회
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetRecentAttemptsAsync(
-            Guid userId, 
+            Guid userId,
             int count = 10)
         {
             return await _dbSet
                 .Where(x => x.UserId == userId && !x.IsDeleted)
                 .OrderByDescending(x => x.AttemptedAt)
                 .Take(count)
+                .ToListAsync();
+        }
+
+        /// <summary>
+        /// 특정 사용자의 인증 기록을 기간별로 조회합니다. (MFA 히스토리용)
+        /// </summary>
+        public async Task<IEnumerable<AuthenticationAttemptLog>> GetHistoryForUserAsync(
+            Guid userId,
+            DateTime? startDate,
+            DateTime? endDate)
+        {
+            var query = _dbSet
+                .Where(log => log.UserId == userId && !log.IsDeleted);
+
+            if (startDate.HasValue)
+            {
+                query = query.Where(log => log.AttemptedAt >= startDate.Value);
+            }
+
+            if (endDate.HasValue)
+            {
+                query = query.Where(log => log.AttemptedAt <= endDate.Value);
+            }
+
+            return await query
+                .OrderByDescending(log => log.AttemptedAt)
                 .ToListAsync();
         }
 
@@ -55,7 +81,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? since = null)
         {
             var query = _dbSet.Where(x => x.Username == username && !x.IsDeleted);
-            
+
             if (since.HasValue)
             {
                 query = query.Where(x => x.AttemptedAt >= since.Value);
@@ -164,9 +190,9 @@ namespace AuthHive.Auth.Repositories
             DateTime since)
         {
             return await _dbSet
-                .CountAsync(x => 
-                    x.UserId == userId && 
-                    !x.IsSuccess && 
+                .CountAsync(x =>
+                    x.UserId == userId &&
+                    !x.IsSuccess &&
                     x.AttemptedAt >= since &&
                     !x.IsDeleted);
         }
@@ -223,9 +249,9 @@ namespace AuthHive.Auth.Repositories
             AuthenticationResult reason,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => 
-                x.FailureReason == reason && 
-                !x.IsSuccess && 
+            var query = _dbSet.Where(x =>
+                x.FailureReason == reason &&
+                !x.IsSuccess &&
                 !x.IsDeleted);
 
             if (since.HasValue)
@@ -242,8 +268,8 @@ namespace AuthHive.Auth.Repositories
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetLockTriggerAttemptsAsync(
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => 
-                x.TriggeredAccountLock && 
+            var query = _dbSet.Where(x =>
+                x.TriggeredAccountLock &&
                 !x.IsDeleted);
 
             if (since.HasValue)
@@ -287,9 +313,9 @@ namespace AuthHive.Auth.Repositories
             int threshold = 5)
         {
             var attempts = await _dbSet
-                .Where(x => 
-                    x.AttemptedAt >= since && 
-                    !x.IsSuccess && 
+                .Where(x =>
+                    x.AttemptedAt >= since &&
+                    !x.IsSuccess &&
                     !x.IsDeleted)
                 .GroupBy(x => new { x.IpAddress, x.Username })
                 .Select(g => new BruteForcePattern
@@ -372,9 +398,9 @@ namespace AuthHive.Auth.Repositories
             DateTime to,
             Guid? organizationId = null)
         {
-            var query = _dbSet.Where(x => 
-                x.AttemptedAt >= from && 
-                x.AttemptedAt <= to && 
+            var query = _dbSet.Where(x =>
+                x.AttemptedAt >= from &&
+                x.AttemptedAt <= to &&
                 !x.IsDeleted);
 
             if (organizationId.HasValue)
@@ -387,8 +413,8 @@ namespace AuthHive.Auth.Repositories
                 TotalAttempts = attempts.Count,
                 SuccessfulAttempts = attempts.Count(x => x.IsSuccess),
                 FailedAttempts = attempts.Count(x => !x.IsSuccess),
-                SuccessRate = attempts.Any() 
-                    ? (double)attempts.Count(x => x.IsSuccess) / attempts.Count 
+                SuccessRate = attempts.Any()
+                    ? (double)attempts.Count(x => x.IsSuccess) / attempts.Count
                     : 0,
                 AttemptsByMethod = attempts
                     .GroupBy(x => x.Method)
@@ -410,8 +436,8 @@ namespace AuthHive.Auth.Repositories
             var startDate = date.Date;
             var endDate = startDate.AddDays(1);
 
-            var query = _dbSet.Where(x => 
-                x.AttemptedAt >= startDate && 
+            var query = _dbSet.Where(x =>
+                x.AttemptedAt >= startDate &&
                 x.AttemptedAt < endDate &&
                 !x.IsDeleted);
 
@@ -591,7 +617,7 @@ namespace AuthHive.Auth.Repositories
         #region Private Helper Methods
 
         private async Task<IEnumerable<AnomalyPattern>> DetectMultipleIpAccessAsync(
-            Guid? userId, 
+            Guid? userId,
             DateTime? since)
         {
             var query = _dbSet.Where(x => !x.IsDeleted);

@@ -15,7 +15,7 @@ namespace AuthHive.Auth.Repositories
     {
         // 부모 클래스에서 이미 _context와 _dbSet이 정의되어 있으므로 제거
         // private readonly AuthDbContext _context; // 제거
-        
+
         public UserRepository(AuthDbContext context) : base(context)
         {
             // base 생성자가 _context와 _dbSet을 초기화함
@@ -28,7 +28,12 @@ namespace AuthHive.Auth.Repositories
             var query = includeDeleted ? _dbSet : _dbSet.Where(u => !u.IsDeleted);
             return await query.FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
         }
-
+        public async Task<User?> GetByIdWithProfileAsync(Guid userId, CancellationToken cancellationToken = default)
+        {
+            return await _dbSet
+                .Include(u => u.UserProfile) // UserProfile을 함께 로드(JOIN)하도록 지정
+                .FirstOrDefaultAsync(u => u.Id == userId && !u.IsDeleted, cancellationToken);
+        }
         public async Task<User?> GetByUsernameAsync(string username, bool includeDeleted = false, CancellationToken cancellationToken = default)
         {
             var query = includeDeleted ? _dbSet : _dbSet.Where(u => !u.IsDeleted);
@@ -57,10 +62,10 @@ namespace AuthHive.Auth.Repositories
             // 검색 조건 적용
             if (!string.IsNullOrWhiteSpace(request.SearchKeyword))
             {
-                query = query.Where(u => 
-                    u.Username !=null && u.Username.Contains(request.SearchKeyword) ||
-                    u.Email !=null && u.Email.Contains(request.SearchKeyword) ||
-                    u.DisplayName!=null && u.DisplayName.Contains(request.SearchKeyword));
+                query = query.Where(u =>
+                    u.Username != null && u.Username.Contains(request.SearchKeyword) ||
+                    u.Email != null && u.Email.Contains(request.SearchKeyword) ||
+                    u.DisplayName != null && u.DisplayName.Contains(request.SearchKeyword));
             }
 
             var totalCount = await query.CountAsync(cancellationToken);
@@ -79,10 +84,10 @@ namespace AuthHive.Auth.Repositories
         }
 
         public async Task<PagedResult<User>> GetByOrganizationAsync(
-            Guid organizationId, 
-            UserStatus? status = null, 
-            int pageNumber = 1, 
-            int pageSize = 50, 
+            Guid organizationId,
+            UserStatus? status = null,
+            int pageNumber = 1,
+            int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
             var query = _dbSet
@@ -121,7 +126,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<bool> IsEmailExistsAsync(string email, Guid? excludeUserId = null, CancellationToken cancellationToken = default)
         {
             var query = _dbSet.Where(u => !u.IsDeleted && u.Email == email);
-            
+
             if (excludeUserId.HasValue)
             {
                 query = query.Where(u => u.Id != excludeUserId.Value);
@@ -133,7 +138,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<bool> IsUsernameExistsAsync(string username, Guid? excludeUserId = null, CancellationToken cancellationToken = default)
         {
             var query = _dbSet.Where(u => !u.IsDeleted && u.Username == username);
-            
+
             if (excludeUserId.HasValue)
             {
                 query = query.Where(u => u.Id != excludeUserId.Value);
@@ -229,7 +234,7 @@ namespace AuthHive.Auth.Repositories
             var user = await _dbSet
                 .Where(u => (u.Username == identifier || u.Email == identifier) && !u.IsDeleted)
                 .FirstOrDefaultAsync();
-            
+
             return user?.Id;
         }
 
@@ -244,7 +249,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<IEnumerable<User>> GetInactiveUsersAsync(int inactiveDays, int limit = 100, CancellationToken cancellationToken = default)
         {
             var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
-            
+
             return await _dbSet
                 .Where(u => !u.IsDeleted && (u.LastLoginAt == null || u.LastLoginAt < cutoffDate))
                 .Take(limit)

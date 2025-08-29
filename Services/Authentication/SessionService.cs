@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Session;
 using AuthHive.Core.Models.Auth.Session.Cache;
 using AuthHive.Core.Models.Auth.Session.Common;
@@ -1556,10 +1557,10 @@ namespace AuthHive.Auth.Services.Session
             return await Task.FromResult(ServiceResult.Success());
         }
 
-        public async Task<ServiceResult<IEnumerable<TrustedDevice>>> GetTrustedDevicesAsync(Guid connectedId)
+        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid connectedId)
         {
             // TODO: Implementation
-            return await Task.FromResult(ServiceResult<IEnumerable<TrustedDevice>>.Success(new List<TrustedDevice>()));
+            return await Task.FromResult(ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(new List<TrustedDeviceDto>()));
         }
 
         public async Task<ServiceResult> RevokeTrustedDeviceAsync(Guid deviceId)
