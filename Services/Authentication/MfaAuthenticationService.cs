@@ -21,6 +21,7 @@ using UserEntity = AuthHive.Core.Entities.User.User;
 using UserProfileEntity = AuthHive.Core.Entities.User.UserProfile;
 using MfaBypassTokenEntity = AuthHive.Core.Entities.Auth.MfaBypassToken;
 using MfaBypassTokenDto = AuthHive.Core.Models.Auth.Authentication.Common.MfaBypassToken;
+using AuthHive.Core.Constants.Auth;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -911,7 +912,7 @@ namespace AuthHive.Auth.Services.Authentication
                 IsSuccess = false,
                 FailureReason = Enum.Parse<AuthHive.Core.Enums.Auth.AuthenticationResult>(reason, true),
                 AttemptedAt = DateTime.UtcNow,
-                IpAddress = "::1" // Placeholder: Should get from HttpContext
+                IpAddress = CommonDefaults.DefaultLocalIpV6// Placeholder: Should get from HttpContext
             };
             await _logRepository.AddAsync(log);
         }
@@ -935,10 +936,18 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 서비스의 상태를 확인하는 헬스 체크 메서드입니다.
         /// </summary>
-        public Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync()
         {
-            // TODO: 실제 운영 환경에서는 DB 연결 등 주요 의존성의 상태를 확인하는 로직 추가
-            return Task.FromResult(true);
+            try
+            {
+                await _userRepository.CountAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "MfaAuthenticationService health check failed");
+                return false;
+            }
         }
 
         /// <summary>

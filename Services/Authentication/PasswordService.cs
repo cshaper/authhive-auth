@@ -16,6 +16,7 @@ using AuthHive.Core.Models.Auth.Session.Requests;
 using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Enums.Core;
 using Microsoft.Extensions.Logging;
+using AuthHive.Core.Constants.Auth;
 // PasswordAuthenticationService.cs 상단에 추가
 
 
@@ -44,13 +45,24 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         // IService 구현
-        public Task<bool> IsHealthyAsync() => Task.FromResult(true);
+        public async Task<bool> IsHealthyAsync()
+        {
+            try
+            {
+                return await _context.Database.CanConnectAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PasswordService health check failed");
+                return false;
+            }
+        }
         public Task InitializeAsync() => Task.CompletedTask;
 
         // 회원가입
         public async Task<ServiceResult<AuthenticationResponse>> RegisterAsync(
-            string email, 
-            string password, 
+            string email,
+            string password,
             string displayName,
             Guid? organizationId = null)
         {
@@ -84,7 +96,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // ConnectedId 생성 (조직이 없으면 개인 조직 생성)
                 var targetOrgId = organizationId ?? await GetOrCreatePersonalOrganizationId(user.Id);
-                
+
                 var connectedIdRequest = new CreateConnectedIdRequest
                 {
                     UserId = user.Id,
@@ -103,8 +115,8 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     ConnectedId = connectedIdResult.Data.Id,
                     OrganizationId = targetOrgId,
-                    IPAddress = "127.0.0.1", // TODO: 실제 IP 가져오기
-                    UserAgent = "registration"
+                    IPAddress = CommonDefaults.DefaultLocalIpV4,
+                    UserAgent = CommonDefaults.RegistrationUserAgent
                 };
 
                 var sessionResult = await _sessionService.CreateSessionAsync(sessionRequest);
@@ -169,8 +181,8 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     ConnectedId = connectedId.Id,
                     OrganizationId = targetOrgId,
-                    IPAddress = "127.0.0.1", // TODO: 실제 IP
-                    UserAgent = "password-auth"
+                    IPAddress = CommonDefaults.DefaultLocalIpV4, // TODO: 실제 IP
+                    UserAgent = CommonDefaults.PasswordAuthUserAgent
                 };
 
                 var sessionResult = await _sessionService.CreateSessionAsync(sessionRequest);
@@ -208,7 +220,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         // IPasswordService 메서드들
         public async Task<ServiceResult<PasswordResetToken>> RequestPasswordResetAsync(
-            string email, 
+            string email,
             Guid? organizationId = null)
         {
             try
@@ -247,8 +259,8 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         public async Task<ServiceResult> ChangePasswordAsync(
-            Guid userId, 
-            string currentPassword, 
+            Guid userId,
+            string currentPassword,
             string newPassword)
         {
             try
@@ -272,9 +284,9 @@ namespace AuthHive.Auth.Services.Authentication
 
                 user.PasswordHash = HashPassword(newPassword);
                 user.PasswordChangedAt = DateTime.UtcNow;
-                
+
                 await _context.SaveChangesAsync();
-                
+
                 return ServiceResult.Success("Password changed successfully");
             }
             catch (Exception ex)
@@ -285,7 +297,7 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         public async Task<ServiceResult<PasswordValidationResult>> ValidatePasswordAsync(
-            string password, 
+            string password,
             Guid? organizationId = null)
         {
             var result = new PasswordValidationResult
@@ -311,7 +323,7 @@ namespace AuthHive.Auth.Services.Authentication
 
             result.IsValid = result.Errors.Count == 0;
 
-            return result.IsValid 
+            return result.IsValid
                 ? ServiceResult<PasswordValidationResult>.Success(result)
                 : ServiceResult<PasswordValidationResult>.Failure(string.Join(", ", result.Errors));
         }
@@ -334,7 +346,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region Private Helper Methods
 
-        private bool VerifyPassword(string password, string hash) 
+        private bool VerifyPassword(string password, string hash)
             => HashPassword(password) == hash;
 
         private string HashPassword(string password)

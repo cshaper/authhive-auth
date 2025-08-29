@@ -31,50 +31,14 @@ namespace AuthHive.Auth.Services.Authentication
             _httpClient = httpClientFactory.CreateClient();
         }
 
-        /// <summary>
-        /// 기존 AuthenticateSocialAsync 메서드 (내부용)
-        /// </summary>
-        public async Task<ServiceResult<(User user, string? providerUserId, bool isNewUser)>>
-            AuthenticateSocialAsync(string provider, string token)
-        {
-            var validationResult = await ValidateSocialTokenAsync(provider, token);
-
-            if (!validationResult.isValid || string.IsNullOrEmpty(validationResult.email))
-            {
-                return ServiceResult<(User, string?, bool)>.Failure("Invalid social token.");
-            }
-
-            var user = await _context.Users
-                .FirstOrDefaultAsync(u => u.Email == validationResult.email);
-
-            bool isNewUser = false;
-
-            if (user == null)
-            {
-                user = new User
-                {
-                    Email = validationResult.email,
-                    DisplayName = validationResult.name ?? validationResult.email,
-                    Status = UserStatus.Active,
-                    EmailVerified = true
-                };
-
-                _context.Users.Add(user);
-                await _context.SaveChangesAsync();
-                isNewUser = true;
-            }
-
-            return ServiceResult<(User, string?, bool)>.Success(
-                (user, validationResult.providerUserId, isNewUser));
-        }
 
         /// <summary>
         /// ISocialAuthenticationService.AuthenticateWithSocialAsync 구현
         /// </summary>
         public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithSocialAsync(
-            string provider,
-            string token,
-            Guid? organizationId = null)
+    string provider,
+    string token,
+    Guid? organizationId = null)
         {
             try
             {
@@ -83,17 +47,35 @@ namespace AuthHive.Auth.Services.Authentication
                     provider,
                     organizationId);
 
-                // 토큰 검증 및 사용자 정보 가져오기
-                var authResult = await AuthenticateSocialAsync(provider, token);
+                // 기존 AuthenticateSocialAsync 로직을 여기에 직접 구현
+                var validationResult = await ValidateSocialTokenAsync(provider, token);
 
-                if (!authResult.IsSuccess)
+                if (!validationResult.isValid || string.IsNullOrEmpty(validationResult.email))
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure(authResult.Message ?? "Authentication failed");
+                    return ServiceResult<AuthenticationResponse>.Failure("Invalid social token.");
                 }
 
-                var (user, providerUserId, isNewUser) = authResult.Data;
+                var user = await _context.Users
+                    .FirstOrDefaultAsync(u => u.Email == validationResult.email);
 
-                // AuthenticationResponse 생성 (실제로는 세션과 토큰 생성 로직이 필요)
+                bool isNewUser = false;
+
+                if (user == null)
+                {
+                    user = new User
+                    {
+                        Email = validationResult.email,
+                        DisplayName = validationResult.name ?? validationResult.email,
+                        Status = UserStatus.Active,
+                        EmailVerified = true
+                    };
+
+                    _context.Users.Add(user);
+                    await _context.SaveChangesAsync();
+                    isNewUser = true;
+                }
+
+                // AuthenticationResponse 생성
                 var response = new AuthenticationResponse
                 {
                     Success = true,
@@ -101,7 +83,6 @@ namespace AuthHive.Auth.Services.Authentication
                     AuthenticationMethod = provider,
                     IsFirstLogin = isNewUser,
                     OrganizationId = organizationId
-                    // AccessToken과 RefreshToken은 TokenService를 통해 생성되어야 함
                 };
 
                 return ServiceResult<AuthenticationResponse>.Success(response);

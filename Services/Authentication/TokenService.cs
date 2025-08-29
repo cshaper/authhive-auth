@@ -11,6 +11,7 @@ using System.Text;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Enums.Auth;
 using Microsoft.Extensions.Logging;
+using AuthHive.Core.Constants.Auth;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -36,7 +37,19 @@ namespace AuthHive.Auth.Services.Authentication
             _logger = logger;
         }
 
-        public Task<bool> IsHealthyAsync() => Task.FromResult(true);
+        public async Task<bool> IsHealthyAsync()
+        {
+            try
+            {
+                await _tokenRepository.CountAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TokenService health check failed");
+                return false;
+            }
+        }
         public Task InitializeAsync() => Task.CompletedTask;
 
         // Session 엔티티를 받는 버전 (기존 호환성)
@@ -57,18 +70,12 @@ namespace AuthHive.Auth.Services.Authentication
             return tokenResult.Data.AccessToken;
         }
 
-        public async Task<TokenValidationResponse> ValidateToken(string token)
-        {
-            var result = await ValidateTokenAsync(token);
-            return result.Data ?? new TokenValidationResponse { IsValid = false };
-        }
-
         // SessionDto를 받는 버전
         public async Task<ServiceResult<TokenIssueResponse>> IssueTokensAsync(SessionDto sessionDto)
         {
             try
             {
-                var client = await _clientRepository.GetByClientIdAsync("default-client");
+                var client = await _clientRepository.GetByClientIdAsync(CommonDefaults.DefaultClientId);
                 if (client == null)
                 {
                     return ServiceResult<TokenIssueResponse>.Failure("Default OAuth client not found");
@@ -169,7 +176,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var sessionId = storedToken.SessionId ?? Guid.Empty;
                 var session = await _sessionRepository.GetByIdAsync(sessionId);
-                
+
                 if (session == null || session.Status != SessionStatus.Active)
                     return ServiceResult<TokenRefreshResponse>.Failure("Session is invalid");
 
@@ -194,7 +201,7 @@ namespace AuthHive.Auth.Services.Authentication
                     DateTime.UtcNow);
 
                 var newTokens = await IssueTokensAsync(sessionDto);
-                
+
                 if (!newTokens.IsSuccess || newTokens.Data == null)
                     return ServiceResult<TokenRefreshResponse>.Failure("Failed to issue new tokens");
 
@@ -218,7 +225,7 @@ namespace AuthHive.Auth.Services.Authentication
             try
             {
                 var validationResult = await _tokenProvider.ValidateTokenAsync(token);
-                
+
                 if (!validationResult.IsSuccess || validationResult.Data == null)
                 {
                     return ServiceResult<TokenValidationResponse>.Failure(
@@ -251,7 +258,7 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 var tokenHash = HashToken(refreshToken);
                 var storedToken = await _tokenRepository.GetRefreshTokenByHashAsync(tokenHash);
-                
+
                 if (storedToken != null)
                 {
                     await _tokenRepository.RevokeRefreshTokenAsync(
@@ -259,7 +266,7 @@ namespace AuthHive.Auth.Services.Authentication
                         "User requested revocation",
                         DateTime.UtcNow);
                 }
-                
+
                 return ServiceResult.Success();
             }
             catch (Exception ex)
@@ -276,7 +283,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var count = await _tokenRepository.RevokeAllTokensForConnectedIdAsync(
                     userId,
                     "User requested logout from all devices");
-                    
+
                 _logger.LogInformation("Revoked {Count} tokens for user {UserId}", count, userId);
                 return ServiceResult<int>.Success(count);
             }
