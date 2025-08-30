@@ -13,6 +13,7 @@ using AuthHive.Core.Enums.Auth;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Constants.Auth;
 
+
 namespace AuthHive.Auth.Services.Authentication
 {
     public class TokenService : ITokenService
@@ -53,16 +54,16 @@ namespace AuthHive.Auth.Services.Authentication
         public Task InitializeAsync() => Task.CompletedTask;
 
         // Session 엔티티를 받는 버전 (기존 호환성)
-        public string GenerateToken(ConnectedId connectedId, SessionEntity session)
+        public async Task<string> GenerateTokenAsync(AuthHive.Core.Entities.Auth.ConnectedId connectedId, SessionEntity session)
         {
-            var tokenResult = _tokenProvider.GenerateAccessTokenAsync(
+            var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
                 session.UserId,
                 session.ConnectedId ?? Guid.Empty,
                 new Dictionary<string, object>
                 {
                     ["session_id"] = session.Id.ToString(),
                     ["org_id"] = (session.OrganizationId ?? Guid.Empty).ToString()
-                }).GetAwaiter().GetResult();
+                });
 
             if (!tokenResult.IsSuccess || tokenResult.Data == null)
                 throw new InvalidOperationException("Failed to generate token");

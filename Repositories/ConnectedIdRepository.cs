@@ -110,9 +110,9 @@ namespace AuthHive.Auth.Repositories
             var stats = new ConnectedIdStatistics
             {
                 OrganizationId = organizationId,
-                TotalCount = await query.CountAsync(),
-                ActiveCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Active),
-                InactiveCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Inactive),
+                TotalMemberCount = await query.CountAsync(),
+                ActiveMemberCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Active),
+                InactiveMemberCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Inactive),
                 SuspendedCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Suspended),
                 PendingCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Pending)
             };
@@ -124,8 +124,8 @@ namespace AuthHive.Auth.Repositories
             stats.CountByMembershipType[MembershipType.Guest] = await query.CountAsync(c => c.MembershipType == MembershipType.Guest);
             
             // Status별 카운트
-            stats.CountByStatus[ConnectedIdStatus.Active] = stats.ActiveCount;
-            stats.CountByStatus[ConnectedIdStatus.Inactive] = stats.InactiveCount;
+            stats.CountByStatus[ConnectedIdStatus.Active] = stats.ActiveMemberCount;
+            stats.CountByStatus[ConnectedIdStatus.Inactive] = stats.InactiveMemberCount;
             stats.CountByStatus[ConnectedIdStatus.Suspended] = stats.SuspendedCount;
             stats.CountByStatus[ConnectedIdStatus.Pending] = stats.PendingCount;
             

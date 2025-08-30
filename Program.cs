@@ -13,6 +13,7 @@ using AuthHive.Auth.Providers;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Auth.Data;
 using AuthHive.Auth.Services.Context;
+using AuthHive.Auth.Middleware;
 
 // Serilog 설정
 Log.Logger = new LoggerConfiguration()
@@ -43,11 +44,9 @@ try
 
     // Repositories
     builder.Services.AddScoped<IUserRepository, UserRepository>();
-    builder.Services.AddScoped<ISessionRepository, SessionRepository>(); 
     builder.Services.AddScoped<IConnectedIdRepository, ConnectedIdRepository>();
     builder.Services.AddScoped<IOrganizationContext, OrganizationContext>();
     builder.Services.AddScoped<IConnectedIdContext, ConnectedIdContext>();
-    
     builder.Services.AddScoped<ISessionService, SessionService>();
     //Provider 등록 
     builder.Services.AddScoped<ITokenProvider, PasetoTokenProvider>();
@@ -85,10 +84,12 @@ try
         app.UseSwagger();
         app.UseSwaggerUI();
     }
-
+    app.UseMiddleware<ExceptionHandlingMiddleware>();
     app.UseSerilogRequestLogging();
     app.UseHttpsRedirection();
     app.UseCors("AllowAll");
+    app.UseMiddleware<PasetoAuthenticationMiddleware>();
+    app.UseMiddleware<TenantResolutionMiddleware>(); 
     app.UseAuthorization();
     app.MapControllers();
 

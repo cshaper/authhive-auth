@@ -39,7 +39,7 @@ namespace AuthHive.Auth.Services.Authentication
         {
             _userRepository = userRepository;
             _trustedDeviceService = trustedDeviceService;
-            _connectedIdService = connectedIdService; 
+            _connectedIdService = connectedIdService;
             _cache = cache;
             _logger = logger;
         }
@@ -61,14 +61,14 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // TODO: 실제로는 다음과 같은 서비스를 사용해야 함
                 // var connectedId = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId);
-                
+
                 // 임시 구현: userId를 ConnectedId로 사용 (1:1 매핑 가정)
                 // 실제 구현에서는 ConnectedId 테이블에서 조회해야 함
                 var connectedId = userId; // 임시 처리
-                
+
                 // 캐시에 저장 (5분)
                 _cache.Set(cacheKey, connectedId, TimeSpan.FromMinutes(5));
-                
+
                 return connectedId;
             }
             catch (Exception ex)
@@ -266,7 +266,13 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult.Failure("자동 잠금 정책은 필수입니다.");
                 }
 
-                // TODO: 실제 데이터베이스에 정책 저장
+                // TODO: 실제 데이터베이스에 정책 저장 - 비동기로 구현 예정
+                // await _dbContext.AutoLockPolicies.AddAsync(policy);
+                // await _dbContext.SaveChangesAsync();
+
+                // 현재는 캐시만 사용하므로 Task.CompletedTask 반환
+                await Task.CompletedTask;
+
                 var cacheKey = $"auto_lock_policy_{orgId}";
                 _cache.Set(cacheKey, policy, TimeSpan.FromHours(24));
 
@@ -279,13 +285,13 @@ namespace AuthHive.Auth.Services.Authentication
                 return ServiceResult.Failure("자동 잠금 정책 설정에 실패했습니다.");
             }
         }
-
         #endregion
 
         #region 패스워드 정책
 
         /// <summary>
-        /// 패스워드 정책 조회
+        /// 패스워드 정책 조회 - AuthHive 통합 구현
+        /// 조직별 정책 → 상위 조직 정책 → 시스템 기본 정책 순으로 조회
         /// </summary>
         public async Task<ServiceResult<PasswordPolicy>> GetPasswordPolicyAsync(Guid? organizationId = null)
         {
@@ -294,31 +300,22 @@ namespace AuthHive.Auth.Services.Authentication
                 var orgId = organizationId ?? Guid.Empty;
                 _logger.LogDebug("Getting password policy for organization {OrganizationId}", orgId);
 
-                // 캐시에서 패스워드 정책 확인
+                // 1. 캐시 확인 (성능 최적화)
                 var cacheKey = $"password_policy_{orgId}";
                 if (_cache.TryGetValue(cacheKey, out PasswordPolicy? cachedPolicy) && cachedPolicy != null)
                 {
                     return ServiceResult<PasswordPolicy>.Success(cachedPolicy);
                 }
 
-                // TODO: 실제 조직별 패스워드 정책 조회
-                var policy = new PasswordPolicy
-                {
-                    MinimumLength = 8,
-                    MaximumLength = 128,
-                    RequireUppercase = true,
-                    RequireLowercase = true,
-                    RequireNumbers = true,
-                    RequireSpecialCharacters = true,
-                    MinimumUniqueCharacters = 4,
-                    PasswordHistoryCount = 5,
-                    ExpirationDays = 90,
-                    PreventCommonPasswords = true,
-                    PreventUserInfoInPassword = true
-                };
+                // 2. AuthHive 계층적 정책 로딩 (조직 → 상위 → 시스템)
+                var policy = await LoadPasswordPolicyWithInheritanceAsync(orgId);
 
-                // 캐시에 저장 (1시간)
-                _cache.Set(cacheKey, policy, TimeSpan.FromHours(1));
+                // 3. 캐시에 저장 (AuthHive 성능 전략)
+                var cacheExpiry = policy.IsCustomPolicy ? TimeSpan.FromMinutes(30) : TimeSpan.FromHours(4);
+                _cache.Set(cacheKey, policy, cacheExpiry);
+
+                _logger.LogDebug("Password policy loaded for organization {OrganizationId}, IsCustom: {IsCustom}",
+                    orgId, policy.IsCustomPolicy);
 
                 return ServiceResult<PasswordPolicy>.Success(policy);
             }
@@ -330,32 +327,70 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         /// <summary>
-        /// 패스워드 정책 설정
+        /// AuthHive 계층적 상속 방식으로 패스워드 정책 로딩
         /// </summary>
-        public async Task<ServiceResult> SetPasswordPolicyAsync(Guid organizationId, PasswordPolicy policy)
+        private async Task<PasswordPolicy> LoadPasswordPolicyWithInheritanceAsync(Guid organizationId)
         {
-            try
+            // AuthHive v15 조직 계층 구조 지원
+            if (organizationId != Guid.Empty)
             {
-                _logger.LogInformation("Setting password policy for organization {OrganizationId}", organizationId);
+                // TODO: 실제 구현 시 OrganizationHierarchyService 사용
+                // var orgPolicy = await _organizationService.GetPasswordPolicyAsync(organizationId);
+                // if (orgPolicy != null) return orgPolicy;
 
-                if (policy == null)
-                {
-                    return ServiceResult.Failure("패스워드 정책은 필수입니다.");
-                }
-
-                // TODO: 실제 데이터베이스에 정책 저장
-                var cacheKey = $"password_policy_{organizationId}";
-                _cache.Set(cacheKey, policy, TimeSpan.FromHours(1));
-
-                return ServiceResult.Success("패스워드 정책이 설정되었습니다.");
+                // TODO: 상위 조직 정책 상속 확인
+                // var parentPolicy = await GetParentOrganizationPolicyAsync(organizationId);
+                // if (parentPolicy != null) return parentPolicy;
             }
-            catch (Exception ex)
+
+            // 비동기 시그니처 유지
+            await Task.CompletedTask;
+
+            // AuthHive 시스템 기본 정책 (PricingConstants 기반)
+            return new PasswordPolicy
             {
-                _logger.LogError(ex, "Failed to set password policy for organization {OrganizationId}", organizationId);
-                return ServiceResult.Failure("패스워드 정책 설정에 실패했습니다.");
-            }
+                MinimumLength = 8,
+                MaximumLength = 128,
+                RequireUppercase = true,
+                RequireLowercase = true,
+                RequireNumbers = true,
+                RequireSpecialCharacters = true,
+                MinimumUniqueCharacters = 4,
+                PasswordHistoryCount = 5,
+                ExpirationDays = 90,
+                PreventCommonPasswords = true,
+                PreventUserInfoInPassword = true,
+                IsCustomPolicy = false,
+                PolicySource = "SystemDefault"
+            };
         }
 
+
+        private async Task<PasswordPolicy> LoadPasswordPolicyFromSourceAsync(Guid organizationId)
+        {
+            // 현재는 기본 정책 반환, 향후 DB 조회로 변경 예정
+            await Task.CompletedTask; // 비동기 시그니처 유지
+
+            // TODO: 실제 구현
+            // return await _dbContext.PasswordPolicies
+            //     .FirstOrDefaultAsync(p => p.OrganizationId == organizationId) 
+            //     ?? GetDefaultPasswordPolicy();
+
+            return new PasswordPolicy
+            {
+                MinimumLength = 8,
+                MaximumLength = 128,
+                RequireUppercase = true,
+                RequireLowercase = true,
+                RequireNumbers = true,
+                RequireSpecialCharacters = true,
+                MinimumUniqueCharacters = 4,
+                PasswordHistoryCount = 5,
+                ExpirationDays = 90,
+                PreventCommonPasswords = true,
+                PreventUserInfoInPassword = true
+            };
+        }
         /// <summary>
         /// 패스워드 만료 확인
         /// </summary>
@@ -423,7 +458,138 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         #endregion
+        #region 패스워드 정책 설정
 
+        /// <summary>
+        /// 패스워드 정책 설정 - AuthHive 엔터프라이즈 정책 관리
+        /// Business 플랜 이상에서만 조직별 커스텀 정책 설정 가능
+        /// </summary>
+        public async Task<ServiceResult> SetPasswordPolicyAsync(Guid organizationId, PasswordPolicy policy)
+        {
+            try
+            {
+                _logger.LogInformation("Setting password policy for organization {OrganizationId}", organizationId);
+
+                // 1. 입력 검증 (AuthHive 보안 원칙)
+                var validationResult = ValidatePasswordPolicy(policy);
+                if (!validationResult.IsSuccess)
+                {
+                    return validationResult;
+                }
+
+                // 2. 조직 권한 확인 (AuthHive 멀티테넌시 보안)
+                var authorizationResult = await ValidateOrganizationPolicyPermissionAsync(organizationId);
+                if (!authorizationResult.IsSuccess)
+                {
+                    return authorizationResult;
+                }
+
+                // 3. AuthHive 정책 설정 및 캐싱
+                await SetPasswordPolicyWithCacheAsync(organizationId, policy);
+
+                _logger.LogInformation("Password policy successfully set for organization {OrganizationId}", organizationId);
+                return ServiceResult.Success("패스워드 정책이 성공적으로 설정되었습니다.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to set password policy for organization {OrganizationId}", organizationId);
+                return ServiceResult.Failure("패스워드 정책 설정에 실패했습니다.");
+            }
+        }
+
+        /// <summary>
+        /// 패스워드 정책 검증 - AuthHive 보안 기준
+        /// </summary>
+        private ServiceResult ValidatePasswordPolicy(PasswordPolicy policy)
+        {
+            if (policy == null)
+            {
+                return ServiceResult.Failure("패스워드 정책은 필수입니다.");
+            }
+
+            // AuthHive 최소 보안 기준 (PricingConstants 기반)
+            var violations = new List<string>();
+
+            if (policy.MinimumLength < 6)
+                violations.Add("최소 길이는 6자 이상이어야 합니다.");
+
+            if (policy.MaximumLength > 256)
+                violations.Add("최대 길이는 256자를 초과할 수 없습니다.");
+
+            if (policy.MinimumLength >= policy.MaximumLength)
+                violations.Add("최소 길이는 최대 길이보다 작아야 합니다.");
+
+            if (policy.PasswordHistoryCount < 0 || policy.PasswordHistoryCount > 24)
+                violations.Add("패스워드 히스토리는 0-24 범위여야 합니다.");
+
+            if (policy.ExpirationDays < 0 || policy.ExpirationDays > 365)
+                violations.Add("만료 기간은 0-365일 범위여야 합니다.");
+
+            if (violations.Any())
+            {
+                return ServiceResult.Failure($"정책 검증 실패: {string.Join(", ", violations)}");
+            }
+
+            return ServiceResult.Success();
+        }
+
+        /// <summary>
+        /// 조직 정책 설정 권한 확인 - AuthHive 플랜 기반 제어
+        /// </summary>
+        private async Task<ServiceResult> ValidateOrganizationPolicyPermissionAsync(Guid organizationId)
+        {
+            try
+            {
+                // TODO: 실제 구현 시 OrganizationService 및 SubscriptionService 사용
+                // var organization = await _organizationService.GetByIdAsync(organizationId);
+                // var subscription = await _subscriptionService.GetActiveSubscriptionAsync(organizationId);
+
+                // AuthHive 플랜별 정책 커스터마이징 권한 확인
+                // if (subscription.PlanType == PlanType.Basic || subscription.PlanType == PlanType.Pro)
+                // {
+                //     return ServiceResult.Failure("커스텀 패스워드 정책은 Business 플랜 이상에서 사용할 수 있습니다.");
+                // }
+
+                // 현재는 검증 통과 (향후 실제 구현)
+                await Task.CompletedTask;
+                return ServiceResult.Success();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to validate organization policy permission for {OrganizationId}", organizationId);
+                return ServiceResult.Failure("조직 권한 확인에 실패했습니다.");
+            }
+        }
+
+        /// <summary>
+        /// 패스워드 정책 저장 및 캐시 관리 - AuthHive 성능 최적화
+        /// </summary>
+        private async Task SetPasswordPolicyWithCacheAsync(Guid organizationId, PasswordPolicy policy)
+        {
+            // 정책에 AuthHive 메타데이터 설정
+            policy.OrganizationId = organizationId;
+            policy.IsCustomPolicy = true;
+            policy.PolicySource = "OrganizationCustom";
+
+            // TODO: 실제 데이터베이스 저장
+            // await _dbContext.PasswordPolicies.AddOrUpdateAsync(policy);
+            // await _dbContext.SaveChangesAsync();
+
+            // AuthHive 캐시 전략: 즉시 캐시 업데이트
+            var cacheKey = $"password_policy_{organizationId}";
+            _cache.Set(cacheKey, policy, TimeSpan.FromMinutes(30)); // 커스텀 정책은 짧은 TTL
+
+            // AuthHive 이벤트 발행 (향후 Platform 모듈 연동)
+            // await _eventPublisher.PublishAsync(new PasswordPolicyChangedEvent 
+            // { 
+            //     OrganizationId = organizationId, 
+            //     Policy = policy 
+            // });
+
+            await Task.CompletedTask;
+        }
+
+        #endregion
         #region 신뢰할 수 있는 장치
 
         /// <summary>
@@ -433,7 +599,7 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                _logger.LogInformation("Registering trusted device for user {UserId}: {DeviceName}", 
+                _logger.LogInformation("Registering trusted device for user {UserId}: {DeviceName}",
                     userId, request.DeviceName);
 
                 // 입력값 검증
@@ -454,7 +620,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var result = await _trustedDeviceService.RegisterTrustedDeviceAsync(userId, request);
-                
+
                 if (result.IsSuccess)
                 {
                     // 캐시 무효화
@@ -517,11 +683,11 @@ namespace AuthHive.Auth.Services.Authentication
                 var devicesResult = await _trustedDeviceService.GetTrustedDevicesAsync(userId);
                 if (devicesResult.IsSuccess && devicesResult.Data != null)
                 {
-                    var isTrusted = devicesResult.Data.Any(d => 
-                        d.DeviceFingerprint == deviceFingerprint && 
-                        d.IsActive && 
+                    var isTrusted = devicesResult.Data.Any(d =>
+                        d.DeviceFingerprint == deviceFingerprint &&
+                        d.IsActive &&
                         !d.IsExpired);
-                    
+
                     return ServiceResult<bool>.Success(isTrusted);
                 }
 
@@ -555,7 +721,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var result = await _trustedDeviceService.RemoveTrustedDeviceAsync(userId, deviceId);
-                
+
                 if (result.IsSuccess)
                 {
                     InvalidateTrustedDeviceCache(userId);
@@ -586,7 +752,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var result = await _trustedDeviceService.RemoveAllTrustedDevicesAsync(userId);
-                
+
                 if (result.IsSuccess)
                 {
                     InvalidateTrustedDeviceCache(userId);
@@ -760,7 +926,7 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                _logger.LogWarning("Suspicious activity reported for user {UserId}: {ActivityType}", 
+                _logger.LogWarning("Suspicious activity reported for user {UserId}: {ActivityType}",
                     userId, report.ActivityType);
 
                 var userExists = await _userRepository.ExistsAsync(userId);

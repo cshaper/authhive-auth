@@ -1,4 +1,4 @@
-// Path: AuthHive.Auth/Services/Authentication/PasswordAuthenticationService.cs
+// Path: AuthHive.Auth/Services/Authentication/PasswordService.cs
 using Microsoft.EntityFrameworkCore;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Models.Common;
@@ -17,8 +17,6 @@ using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Enums.Core;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Constants.Auth;
-// PasswordAuthenticationService.cs 상단에 추가
-
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -28,6 +26,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IConnectedIdService _connectedIdService;
         private readonly ISessionService _sessionService;
         private readonly ITokenService _tokenService;
+        private readonly IAccountSecurityService _accountSecurityService; // 추가된 의존성
         private readonly ILogger<PasswordService> _logger;
 
         public PasswordService(
@@ -35,12 +34,14 @@ namespace AuthHive.Auth.Services.Authentication
             IConnectedIdService connectedIdService,
             ISessionService sessionService,
             ITokenService tokenService,
+            IAccountSecurityService accountSecurityService, // 추가된 매개변수
             ILogger<PasswordService> logger)
         {
             _context = context;
             _connectedIdService = connectedIdService;
             _sessionService = sessionService;
             _tokenService = tokenService;
+            _accountSecurityService = accountSecurityService; // 할당
             _logger = logger;
         }
 
@@ -74,7 +75,7 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult<AuthenticationResponse>.Failure("User with this email already exists.");
                 }
 
-                // 패스워드 검증
+                // AccountSecurityService를 통한 패스워드 검증
                 var validationResult = await ValidatePasswordAsync(password, organizationId);
                 if (!validationResult.IsSuccess)
                 {
@@ -276,6 +277,7 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult.Failure("Current password is incorrect");
                 }
 
+                // AccountSecurityService를 통한 패스워드 검증
                 var validationResult = await ValidatePasswordAsync(newPassword, null);
                 if (!validationResult.IsSuccess)
                 {
@@ -296,19 +298,122 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// AccountSecurityService를 통한 패스워드 검증 (위임)
+        /// </summary>
         public async Task<ServiceResult<PasswordValidationResult>> ValidatePasswordAsync(
             string password,
             Guid? organizationId = null)
         {
+            try
+            {
+                _logger.LogDebug("Delegating password validation to AccountSecurityService for organization {OrganizationId}", organizationId);
+
+                // AccountSecurityService의 패스워드 정책 조회
+                var policyResult = await _accountSecurityService.GetPasswordPolicyAsync(organizationId);
+                if (!policyResult.IsSuccess || policyResult.Data == null)
+                {
+                    _logger.LogWarning("Failed to get password policy from AccountSecurityService, using fallback validation");
+                    return await FallbackPasswordValidation(password);
+                }
+
+                var policy = policyResult.Data;
+                var result = new PasswordValidationResult
+                {
+                    IsValid = true,
+                    Errors = new List<string>()
+                };
+
+                // 정책 기반 검증
+                if (password.Length < policy.MinimumLength)
+                    result.Errors.Add($"Password must be at least {policy.MinimumLength} characters");
+
+                if (password.Length > policy.MaximumLength)
+                    result.Errors.Add($"Password must not exceed {policy.MaximumLength} characters");
+
+                if (policy.RequireUppercase && !password.Any(char.IsUpper))
+                    result.Errors.Add("Password must contain at least one uppercase letter");
+
+                if (policy.RequireLowercase && !password.Any(char.IsLower))
+                    result.Errors.Add("Password must contain at least one lowercase letter");
+
+                if (policy.RequireNumbers && !password.Any(char.IsDigit))
+                    result.Errors.Add("Password must contain at least one number");
+
+                if (policy.RequireSpecialCharacters && !password.Any(c => !char.IsLetterOrDigit(c)))
+                    result.Errors.Add("Password must contain at least one special character");
+
+                // 고유 문자 수 검증
+                if (policy.MinimumUniqueCharacters > 0)
+                {
+                    var uniqueChars = password.Distinct().Count();
+                    if (uniqueChars < policy.MinimumUniqueCharacters)
+                        result.Errors.Add($"Password must contain at least {policy.MinimumUniqueCharacters} unique characters");
+                }
+
+                // 일반적인 패스워드 방지
+                if (policy.PreventCommonPasswords && IsCommonPassword(password))
+                    result.Errors.Add("Password is too common. Please choose a more secure password");
+
+                result.IsValid = result.Errors.Count == 0;
+
+                return result.IsValid
+                    ? ServiceResult<PasswordValidationResult>.Success(result)
+                    : ServiceResult<PasswordValidationResult>.Failure(string.Join(", ", result.Errors));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Password validation failed, falling back to basic validation");
+                return await FallbackPasswordValidation(password);
+            }
+        }
+
+        /// <summary>
+        /// AccountSecurityService를 통한 패스워드 정책 조회 (위임)
+        /// </summary>
+        public async Task<ServiceResult<PasswordPolicy>> GetPasswordPolicyAsync(Guid? organizationId = null)
+        {
+            try
+            {
+                _logger.LogDebug("Delegating password policy retrieval to AccountSecurityService for organization {OrganizationId}", organizationId);
+
+                // AccountSecurityService로 완전히 위임
+                var result = await _accountSecurityService.GetPasswordPolicyAsync(organizationId);
+                
+                if (result.IsSuccess)
+                {
+                    _logger.LogDebug("Successfully retrieved password policy from AccountSecurityService");
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to get password policy from AccountSecurityService: {Error}", result.ErrorMessage);
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to delegate password policy retrieval to AccountSecurityService");
+                return ServiceResult<PasswordPolicy>.Failure("Failed to retrieve password policy");
+            }
+        }
+
+        #region Private Helper Methods
+
+        /// <summary>
+        /// 폴백 패스워드 검증 (AccountSecurityService 사용 불가시)
+        /// </summary>
+        private async Task<ServiceResult<PasswordValidationResult>> FallbackPasswordValidation(string password)
+        {
+            await Task.CompletedTask; // 비동기 시그니처 유지
+
             var result = new PasswordValidationResult
             {
                 IsValid = true,
                 Errors = new List<string>()
             };
 
-            // TODO: 조직별 정책 가져오기
-            var policy = await GetPasswordPolicyAsync(organizationId);
-
+            // 기본 검증 규칙
             if (password.Length < 8)
                 result.Errors.Add("Password must be at least 8 characters");
 
@@ -328,23 +433,19 @@ namespace AuthHive.Auth.Services.Authentication
                 : ServiceResult<PasswordValidationResult>.Failure(string.Join(", ", result.Errors));
         }
 
-        public async Task<ServiceResult<PasswordPolicy>> GetPasswordPolicyAsync(Guid? organizationId = null)
+        /// <summary>
+        /// 일반적인 패스워드 확인
+        /// </summary>
+        private bool IsCommonPassword(string password)
         {
-            // TODO: 조직별 정책 구현
-            var policy = new PasswordPolicy
+            var commonPasswords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                MinimumLength = 8,
-                RequireUppercase = true,
-                RequireLowercase = true,
-                RequireNumbers = true,
-                RequireSpecialCharacters = false,
-                ExpirationDays = 90
+                "password", "123456", "password123", "admin", "qwerty",
+                "letmein", "welcome", "monkey", "dragon", "master"
             };
 
-            return await Task.FromResult(ServiceResult<PasswordPolicy>.Success(policy));
+            return commonPasswords.Contains(password);
         }
-
-        #region Private Helper Methods
 
         private bool VerifyPassword(string password, string hash)
             => HashPassword(password) == hash;
@@ -386,7 +487,7 @@ namespace AuthHive.Auth.Services.Authentication
             return org.Id;
         }
 
-        private async Task<ConnectedId> GetOrCreateConnectedIdAsync(Guid userId, Guid organizationId)
+        private async Task<Core.Entities.Auth.ConnectedId> GetOrCreateConnectedIdAsync(Guid userId, Guid organizationId)
         {
             var connectedId = await _context.ConnectedIds
                 .FirstOrDefaultAsync(c => c.UserId == userId && c.OrganizationId == organizationId);
