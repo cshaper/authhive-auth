@@ -27,10 +27,10 @@ namespace AuthHive.Auth.Providers
 
             _issuer = configuration["Paseto:Issuer"] ?? throw new ArgumentNullException("PASETO Issuer is not configured.");
             _audience = configuration["Paseto:Audience"] ?? throw new ArgumentNullException("PASETO Audience is not configured.");
-            
+
             var keyBytes = Convert.FromBase64String(keyString);
             if (keyBytes.Length != 32) throw new ArgumentException("PASETO v4 key must be 32 bytes long.");
-            
+
             // For Paseto.Core v1.0.7, create symmetric key with protocol version
             _pasetoKey = new PasetoSymmetricKey(keyBytes, new Version4());
 
@@ -50,7 +50,7 @@ namespace AuthHive.Auth.Providers
                 .Expiration(expiresAt)
                 .IssuedAt(DateTime.UtcNow)
                 .AddClaim("connected_id", connectedId?.ToString() ?? string.Empty);
-            
+
             if (claims != null)
             {
                 foreach (var claim in claims)
@@ -105,7 +105,7 @@ namespace AuthHive.Auth.Providers
                     .UseV4(Purpose.Local)
                     .WithKey(_pasetoKey)
                     .Decode(token);
-                
+
                 // Use Payload property for v1.0.7
                 var claimsDictionary = validationResult.Paseto.Payload.ToDictionary(k => k.Key, v => v.Value ?? new object());
                 return Task.FromResult(ServiceResult<Dictionary<string, object>>.Success(claimsDictionary));
@@ -124,7 +124,7 @@ namespace AuthHive.Auth.Providers
                     .UseV4(Purpose.Local)
                     .WithKey(_pasetoKey)
                     .Decode(token);
-                
+
                 // For v1.0.7, check for "exp" claim in Payload
                 if (validationResult.Paseto.Payload.TryGetValue("exp", out var expValue))
                 {
@@ -137,7 +137,7 @@ namespace AuthHive.Auth.Providers
                         return Task.FromResult(ServiceResult<DateTime?>.Success(parsedDate));
                     }
                 }
-                
+
                 return Task.FromResult(ServiceResult<DateTime?>.Success(null));
             }
             catch (Exception ex)
@@ -155,5 +155,33 @@ namespace AuthHive.Auth.Providers
         {
             throw new NotImplementedException("RevokeTokenAsync logic belongs in a stateful service, not the stateless token provider.");
         }
+            #region 새로 추가해야 할 메서드들
+
+    public async Task<ServiceResult<TokenInfo>> GenerateAccessTokenAsync(Guid userId, Guid connectedId, Dictionary<string, object>? claims = null)
+    {
+        // 기존 GenerateAccessTokenAsync(userId, connectedId?, claims) 메서드의 로직을 여기로 이동
+        // connectedId가 이제 필수 파라미터가 되었음
+        return await GenerateAccessTokenAsync(userId, (Guid?)connectedId, claims);
+    }
+
+    public async Task<ServiceResult<ClaimsPrincipal>> ValidateAccessTokenAsync(string accessToken)
+    {
+        // 기존 ValidateTokenAsync의 로직을 여기로 복사
+        return await ValidateTokenAsync(accessToken);
+    }
+
+    public async Task<ServiceResult<Dictionary<string, object>>> ExtractClaimsAsync(string accessToken)
+    {
+        // 기존 GetClaimsAsync의 로직을 여기로 복사
+        return await GetClaimsAsync(accessToken);
+    }
+
+    public async Task<ServiceResult<DateTime?>> GetTokenExpirationAsync(string accessToken)
+    {
+        // 기존 GetExpirationAsync의 로직을 여기로 복사
+        return await GetExpirationAsync(accessToken);
+    }
+
+    #endregion
     }
 }

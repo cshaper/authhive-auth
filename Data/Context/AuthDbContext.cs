@@ -44,7 +44,7 @@ namespace AuthHive.Auth.Data.Context
 
         #region OAuth & Tokens
         public DbSet<OAuthClient> OAuthClients { get; set; }
-        public DbSet<OAuthAccessToken> OAuthAccessTokens { get; set; }
+        public DbSet<AccessToken> AccessTokens { get; set; }
         public DbSet<RefreshToken> RefreshTokens { get; set; }
         #endregion
 
@@ -442,7 +442,7 @@ namespace AuthHive.Auth.Data.Context
             });
 
             // Guid와 Nullable<Guid> 비교 문제 해결
-            modelBuilder.Entity<OAuthAccessToken>()
+            modelBuilder.Entity<AccessToken>()
                 .HasQueryFilter(e => e.OrganizationId != Guid.Empty);
 
             base.OnModelCreating(modelBuilder);

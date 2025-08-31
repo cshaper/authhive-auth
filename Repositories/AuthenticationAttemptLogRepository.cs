@@ -18,7 +18,7 @@ namespace AuthHive.Auth.Repositories
     /// AuthenticationAttemptLog는 AuditableEntity를 직접 상속받으므로
     /// Repository를 직접 상속합니다.
     /// </summary>
-    public class AuthenticationAttemptLogRepository : BaseRepository<AuthenticationAttemptLog>,
+    public class AuthenticationAttemptLogRepository : OrganizationScopedRepository<AuthenticationAttemptLog>,
         IAuthenticationAttemptLogRepository
     {
         private readonly ILogger<AuthenticationAttemptLogRepository> _logger;
@@ -37,11 +37,10 @@ namespace AuthHive.Auth.Repositories
         /// 사용자의 최근 인증 시도 조회
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetRecentAttemptsAsync(
-            Guid userId,
-            int count = 10)
+            Guid userId, int count = 10)
         {
-            return await _dbSet
-                .Where(x => x.UserId == userId && !x.IsDeleted)
+            return await Query()
+                .Where(x => x.UserId == userId)
                 .OrderByDescending(x => x.AttemptedAt)
                 .Take(count)
                 .ToListAsync();

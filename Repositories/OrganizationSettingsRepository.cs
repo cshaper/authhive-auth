@@ -436,7 +436,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<int> PropagateSettingsToChildrenAsync(Guid parentOrganizationId, IEnumerable<string> settingKeys, bool overrideExisting = false)
         {
             // 하위 조직 조회
-            var childOrganizations = await _context.Set<Organization>()
+            var childOrganizations = await _context.Set<AuthHive.Core.Entities.Organization.Organization>()
                 .Where(o => o.ParentId == parentOrganizationId && !o.IsDeleted)
                 .Select(o => o.Id)
                 .ToListAsync();
@@ -687,7 +687,7 @@ namespace AuthHive.Auth.Repositories
         private async Task<OrganizationSettings?> GetInheritedSettingAsync(Guid organizationId, string category, string settingKey)
         {
             // 상위 조직 경로 추적하여 설정 찾기
-            var organization = await _context.Set<Organization>()
+            var organization = await _context.Set<AuthHive.Core.Entities.Organization.Organization>()
                 .FirstOrDefaultAsync(o => o.Id == organizationId && !o.IsDeleted);
 
             if (organization?.ParentId == null) return null;
@@ -701,7 +701,7 @@ namespace AuthHive.Auth.Repositories
         private async Task<List<OrganizationSettings>> GetAllInheritedSettingsAsync(Guid organizationId, bool activeOnly)
         {
             var inheritedSettings = new List<OrganizationSettings>();
-            var organization = await _context.Set<Organization>()
+            var organization = await _context.Set<AuthHive.Core.Entities.Organization.Organization>()
                 .FirstOrDefaultAsync(o => o.Id == organizationId && !o.IsDeleted);
 
             if (organization?.ParentId != null)

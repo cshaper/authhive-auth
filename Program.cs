@@ -54,7 +54,7 @@ try
     builder.Services.AddScoped<IPasswordProvider, Argon2PasswordProvider>();
     builder.Services.AddScoped<ISessionRepository, SessionRepository>();
     builder.Services.AddScoped<ISessionActivityLogRepository, SessionActivityLogRepository>();
-    builder.Services.AddScoped<IOAuthTokenRepository, OAuthTokenRepository>();
+    builder.Services.AddScoped<IAccessTokenRepository, AccessTokenRepository>();
     builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
     // Redis
     builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
