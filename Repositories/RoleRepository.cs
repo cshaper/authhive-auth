@@ -188,7 +188,7 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
     public async Task<IEnumerable<Role>> GetByLevelAsync(Guid organizationId, int level, bool includeInactive = false)
     {
         var query = Query()
-            .Where(r => r.OrganizationId == organizationId && r.Level == level);
+            .Where(r => r.OrganizationId == organizationId && (int)r.Level == level);
 
         if (!includeInactive)
         {
@@ -207,7 +207,7 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
     public async Task<IEnumerable<Role>> GetByMinimumLevelAsync(Guid organizationId, int minimumLevel, bool includeInactive = false)
     {
         var query = Query()
-            .Where(r => r.OrganizationId == organizationId && r.Level >= minimumLevel);
+            .Where(r => r.OrganizationId == organizationId && (int)r.Level >= minimumLevel);
 
         if (!includeInactive)
         {
@@ -386,20 +386,20 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
             LastCreatedAt = roles.Max(r => r.CreatedAt as DateTime?)
         };
 
-        // 카테고리별 분포 (non-nullable enum)
+        // 카테고리별 분포 - RoleCategory enum 타입으로 그룹핑
         stats.CountByCategory = roles
-            .Where(r => r.Category.HasValue)  // Filter out null categories
-            .GroupBy(r => r.Category.Value)   // Use .Value to get non-nullable enum
+            .Where(r => r.Category.HasValue)
+            .GroupBy(r => r.Category!.Value)  // enum 값 그대로 사용
             .ToDictionary(g => g.Key, g => g.Count());
 
-        // 스코프별 분포 (non-nullable enum)
+        // 스코프별 분포 - RoleScope enum 타입으로 그룹핑
         stats.CountByScope = roles
             .GroupBy(r => r.Scope)
             .ToDictionary(g => g.Key, g => g.Count());
 
-        // 레벨별 분포
+        // 레벨별 분포 - int 타입으로 그룹핑 (이건 맞음)
         stats.CountByLevel = roles
-            .GroupBy(r => r.Level)
+            .GroupBy(r => (int)r.Level)
             .ToDictionary(g => g.Key, g => g.Count());
 
         // 평균 권한 수 계산
@@ -429,7 +429,6 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
 
         return stats;
     }
-
     #endregion
 
     #region 관계 로딩 메서드

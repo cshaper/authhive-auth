@@ -251,7 +251,7 @@ public class ConnectedIdRoleRepository : BaseRepository<ConnectedIdRole>, IConne
             .Join(_context.Set<Role>(), cr => cr.RoleId, r => r.Id, (cr, r) => new { ConnectedIdRole = cr, Role = r })
             .AnyAsync(joined => joined.ConnectedIdRole.ConnectedId == connectedId &&
                                joined.Role.OrganizationId == organizationId &&
-                               joined.Role.Level >= minimumLevel &&
+                               (int)joined.Role.Level >= minimumLevel &&
                                joined.Role.IsActive &&
                                joined.ConnectedIdRole.IsActive &&
                                (!joined.ConnectedIdRole.ExpiresAt.HasValue || joined.ConnectedIdRole.ExpiresAt > DateTime.UtcNow),
