@@ -1,4 +1,3 @@
-// Path: AuthHive.Auth/Repositories/ConnectedIdRepository.cs
 using Microsoft.EntityFrameworkCore;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Entities.Auth;
@@ -8,6 +7,7 @@ using AuthHive.Auth.Repositories.Base;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Models.Common; // StatisticsQuery를 위해 추가
 
 namespace AuthHive.Auth.Repositories
 {
@@ -102,51 +102,74 @@ namespace AuthHive.Auth.Repositories
                 .Take(topCount)
                 .ToListAsync();
         }
-
-        public async Task<ConnectedIdStatistics> GetStatisticsAsync(Guid organizationId)
+        
+        // ✨ [변경] 표준 인터페이스 구현 및 성능 최적화
+        public async Task<ConnectedIdStatistics?> GetStatisticsAsync(StatisticsQuery query)
         {
-            var query = _dbSet.Where(c => c.OrganizationId == organizationId && !c.IsDeleted);
+            if (query.OrganizationId == null)
+            {
+                // 조직 ID가 없는 통계는 지원하지 않는 경우. 혹은 시스템 전체 통계를 구현할 수도 있음.
+                // 여기서는 null을 반환하거나 예외를 던지는 것이 적절합니다.
+                throw new ArgumentNullException(nameof(query.OrganizationId), "OrganizationId is required for ConnectedId statistics.");
+            }
+
+            var dbQuery = _dbSet.Where(c => c.OrganizationId == query.OrganizationId && !c.IsDeleted);
+
+            // StatisticsQuery에 포함된 기간 필터 적용
+            dbQuery = dbQuery.Where(c => c.CreatedAt >= query.StartDate && c.CreatedAt < query.EndDate);
+
+            // 단 한 번의 쿼리로 모든 집계 데이터를 계산
+            var statsData = await dbQuery
+                .GroupBy(c => 1) // 모든 데이터를 단일 그룹으로 묶어 집계
+                .Select(g => new
+                {
+                    TotalMemberCount = g.Count(),
+                    ActiveMemberCount = g.Count(c => c.Status == ConnectedIdStatus.Active),
+                    InactiveMemberCount = g.Count(c => c.Status == ConnectedIdStatus.Inactive),
+                    SuspendedCount = g.Count(c => c.Status == ConnectedIdStatus.Suspended),
+                    PendingCount = g.Count(c => c.Status == ConnectedIdStatus.Pending),
+                    OwnerCount = g.Count(c => c.MembershipType == MembershipType.Owner),
+                    AdminCount = g.Count(c => c.MembershipType == MembershipType.Admin),
+                    MemberCount = g.Count(c => c.MembershipType == MembershipType.Member),
+                    GuestCount = g.Count(c => c.MembershipType == MembershipType.Guest),
+                    LastJoinedAt = g.Max(c => (DateTime?)c.JoinedAt),
+                    NewMembersLast30Days = g.Count(c => c.JoinedAt >= DateTime.UtcNow.AddDays(-30)),
+                    ActiveUsersLast7Days = g.Count(c => c.LastActiveAt >= DateTime.UtcNow.AddDays(-7)),
+                    ActiveUsersToday = g.Count(c => c.LastActiveAt >= DateTime.UtcNow.Date)
+                })
+                .FirstOrDefaultAsync();
+
+            if (statsData == null)
+            {
+                // 해당 기간/조직에 멤버가 한 명도 없을 경우 빈 통계 객체 반환
+                return new ConnectedIdStatistics { OrganizationId = query.OrganizationId.Value, GeneratedAt = DateTime.UtcNow };
+            }
             
             var stats = new ConnectedIdStatistics
             {
-                OrganizationId = organizationId,
-                TotalMemberCount = await query.CountAsync(),
-                ActiveMemberCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Active),
-                InactiveMemberCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Inactive),
-                SuspendedCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Suspended),
-                PendingCount = await query.CountAsync(c => c.Status == ConnectedIdStatus.Pending)
+                OrganizationId = query.OrganizationId.Value,
+                TotalMemberCount = statsData.TotalMemberCount,
+                ActiveMemberCount = statsData.ActiveMemberCount,
+                InactiveMemberCount = statsData.InactiveMemberCount,
+                SuspendedCount = statsData.SuspendedCount,
+                PendingCount = statsData.PendingCount,
+                LastJoinedAt = statsData.LastJoinedAt,
+                NewMembersLast30Days = statsData.NewMembersLast30Days,
+                ActiveUsersLast7Days = statsData.ActiveUsersLast7Days,
+                ActiveUsersToday = statsData.ActiveUsersToday,
+                GeneratedAt = DateTime.UtcNow
             };
+
+            stats.CountByMembershipType[MembershipType.Owner] = statsData.OwnerCount;
+            stats.CountByMembershipType[MembershipType.Admin] = statsData.AdminCount;
+            stats.CountByMembershipType[MembershipType.Member] = statsData.MemberCount;
+            stats.CountByMembershipType[MembershipType.Guest] = statsData.GuestCount;
             
-            // MembershipType별 카운트
-            stats.CountByMembershipType[MembershipType.Owner] = await query.CountAsync(c => c.MembershipType == MembershipType.Owner);
-            stats.CountByMembershipType[MembershipType.Admin] = await query.CountAsync(c => c.MembershipType == MembershipType.Admin);
-            stats.CountByMembershipType[MembershipType.Member] = await query.CountAsync(c => c.MembershipType == MembershipType.Member);
-            stats.CountByMembershipType[MembershipType.Guest] = await query.CountAsync(c => c.MembershipType == MembershipType.Guest);
-            
-            // Status별 카운트
-            stats.CountByStatus[ConnectedIdStatus.Active] = stats.ActiveMemberCount;
-            stats.CountByStatus[ConnectedIdStatus.Inactive] = stats.InactiveMemberCount;
-            stats.CountByStatus[ConnectedIdStatus.Suspended] = stats.SuspendedCount;
-            stats.CountByStatus[ConnectedIdStatus.Pending] = stats.PendingCount;
-            
-            // 최근 가입 정보
-            stats.LastJoinedAt = await query
-                .OrderByDescending(c => c.JoinedAt)
-                .Select(c => (DateTime?)c.JoinedAt)
-                .FirstOrDefaultAsync();
-            
-            // 최근 30일 신규 가입
-            var thirtyDaysAgo = DateTime.UtcNow.AddDays(-30);
-            stats.NewMembersLast30Days = await query.CountAsync(c => c.JoinedAt >= thirtyDaysAgo);
-            
-            // 최근 7일 활성 사용자
-            var sevenDaysAgo = DateTime.UtcNow.AddDays(-7);
-            stats.ActiveUsersLast7Days = await query.CountAsync(c => c.LastActiveAt >= sevenDaysAgo);
-            
-            // 오늘 활성 사용자
-            var today = DateTime.UtcNow.Date;
-            stats.ActiveUsersToday = await query.CountAsync(c => c.LastActiveAt >= today);
-            
+            stats.CountByStatus[ConnectedIdStatus.Active] = statsData.ActiveMemberCount;
+            stats.CountByStatus[ConnectedIdStatus.Inactive] = statsData.InactiveMemberCount;
+            stats.CountByStatus[ConnectedIdStatus.Suspended] = statsData.SuspendedCount;
+            stats.CountByStatus[ConnectedIdStatus.Pending] = statsData.PendingCount;
+
             return stats;
         }
 
@@ -179,7 +202,7 @@ namespace AuthHive.Auth.Repositories
                     .ThenInclude(cr => cr.Role);
                 
             if (includeSessions)
-                query = query.Include(c => c.Sessions.Where(s => s.Status == SessionEnums.SessionStatus.Active));
+                query = query.Include(c => c.Sessions.Where(s => s.Status == SessionStatus.Active));
             
             return await query
                 .Where(c => c.Id == id && !c.IsDeleted)

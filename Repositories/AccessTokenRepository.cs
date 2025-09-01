@@ -119,85 +119,76 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<int> RevokeAllAccessTokensForConnectedIdAsync(Guid connectedId, string reason)
         {
-            var accessTokens = await Query()
-                .Where(t => t.ConnectedId == connectedId && !t.IsRevoked)
-                .ToListAsync();
-
             var now = DateTime.UtcNow;
-            
-            foreach (var token in accessTokens)
-            {
-                token.IsRevoked = true;
-                token.IsActive = false;
-                token.RevokedAt = now;
-                token.RevokedReason = reason;
-                token.UpdatedAt = now;
-            }
 
-            if (accessTokens.Any())
+            // ExecuteUpdateAsync를 사용하여 DB에서 직접 업데이트 실행
+            var affectedRows = await Query()
+                .Where(t => t.ConnectedId == connectedId && !t.IsRevoked)
+                .ExecuteUpdateAsync(updates => updates
+                    .SetProperty(t => t.IsRevoked, true)
+                    .SetProperty(t => t.IsActive, false)
+                    .SetProperty(t => t.RevokedAt, now)
+                    .SetProperty(t => t.RevokedReason, reason)
+                    // AuditableEntity의 UpdatedAt도 수동으로 갱신해주는 것이 좋습니다.
+                    .SetProperty(t => t.UpdatedAt, now)
+                );
+
+            if (affectedRows > 0)
             {
-                await _context.SaveChangesAsync();
                 _logger.LogInformation("Revoked {Count} access tokens for ConnectedId {ConnectedId}. Reason: {Reason}",
-                    accessTokens.Count, connectedId, reason);
+                    affectedRows, connectedId, reason);
             }
 
-            return accessTokens.Count;
+            return affectedRows;
         }
 
         public async Task<int> RevokeAllAccessTokensForSessionAsync(Guid sessionId, string reason)
         {
-            var accessTokens = await Query()
-                .Where(t => t.SessionId == sessionId && !t.IsRevoked)
-                .ToListAsync();
-
             var now = DateTime.UtcNow;
-            
-            foreach (var token in accessTokens)
-            {
-                token.IsRevoked = true;
-                token.IsActive = false;
-                token.RevokedAt = now;
-                token.RevokedReason = reason;
-                token.UpdatedAt = now;
-            }
 
-            if (accessTokens.Any())
+            // ExecuteUpdateAsync를 사용하여 DB에서 직접 일괄 업데이트를 실행합니다.
+            // 불필요한 데이터 조회가 없고, DB 왕복이 단 한 번만 발생합니다.
+            var affectedRows = await Query()
+                .Where(t => t.SessionId == sessionId && !t.IsRevoked)
+                .ExecuteUpdateAsync(updates => updates
+                    .SetProperty(t => t.IsRevoked, true)
+                    .SetProperty(t => t.IsActive, false)
+                    .SetProperty(t => t.RevokedAt, now)
+                    .SetProperty(t => t.RevokedReason, reason)
+                    .SetProperty(t => t.UpdatedAt, now) // AuditableEntity 속성 갱신
+                );
+
+            if (affectedRows > 0)
             {
-                await _context.SaveChangesAsync();
                 _logger.LogInformation("Revoked {Count} access tokens for Session {SessionId}. Reason: {Reason}",
-                    accessTokens.Count, sessionId, reason);
+                    affectedRows, sessionId, reason);
             }
 
-            return accessTokens.Count;
+            return affectedRows;
         }
-
         public async Task<int> RevokeAllAccessTokensForClientAsync(Guid clientId, string reason)
         {
-            var accessTokens = await Query()
-                .Where(t => t.ClientId == clientId && !t.IsRevoked)
-                .ToListAsync();
-
             var now = DateTime.UtcNow;
-            
-            foreach (var token in accessTokens)
-            {
-                token.IsRevoked = true;
-                token.IsActive = false;
-                token.RevokedAt = now;
-                token.RevokedReason = reason;
-                token.UpdatedAt = now;
-            }
 
-            if (accessTokens.Any())
+            // 위와 동일한 패턴으로, 조건만 ClientId로 변경합니다.
+            var affectedRows = await Query()
+                .Where(t => t.ClientId == clientId && !t.IsRevoked)
+                .ExecuteUpdateAsync(updates => updates
+                    .SetProperty(t => t.IsRevoked, true)
+                    .SetProperty(t => t.IsActive, false)
+                    .SetProperty(t => t.RevokedAt, now)
+                    .SetProperty(t => t.RevokedReason, reason)
+                    .SetProperty(t => t.UpdatedAt, now) // AuditableEntity 속성 갱신
+                );
+
+            if (affectedRows > 0)
             {
-                await _context.SaveChangesAsync();
                 _logger.LogInformation("Revoked {Count} access tokens for Client {ClientId}. Reason: {Reason}",
-                    accessTokens.Count, clientId, reason);
+                    affectedRows, clientId, reason);
             }
 
-            return accessTokens.Count;
+            return affectedRows;
         }
-
         #endregion
 
         #region Helper Methods
