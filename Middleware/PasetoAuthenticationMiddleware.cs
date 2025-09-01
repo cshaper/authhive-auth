@@ -33,7 +33,7 @@ namespace AuthHive.Auth.Middleware
 
                 try
                 {
-                    var validationResult = await tokenProvider.ValidateTokenAsync(token);
+                    var validationResult = await tokenProvider.ValidateAccessTokenAsync(token);
 
                     if (validationResult.IsSuccess && validationResult.Data != null)
                     {
