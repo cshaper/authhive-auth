@@ -73,7 +73,9 @@ namespace AuthHive.Auth.Services
                 Email = request.Email,
                 Username = request.Username,
                 DisplayName = request.DisplayName,
-                Status = UserStatus.Active
+                Status = UserStatus.Active,
+                ExternalSystemType = request.ExternalSystemType,
+                ExternalUserId = request.ExternalUserId
             };
 
             var createdUser = await _userRepository.AddAsync(newUser);
@@ -119,7 +121,14 @@ namespace AuthHive.Auth.Services
             var newUsers = new List<User>();
             foreach (var request in requests)
             {
-                 newUsers.Add(new User { Email = request.Email, Username = request.Username, DisplayName = request.DisplayName, Status = UserStatus.Active });
+                 newUsers.Add(new User { 
+                     Email = request.Email, 
+                     Username = request.Username, 
+                     DisplayName = request.DisplayName, 
+                     Status = UserStatus.Active,
+                     ExternalSystemType = request.ExternalSystemType,
+                     ExternalUserId = request.ExternalUserId
+                 });
             }
             await _userRepository.AddRangeAsync(newUsers);
             return ServiceResult<IEnumerable<UserDto>>.Success(newUsers.Select(MapToDto).Where(dto => dto is not null)!);

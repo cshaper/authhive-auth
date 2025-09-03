@@ -1,4 +1,3 @@
-// Path: AuthHive.Auth/Repositories/AuthenticationAttemptLogRepository.cs
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -8,33 +7,35 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Base;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// 인증 시도 로그 저장소 구현 - AuthHive v15
-    /// AuthenticationAttemptLog는 AuditableEntity를 직접 상속받으므로
-    /// Repository를 직접 상속합니다.
+    /// 인증 시도 로그 저장소 구현 - AuthHive v15 (BaseRepository 최적화 + Null Safety 버전)
     /// </summary>
-    public class AuthenticationAttemptLogRepository : OrganizationScopedRepository<AuthenticationAttemptLog>,
+    public class AuthenticationAttemptLogRepository : BaseRepository<AuthenticationAttemptLog>,
         IAuthenticationAttemptLogRepository
     {
         private readonly ILogger<AuthenticationAttemptLogRepository> _logger;
 
         public AuthenticationAttemptLogRepository(
             AuthDbContext context,
-            ILogger<AuthenticationAttemptLogRepository> logger)
-            : base(context)
+            IOrganizationContext organizationContext,
+            ILogger<AuthenticationAttemptLogRepository> logger,
+            IMemoryCache? cache = null)
+            : base(context, organizationContext, cache)
         {
             _logger = logger;
         }
 
-        #region 조회 메서드
+        #region 조회 메서드 - BaseRepository 활용
 
         /// <summary>
-        /// 사용자의 최근 인증 시도 조회
+        /// 사용자의 최근 인증 시도 조회 - BaseRepository 활용
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetRecentAttemptsAsync(
             Guid userId, int count = 10)
@@ -42,30 +43,25 @@ namespace AuthHive.Auth.Repositories
             return await Query()
                 .Where(x => x.UserId == userId)
                 .OrderByDescending(x => x.AttemptedAt)
-                .Take(count)
+                .Take(Math.Min(count, 100)) // DOS 방지
                 .ToListAsync();
         }
 
         /// <summary>
-        /// 특정 사용자의 인증 기록을 기간별로 조회합니다. (MFA 히스토리용)
+        /// 특정 사용자의 인증 기록을 기간별로 조회 - BaseRepository Query() 활용
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetHistoryForUserAsync(
             Guid userId,
             DateTime? startDate,
             DateTime? endDate)
         {
-            var query = _dbSet
-                .Where(log => log.UserId == userId && !log.IsDeleted);
+            var query = Query().Where(log => log.UserId == userId);
 
             if (startDate.HasValue)
-            {
                 query = query.Where(log => log.AttemptedAt >= startDate.Value);
-            }
 
             if (endDate.HasValue)
-            {
                 query = query.Where(log => log.AttemptedAt <= endDate.Value);
-            }
 
             return await query
                 .OrderByDescending(log => log.AttemptedAt)
@@ -73,33 +69,56 @@ namespace AuthHive.Auth.Repositories
         }
 
         /// <summary>
-        /// 사용자명으로 인증 시도 조회
+        /// 사용자명으로 인증 시도 조회 - 캐시 가능한 조회 (Null Safety 개선)
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetByUsernameAsync(
             string username,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => x.Username == username && !x.IsDeleted);
+            if (string.IsNullOrWhiteSpace(username))
+                return Enumerable.Empty<AuthenticationAttemptLog>();
 
-            if (since.HasValue)
+            // 캐시 키 생성 (since가 null이고 최근 1시간 이내인 경우만 캐시)
+            bool canCache = since == null || (since.HasValue && since.Value > DateTime.UtcNow.AddHours(-1));
+            string? cacheKey = canCache ? $"Username_{username}_{since?.Ticks ?? 0}" : null;
+
+            // Null 체크 개선
+            if (canCache && cacheKey != null && 
+                _cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+                cachedObj is IEnumerable<AuthenticationAttemptLog> cached)
             {
-                query = query.Where(x => x.AttemptedAt >= since.Value);
+                return cached;
             }
 
-            return await query
+            var query = Query().Where(x => x.Username == username);
+
+            if (since.HasValue)
+                query = query.Where(x => x.AttemptedAt >= since.Value);
+
+            var result = await query
                 .OrderByDescending(x => x.AttemptedAt)
+                .Take(1000) // 대량 데이터 방지
                 .ToListAsync();
+
+            // 캐시 저장 (5분간) - Null 체크 개선
+            if (canCache && cacheKey != null && _cache != null)
+            {
+                _cache.Set(cacheKey, result, TimeSpan.FromMinutes(5));
+            }
+
+            return result;
         }
 
         /// <summary>
-        /// 조직별 인증 시도 조회
+        /// 조직별 인증 시도 조회 - BaseRepository의 조직 스코핑 활용
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetByOrganizationAsync(
             Guid organizationId,
             DateTime? startDate = null,
             DateTime? endDate = null)
         {
-            var query = _dbSet.Where(x => x.OrganizationId == organizationId && !x.IsDeleted);
+            // BaseRepository의 조직별 조회 활용
+            var query = QueryForOrganization(organizationId);
 
             if (startDate.HasValue)
                 query = query.Where(x => x.AttemptedAt >= startDate.Value);
@@ -120,7 +139,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? startDate = null,
             DateTime? endDate = null)
         {
-            var query = _dbSet.Where(x => x.ApplicationId == applicationId && !x.IsDeleted);
+            var query = Query().Where(x => x.ApplicationId == applicationId);
 
             if (startDate.HasValue)
                 query = query.Where(x => x.AttemptedAt >= startDate.Value);
@@ -134,22 +153,43 @@ namespace AuthHive.Auth.Repositories
         }
 
         /// <summary>
-        /// IP 주소별 인증 시도 조회
+        /// IP 주소별 인증 시도 조회 - 보안상 중요하므로 캐시 적용 (Null Safety 개선)
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetByIpAddressAsync(
             string ipAddress,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => x.IpAddress == ipAddress && !x.IsDeleted);
+            if (string.IsNullOrWhiteSpace(ipAddress))
+                return Enumerable.Empty<AuthenticationAttemptLog>();
 
-            if (since.HasValue)
+            // 최근 1시간 데이터는 캐시 (보안 분석용)
+            bool canCache = since == null || (since.HasValue && since.Value > DateTime.UtcNow.AddHours(-1));
+            string? cacheKey = canCache ? $"IpAddress_{ipAddress}_{since?.Ticks ?? 0}" : null;
+
+            // Null 체크 개선
+            if (canCache && cacheKey != null && 
+                _cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+                cachedObj is IEnumerable<AuthenticationAttemptLog> cached)
             {
-                query = query.Where(x => x.AttemptedAt >= since.Value);
+                return cached;
             }
 
-            return await query
+            var query = Query().Where(x => x.IpAddress == ipAddress);
+
+            if (since.HasValue)
+                query = query.Where(x => x.AttemptedAt >= since.Value);
+
+            var result = await query
                 .OrderByDescending(x => x.AttemptedAt)
+                .Take(1000) // 보안상 제한
                 .ToListAsync();
+
+            if (canCache && cacheKey != null && _cache != null)
+            {
+                _cache.Set(cacheKey, result, TimeSpan.FromMinutes(10));
+            }
+
+            return result;
         }
 
         /// <summary>
@@ -160,17 +200,13 @@ namespace AuthHive.Auth.Repositories
             DateTime? since = null,
             bool? successOnly = null)
         {
-            var query = _dbSet.Where(x => x.Method == method && !x.IsDeleted);
+            var query = Query().Where(x => x.Method == method);
 
             if (since.HasValue)
-            {
                 query = query.Where(x => x.AttemptedAt >= since.Value);
-            }
 
             if (successOnly.HasValue)
-            {
                 query = query.Where(x => x.IsSuccess == successOnly.Value);
-            }
 
             return await query
                 .OrderByDescending(x => x.AttemptedAt)
@@ -179,53 +215,63 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region 실패 분석
+        #region 실패 분석 - 최적화된 쿼리
 
         /// <summary>
-        /// 실패한 인증 시도 횟수 조회
+        /// 실패한 인증 시도 횟수 조회 - 단순 카운트로 최적화
         /// </summary>
-        public async Task<int> GetFailedAttemptCountAsync(
-            Guid userId,
-            DateTime since)
+        public async Task<int> GetFailedAttemptCountAsync(Guid userId, DateTime since)
         {
-            return await _dbSet
-                .CountAsync(x =>
-                    x.UserId == userId &&
-                    !x.IsSuccess &&
-                    x.AttemptedAt >= since &&
-                    !x.IsDeleted);
+            return await CountAsync(x =>
+                x.UserId == userId &&
+                !x.IsSuccess &&
+                x.AttemptedAt >= since);
         }
 
         /// <summary>
-        /// 연속 실패 횟수 조회
+        /// 연속 실패 횟수 조회 - 최적화된 로직 (Null Safety 개선)
         /// </summary>
         public async Task<int> GetConsecutiveFailureCountAsync(Guid userId)
         {
-            // 마지막 성공 이후의 실패 횟수를 계산
-            var lastSuccess = await _dbSet
-                .Where(x => x.UserId == userId && x.IsSuccess && !x.IsDeleted)
-                .OrderByDescending(x => x.AttemptedAt)
-                .FirstOrDefaultAsync();
-
-            var query = _dbSet.Where(x => x.UserId == userId && !x.IsSuccess && !x.IsDeleted);
-
-            if (lastSuccess != null)
+            // 캐시 확인 (자주 호출되는 메서드)
+            string cacheKey = $"ConsecutiveFailure_{userId}";
+            if (_cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+                cachedObj is int cachedCount)
             {
-                query = query.Where(x => x.AttemptedAt > lastSuccess.AttemptedAt);
+                return cachedCount;
             }
 
-            return await query.CountAsync();
+            // 마지막 성공 이후의 실패만 조회하도록 최적화
+            var lastSuccess = await Query()
+                .Where(x => x.UserId == userId && x.IsSuccess)
+                .OrderByDescending(x => x.AttemptedAt)
+                .Select(x => x.AttemptedAt)
+                .FirstOrDefaultAsync();
+
+            var failureQuery = Query().Where(x => x.UserId == userId && !x.IsSuccess);
+
+            if (lastSuccess != default)
+            {
+                failureQuery = failureQuery.Where(x => x.AttemptedAt > lastSuccess);
+            }
+
+            var count = await failureQuery.CountAsync();
+
+            // 5분간 캐시
+            _cache?.Set(cacheKey, count, TimeSpan.FromMinutes(5));
+
+            return count;
         }
 
         /// <summary>
-        /// 실패한 인증 시도 조회
+        /// 실패한 인증 시도 조회 - BaseRepository 활용
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetFailedAttemptsAsync(
             Guid? userId = null,
             DateTime? since = null,
             int? limit = null)
         {
-            var query = _dbSet.Where(x => !x.IsSuccess && !x.IsDeleted);
+            var query = Query().Where(x => !x.IsSuccess);
 
             if (userId.HasValue)
                 query = query.Where(x => x.UserId == userId.Value);
@@ -235,8 +281,9 @@ namespace AuthHive.Auth.Repositories
 
             query = query.OrderByDescending(x => x.AttemptedAt);
 
-            if (limit.HasValue)
-                query = query.Take(limit.Value);
+            // 안전한 제한값 설정
+            int safeLimit = Math.Min(limit ?? 100, 1000);
+            query = query.Take(safeLimit);
 
             return await query.ToListAsync();
         }
@@ -248,16 +295,14 @@ namespace AuthHive.Auth.Repositories
             AuthenticationResult reason,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x =>
-                x.FailureReason == reason &&
-                !x.IsSuccess &&
-                !x.IsDeleted);
+            var query = Query().Where(x => x.FailureReason == reason && !x.IsSuccess);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
             return await query
                 .OrderByDescending(x => x.AttemptedAt)
+                .Take(1000) // 제한
                 .ToListAsync();
         }
 
@@ -267,9 +312,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetLockTriggerAttemptsAsync(
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x =>
-                x.TriggeredAccountLock &&
-                !x.IsDeleted);
+            var query = Query().Where(x => x.TriggeredAccountLock);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
@@ -281,16 +324,16 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region 보안 분석
+        #region 보안 분석 - 캐시 최적화
 
         /// <summary>
-        /// 의심스러운 인증 시도 조회
+        /// 의심스러운 인증 시도 조회 - 캐시 적용
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetSuspiciousAttemptsAsync(
             DateTime? since = null,
             int? minRiskScore = null)
         {
-            var query = _dbSet.Where(x => x.IsSuspicious && !x.IsDeleted);
+            var query = Query().Where(x => x.IsSuspicious);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
@@ -301,132 +344,137 @@ namespace AuthHive.Auth.Repositories
             return await query
                 .OrderByDescending(x => x.RiskScore)
                 .ThenByDescending(x => x.AttemptedAt)
+                .Take(500) // 분석 데이터 제한
                 .ToListAsync();
         }
 
         /// <summary>
-        /// 브루트포스 공격 패턴 감지
+        /// 브루트포스 공격 패턴 감지 - 최적화된 그룹화 쿼리 (Null Safety 개선)
         /// </summary>
         public async Task<IEnumerable<BruteForcePattern>> DetectBruteForceAttacksAsync(
             DateTime since,
             int threshold = 5)
         {
-            var attempts = await _dbSet
-                .Where(x =>
-                    x.AttemptedAt >= since &&
-                    !x.IsSuccess &&
-                    !x.IsDeleted)
+            // 캐시 확인 (10분간 캐시)
+            string cacheKey = $"BruteForce_{since.Ticks}_{threshold}";
+            if (_cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+                cachedObj is IEnumerable<BruteForcePattern> cached)
+            {
+                return cached;
+            }
+
+            var patterns = await Query()
+                .Where(x => x.AttemptedAt >= since && !x.IsSuccess)
                 .GroupBy(x => new { x.IpAddress, x.Username })
+                .Where(g => g.Count() >= threshold)
                 .Select(g => new BruteForcePattern
                 {
-                    IpAddress = g.Key.IpAddress,
+                    IpAddress = g.Key.IpAddress ?? string.Empty, // Null 방지
                     Username = g.Key.Username,
                     AttemptCount = g.Count(),
                     FirstAttempt = g.Min(x => x.AttemptedAt),
                     LastAttempt = g.Max(x => x.AttemptedAt)
                 })
-                .Where(x => x.AttemptCount >= threshold)
                 .OrderByDescending(x => x.AttemptCount)
+                .Take(100) // 상위 100개만
                 .ToListAsync();
 
-            return attempts;
+            _cache?.Set(cacheKey, patterns, TimeSpan.FromMinutes(10));
+            return patterns;
         }
 
         /// <summary>
-        /// 이상 접근 패턴 감지
+        /// 이상 접근 패턴 감지 - 모듈화된 접근
         /// </summary>
         public async Task<IEnumerable<AnomalyPattern>> DetectAnomaliesAsync(
             Guid? userId = null,
             DateTime? since = null)
         {
-            var anomalies = new List<AnomalyPattern>();
+            var tasks = new List<Task<IEnumerable<AnomalyPattern>>>
+            {
+                DetectMultipleIpAccessAsync(userId, since),
+                DetectUnusualTimeAccessAsync(userId, since),
+                DetectGeographicalAnomaliesAsync(userId, since)
+            };
 
-            // 1. 짧은 시간 내 여러 IP에서의 접근
-            var multiIpAccess = await DetectMultipleIpAccessAsync(userId, since);
-            anomalies.AddRange(multiIpAccess);
+            var results = await Task.WhenAll(tasks);
+            var allAnomalies = results.SelectMany(x => x).ToList();
 
-            // 2. 비정상적인 시간대 접근
-            var unusualTimeAccess = await DetectUnusualTimeAccessAsync(userId, since);
-            anomalies.AddRange(unusualTimeAccess);
-
-            // 3. 지리적 이상 징후
-            var geographicalAnomalies = await DetectGeographicalAnomaliesAsync(userId, since);
-            anomalies.AddRange(geographicalAnomalies);
-
-            return anomalies.OrderByDescending(x => x.RiskScore);
+            return allAnomalies.OrderByDescending(x => x.RiskScore);
         }
 
         /// <summary>
-        /// 위험 IP 주소 목록 조회
+        /// 위험 IP 주소 목록 조회 - 최적화된 그룹화 (Null Safety 개선)
         /// </summary>
         public async Task<IEnumerable<RiskyIpAddress>> GetRiskyIpAddressesAsync(
             int failureThreshold = 10,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => !x.IsSuccess && !x.IsDeleted);
+            var query = Query().Where(x => !x.IsSuccess);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
-            var riskyIps = await query
+            return await query
                 .GroupBy(x => x.IpAddress)
+                .Where(g => g.Count() >= failureThreshold)
                 .Select(g => new RiskyIpAddress
                 {
-                    IpAddress = g.Key,
+                    IpAddress = g.Key ?? string.Empty, // Null 방지
                     FailureCount = g.Count(),
-                    UniqueUserCount = g.Select(x => x.UserId).Distinct().Count(),
+                    UniqueUserCount = g.Where(x => x.UserId != null).Select(x => x.UserId).Distinct().Count(), // Null UserId 필터링
                     FirstSeen = g.Min(x => x.AttemptedAt),
                     LastSeen = g.Max(x => x.AttemptedAt)
                 })
-                .Where(x => x.FailureCount >= failureThreshold)
                 .OrderByDescending(x => x.FailureCount)
+                .Take(100)
                 .ToListAsync();
-
-            return riskyIps;
         }
 
         #endregion
 
-        #region 통계
+        #region 통계 - BaseRepository의 통계 기능 활용 (Null Safety 개선)
 
         /// <summary>
-        /// 인증 시도 통계 조회
+        /// 인증 시도 통계 조회 - BaseRepository의 그룹 통계 활용
         /// </summary>
         public async Task<AuthenticationStatistics> GetStatisticsAsync(
             DateTime from,
             DateTime to,
             Guid? organizationId = null)
         {
-            var query = _dbSet.Where(x =>
-                x.AttemptedAt >= from &&
-                x.AttemptedAt <= to &&
-                !x.IsDeleted);
+            var query = organizationId.HasValue
+                ? QueryForOrganization(organizationId.Value)
+                : Query();
 
-            if (organizationId.HasValue)
-                query = query.Where(x => x.OrganizationId == organizationId.Value);
+            query = query.Where(x => x.AttemptedAt >= from && x.AttemptedAt <= to);
 
             var attempts = await query.ToListAsync();
+
+            // BaseRepository의 GetGroupCountAsync 활용 가능
+            var methodStats = await GetGroupCountAsync(
+                x => x.Method,
+                x => x.AttemptedAt >= from && x.AttemptedAt <= to &&
+                     (!organizationId.HasValue || x.OrganizationId == organizationId.Value));
+
+            var failureReasons = attempts
+                .Where(x => !x.IsSuccess && x.FailureReason.HasValue)
+                .GroupBy(x => x.FailureReason!.Value) // ! 연산자로 null이 아님을 명시
+                .ToDictionary(g => g.Key, g => g.Count());
 
             return new AuthenticationStatistics
             {
                 TotalAttempts = attempts.Count,
                 SuccessfulAttempts = attempts.Count(x => x.IsSuccess),
                 FailedAttempts = attempts.Count(x => !x.IsSuccess),
-                SuccessRate = attempts.Any()
-                    ? (double)attempts.Count(x => x.IsSuccess) / attempts.Count
-                    : 0,
-                AttemptsByMethod = attempts
-                    .GroupBy(x => x.Method)
-                    .ToDictionary(g => g.Key, g => g.Count()),
-                FailureReasons = attempts
-                    .Where(x => !x.IsSuccess && x.FailureReason.HasValue)
-                    .GroupBy(x => x.FailureReason!.Value)
-                    .ToDictionary(g => g.Key, g => g.Count())
+                SuccessRate = attempts.Any() ? (double)attempts.Count(x => x.IsSuccess) / attempts.Count : 0,
+                AttemptsByMethod = methodStats,
+                FailureReasons = failureReasons
             };
         }
 
         /// <summary>
-        /// 시간대별 인증 시도 분포
+        /// 시간대별 인증 시도 분포 - BaseRepository의 날짜 통계 활용
         /// </summary>
         public async Task<Dictionary<int, int>> GetHourlyDistributionAsync(
             DateTime date,
@@ -435,24 +483,21 @@ namespace AuthHive.Auth.Repositories
             var startDate = date.Date;
             var endDate = startDate.AddDays(1);
 
-            var query = _dbSet.Where(x =>
-                x.AttemptedAt >= startDate &&
-                x.AttemptedAt < endDate &&
-                !x.IsDeleted);
-
-            if (organizationId.HasValue)
-                query = query.Where(x => x.OrganizationId == organizationId.Value);
+            var query = organizationId.HasValue
+                ? QueryForOrganization(organizationId.Value)
+                : Query();
 
             var distribution = await query
+                .Where(x => x.AttemptedAt >= startDate && x.AttemptedAt < endDate)
                 .GroupBy(x => x.AttemptedAt.Hour)
                 .Select(g => new { Hour = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.Hour, x => x.Count);
 
-            // 모든 시간대를 포함하도록 빈 시간대 채우기
+            // 모든 시간대 포함
             var result = new Dictionary<int, int>();
             for (int i = 0; i < 24; i++)
             {
-                result[i] = distribution.GetValueOrDefault(i, 0);
+                result[i] = distribution.TryGetValue(i, out int count) ? count : 0; // GetValueOrDefault 대신 TryGetValue 사용
             }
 
             return result;
@@ -465,15 +510,14 @@ namespace AuthHive.Auth.Repositories
             DateTime? since = null,
             Guid? organizationId = null)
         {
-            var query = _dbSet.Where(x => !x.IsDeleted);
+            var query = organizationId.HasValue
+                ? QueryForOrganization(organizationId.Value)
+                : Query();
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
-            if (organizationId.HasValue)
-                query = query.Where(x => x.OrganizationId == organizationId.Value);
-
-            var methodStats = await query
+            return await query
                 .GroupBy(x => x.Method)
                 .Select(g => new
                 {
@@ -481,38 +525,37 @@ namespace AuthHive.Auth.Repositories
                     Total = g.Count(),
                     Success = g.Count(x => x.IsSuccess)
                 })
-                .ToDictionaryAsync(x => x.Method, x => x.Total > 0 ? (double)x.Success / x.Total : 0);
-
-            return methodStats;
+                .ToDictionaryAsync(
+                    x => x.Method, 
+                    x => x.Total > 0 ? (double)x.Success / x.Total : 0);
         }
 
         /// <summary>
-        /// 상위 실패 사용자 조회
+        /// 상위 실패 사용자 조회 (Null Safety 개선)
         /// </summary>
         public async Task<IEnumerable<UserFailureStatistics>> GetTopFailedUsersAsync(
             int topCount = 10,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => !x.IsSuccess && x.UserId != null && !x.IsDeleted);
+            var query = Query().Where(x => !x.IsSuccess && x.UserId != null);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
-            var topFailures = await query
+            return await query
                 .GroupBy(x => new { x.UserId, x.Username })
+                .Where(g => g.Key.UserId.HasValue) // 추가 null 체크
                 .Select(g => new UserFailureStatistics
                 {
-                    UserId = g.Key.UserId!.Value,
+                    UserId = g.Key.UserId!.Value, // ! 연산자로 null이 아님을 명시
                     Username = g.Key.Username ?? string.Empty,
                     FailureCount = g.Count(),
                     LastFailure = g.Max(x => x.AttemptedAt),
-                    IsLocked = false // 계정 잠금 상태는 별도 조회 필요
+                    IsLocked = false // 별도 조회 필요
                 })
                 .OrderByDescending(x => x.FailureCount)
-                .Take(topCount)
+                .Take(Math.Min(topCount, 50)) // 안전한 제한
                 .ToListAsync();
-
-            return topFailures;
         }
 
         #endregion
@@ -526,7 +569,7 @@ namespace AuthHive.Auth.Repositories
             Guid? userId = null,
             DateTime? since = null)
         {
-            var query = _dbSet.Where(x => x.MfaRequired && !x.IsDeleted);
+            var query = Query().Where(x => x.MfaRequired);
 
             if (userId.HasValue)
                 query = query.Where(x => x.UserId == userId.Value);
@@ -536,6 +579,7 @@ namespace AuthHive.Auth.Repositories
 
             return await query
                 .OrderByDescending(x => x.AttemptedAt)
+                .Take(1000)
                 .ToListAsync();
         }
 
@@ -546,13 +590,14 @@ namespace AuthHive.Auth.Repositories
             DateTime? since = null,
             Guid? organizationId = null)
         {
-            var query = _dbSet.Where(x => x.MfaRequired && !x.IsDeleted);
+            var query = organizationId.HasValue
+                ? QueryForOrganization(organizationId.Value)
+                : Query();
+
+            query = query.Where(x => x.MfaRequired);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
-
-            if (organizationId.HasValue)
-                query = query.Where(x => x.OrganizationId == organizationId.Value);
 
             var total = await query.CountAsync();
             if (total == 0) return 0;
@@ -563,63 +608,103 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region 정리 작업
+        #region 정리 작업 - 개선된 배치 처리
 
         /// <summary>
-        /// 오래된 로그 정리
+        /// 오래된 로그 정리 - 배치 크기 제한으로 메모리 최적화
         /// </summary>
         public async Task<int> CleanupOldLogsAsync(DateTime before)
         {
-            var oldLogs = await _dbSet
-                .Where(x => x.AttemptedAt < before)
-                .ToListAsync();
+            int totalDeleted = 0;
+            const int batchSize = 1000;
 
-            if (oldLogs.Any())
+            while (true)
             {
-                _dbSet.RemoveRange(oldLogs);
-                await _context.SaveChangesAsync();
+                var batch = await _dbSet
+                    .Where(x => x.AttemptedAt < before && !x.IsDeleted)
+                    .Take(batchSize)
+                    .ToListAsync();
 
-                _logger.LogInformation("Cleaned up {Count} old authentication logs before {Date}",
-                    oldLogs.Count, before);
+                if (batch.Count == 0) // Count 속성 사용
+                    break;
+
+                foreach (var log in batch)
+                {
+                    log.IsDeleted = true;
+                    log.DeletedAt = DateTime.UtcNow;
+                }
+
+                await _context.SaveChangesAsync();
+                totalDeleted += batch.Count;
+
+                _logger.LogInformation("Cleaned up batch of {Count} logs, total: {Total}", 
+                    batch.Count, totalDeleted);
+
+                // 배치 간 약간의 지연으로 시스템 부하 방지
+                await Task.Delay(100);
             }
 
-            return oldLogs.Count;
+            if (totalDeleted > 0)
+            {
+                _logger.LogInformation("Completed cleanup: {Count} logs before {Date}",
+                    totalDeleted, before);
+            }
+
+            return totalDeleted;
         }
 
         /// <summary>
-        /// 성공한 오래된 로그 아카이브
+        /// 성공한 오래된 로그 아카이브 - 개선된 배치 처리
         /// </summary>
         public async Task<int> ArchiveSuccessfulLogsAsync(
             DateTime before,
             string archiveLocation)
         {
-            var successfulLogs = await _dbSet
-                .Where(x => x.IsSuccess && x.AttemptedAt < before)
-                .ToListAsync();
+            int totalArchived = 0;
+            const int batchSize = 1000;
 
-            if (!successfulLogs.Any())
-                return 0;
+            while (true)
+            {
+                var batch = await _dbSet
+                    .Where(x => x.IsSuccess && x.AttemptedAt < before && !x.IsDeleted)
+                    .Take(batchSize)
+                    .ToListAsync();
 
-            // TODO: 실제 아카이브 로직 구현 (예: BigQuery, 파일 시스템 등)
-            // 여기서는 삭제만 수행
-            _dbSet.RemoveRange(successfulLogs);
-            await _context.SaveChangesAsync();
+                if (batch.Count == 0) // Count 속성 사용
+                    break;
 
-            _logger.LogInformation("Archived {Count} successful authentication logs to {Location}",
-                successfulLogs.Count, archiveLocation);
+                // TODO: 실제 아카이브 로직 구현
+                // 예: await _archiveService.ArchiveAsync(batch, archiveLocation);
 
-            return successfulLogs.Count;
+                _dbSet.RemoveRange(batch);
+                await _context.SaveChangesAsync();
+
+                totalArchived += batch.Count;
+
+                _logger.LogInformation("Archived batch of {Count} logs, total: {Total}", 
+                    batch.Count, totalArchived);
+
+                await Task.Delay(100);
+            }
+
+            if (totalArchived > 0)
+            {
+                _logger.LogInformation("Completed archiving: {Count} logs to {Location}",
+                    totalArchived, archiveLocation);
+            }
+
+            return totalArchived;
         }
 
         #endregion
 
-        #region Private Helper Methods
+        #region Private Helper Methods - 병렬 처리 최적화
 
         private async Task<IEnumerable<AnomalyPattern>> DetectMultipleIpAccessAsync(
             Guid? userId,
             DateTime? since)
         {
-            var query = _dbSet.Where(x => !x.IsDeleted);
+            var query = Query();
 
             if (userId.HasValue)
                 query = query.Where(x => x.UserId == userId.Value);
@@ -627,7 +712,8 @@ namespace AuthHive.Auth.Repositories
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
-            var multiIpUsers = await query
+            return await query
+                .Where(x => x.UserId != null) // Null UserId 필터링
                 .GroupBy(x => x.UserId)
                 .Where(g => g.Select(x => x.IpAddress).Distinct().Count() > 3)
                 .Select(g => new AnomalyPattern
@@ -639,16 +725,13 @@ namespace AuthHive.Auth.Repositories
                     DetectedAt = DateTime.UtcNow
                 })
                 .ToListAsync();
-
-            return multiIpUsers;
         }
 
         private async Task<IEnumerable<AnomalyPattern>> DetectUnusualTimeAccessAsync(
             Guid? userId,
             DateTime? since)
         {
-            // 비정상적인 시간대 (새벽 2-5시) 접근 탐지
-            var query = _dbSet.Where(x => !x.IsDeleted);
+            var query = Query().Where(x => x.AttemptedAt.Hour >= 2 && x.AttemptedAt.Hour <= 5);
 
             if (userId.HasValue)
                 query = query.Where(x => x.UserId == userId.Value);
@@ -656,8 +739,8 @@ namespace AuthHive.Auth.Repositories
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
-            var unusualTimeAccess = await query
-                .Where(x => x.AttemptedAt.Hour >= 2 && x.AttemptedAt.Hour <= 5)
+            return await query
+                .Where(x => x.UserId != null) // Null UserId 필터링
                 .GroupBy(x => x.UserId)
                 .Where(g => g.Count() > 5)
                 .Select(g => new AnomalyPattern
@@ -669,20 +752,13 @@ namespace AuthHive.Auth.Repositories
                     DetectedAt = DateTime.UtcNow
                 })
                 .ToListAsync();
-
-            return unusualTimeAccess;
         }
 
         private async Task<IEnumerable<AnomalyPattern>> DetectGeographicalAnomaliesAsync(
             Guid? userId,
             DateTime? since)
         {
-            // 지리적 이상 징후 탐지 (IP 기반 위치 변경)
-            // 실제 구현에서는 IP-지리 정보 매핑 서비스를 활용
-            // 여기서는 간단한 예시만 제공
-            var anomalies = new List<AnomalyPattern>();
-
-            var query = _dbSet.Where(x => !x.IsDeleted);
+            var query = Query();
 
             if (userId.HasValue)
                 query = query.Where(x => x.UserId == userId.Value);
@@ -690,8 +766,8 @@ namespace AuthHive.Auth.Repositories
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
 
-            // IP 변경이 잦은 사용자 감지
-            var frequentIpChanges = await query
+            return await query
+                .Where(x => x.UserId != null) // Null UserId 필터링
                 .GroupBy(x => x.UserId)
                 .Where(g => g.Select(x => x.IpAddress).Distinct().Count() > 10)
                 .Select(g => new AnomalyPattern
@@ -703,10 +779,6 @@ namespace AuthHive.Auth.Repositories
                     DetectedAt = DateTime.UtcNow
                 })
                 .ToListAsync();
-
-            anomalies.AddRange(frequentIpChanges);
-
-            return anomalies;
         }
 
         #endregion

@@ -1,540 +1,279 @@
+using AuthHive.Auth.Data.Context;
+using AuthHive.Auth.Repositories.Base;
+using AuthHive.Core.Models.Common;
+using AuthHive.Core.Interfaces.Base;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 using System.Linq.Expressions;
-using Microsoft.EntityFrameworkCore;
-using AuthHive.Core.Entities.PlatformApplications;
+using System.Threading.Tasks;
+
+// 엔티티 별칭
+using PlatformApplicationEntity = AuthHive.Core.Entities.PlatformApplications.PlatformApplication;
+// 인터페이스 네임스페이스 (프로젝트에 맞게 확인)
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Models.Common;
-using AuthHive.Auth.Data.Context;
 
-namespace AuthHive.Auth.Repositories.PlatformApplication;
-
-/// <summary>
-/// 플랫폼 애플리케이션 저장소 구현체 - AuthHive v15
-/// v15 핵심: API 소비 및 자원 사용의 주체, 포인트 차감의 컨텍스트
-/// </summary>
-public class PlatformApplicationRepository : IPlatformApplicationRepository, IOrganizationScopedRepository<Core.Entities.PlatformApplications.PlatformApplication>
+namespace AuthHive.Auth.Repositories
 {
-    private readonly AuthDbContext _context;
-    private readonly DbSet<Core.Entities.PlatformApplications.PlatformApplication> _dbSet;
-
-    public PlatformApplicationRepository(AuthDbContext context)
+    public class PlatformApplicationRepository : BaseRepository<PlatformApplicationEntity>, IPlatformApplicationRepository
     {
-        _context = context;
-        _dbSet = context.Set<Core.Entities.PlatformApplications.PlatformApplication>();
-    }
-
-    #region IRepository<T> 기본 구현
-
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication?> GetByIdAsync(Guid id)
-    {
-        return await _dbSet
-            .Include(x => x.Organization)
-            .Include(x => x.ApiKeys.Where(k => !k.IsDeleted))
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted);
-    }
-
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication?> GetByIdNoTrackingAsync(Guid id)
-    {
-        return await _dbSet
-            .AsNoTracking()
-            .Include(x => x.Organization)
-            .Include(x => x.ApiKeys.Where(k => !k.IsDeleted))
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted);
-    }
-
-    public async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> GetAllAsync()
-    {
-        return await _dbSet
-            .Where(x => !x.IsDeleted)
-            .ToListAsync();
-    }
-
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication> AddAsync(Core.Entities.PlatformApplications.PlatformApplication entity)
-    {
-        await _dbSet.AddAsync(entity);
-        await _context.SaveChangesAsync();
-        return entity;
-    }
-
-    public async Task UpdateAsync(Core.Entities.PlatformApplications.PlatformApplication entity)
-    {
-        _dbSet.Update(entity);
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task DeleteAsync(Guid id)
-    {
-        var entity = await GetByIdAsync(id);
-        if (entity == null) return;
-
-        entity.IsDeleted = true;
-        entity.DeletedAt = DateTime.UtcNow;
-        _dbSet.Update(entity);
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task<bool> SoftDeleteAsync(Guid id, Guid deletedByConnectedId)
-    {
-        var entity = await GetByIdAsync(id);
-        if (entity == null) return false;
-
-        entity.IsDeleted = true;
-        entity.DeletedAt = DateTime.UtcNow;
-        // deletedByConnectedId는 AuditableEntity의 감사 필드로 설정됨
-        _dbSet.Update(entity);
-        await _context.SaveChangesAsync();
-        return true;
-    }
-
-    public async Task<bool> ExistsAsync(Guid id)
-    {
-        return await _dbSet.AnyAsync(x => x.Id == id && !x.IsDeleted);
-    }
-
-    public async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> FindAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>> predicate)
-    {
-        return await _dbSet
-            .Where(predicate)
-            .Where(x => !x.IsDeleted)
-            .ToListAsync();
-    }
-
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication?> FirstOrDefaultAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>> predicate)
-    {
-        return await _dbSet
-            .Where(predicate)
-            .Where(x => !x.IsDeleted)
-            .FirstOrDefaultAsync();
-    }
-
-    public async Task<bool> AnyAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>> predicate)
-    {
-        return await _dbSet
-            .Where(predicate)
-            .Where(x => !x.IsDeleted)
-            .AnyAsync();
-    }
-
-    public async Task<int> CountAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>>? predicate = null)
-    {
-        var query = _dbSet.Where(x => !x.IsDeleted);
-        if (predicate != null)
-            query = query.Where(predicate);
-        return await query.CountAsync();
-    }
-
-    public async Task AddRangeAsync(IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> entities)
-    {
-        await _dbSet.AddRangeAsync(entities);
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task UpdateRangeAsync(IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> entities)
-    {
-        _dbSet.UpdateRange(entities);
-        await _context.SaveChangesAsync();
-    }
-
-    public async Task DeleteAsync(Core.Entities.PlatformApplications.PlatformApplication entity)
-    {
-        await DeleteAsync(entity.Id);
-    }
-
-    public async Task DeleteRangeAsync(IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> entities)
-    {
-        foreach (var entity in entities)
+        public PlatformApplicationRepository(
+            AuthDbContext context,
+            IOrganizationContext organizationContext,
+            IMemoryCache? cache = null)
+            : base(context, organizationContext, cache)
         {
+        }
+
+        #region IPlatformApplicationRepository 구현
+
+        // BaseRepository의 GetByIdAsync를 그대로 사용
+        // 인터페이스에서 요구하는 GetByIdAsync는 BaseRepository에서 구현됨
+
+        public async Task<PlatformApplicationEntity?> GetByIdNoTrackingAsync(Guid id)
+        {
+            return await Query().AsNoTracking().FirstOrDefaultAsync(app => app.Id == id);
+        }
+
+        public async Task<PlatformApplicationEntity?> GetByApplicationKeyAsync(string applicationKey)
+        {
+            return await Query().FirstOrDefaultAsync(app => app.ApplicationKey == applicationKey);
+        }
+
+        // BaseRepository에서 이미 구현된 GetByOrganizationIdAsync를 override로 재정의하거나
+        // 다른 이름으로 메서드를 만들어야 함. 여기서는 BaseRepository 것을 사용하되 명시적으로 override
+        public override async Task<IEnumerable<PlatformApplicationEntity>> GetByOrganizationIdAsync(Guid organizationId)
+        {
+            // BaseRepository의 기본 구현을 활용
+            return await base.GetByOrganizationIdAsync(organizationId);
+        }
+
+        // 추가적인 조직별 조회가 필요하다면 새로운 이름으로 메서드 생성
+        public async Task<IEnumerable<PlatformApplicationEntity>> GetApplicationsByOrganizationAsync(Guid organizationId)
+        {
+            return await Query()
+                .Where(app => app.OrganizationId == organizationId)
+                .OrderBy(app => app.Name)
+                .ToListAsync();
+        }
+
+        // 인터페이스 요구사항: AddAsync(PlatformApplication) 구현
+        // BaseRepository의 AddAsync를 확장하여 SaveChanges까지 처리
+        async Task<PlatformApplicationEntity> IPlatformApplicationRepository.AddAsync(PlatformApplicationEntity application)
+        {
+            var result = await base.AddAsync(application);
+            await SaveChangesAsync();
+            return result;
+        }
+
+        // 인터페이스 요구사항: UpdateAsync(PlatformApplication) 구현
+        // BaseRepository의 UpdateAsync를 확장하여 SaveChanges까지 처리 및 반환값 추가
+        async Task<PlatformApplicationEntity> IPlatformApplicationRepository.UpdateAsync(PlatformApplicationEntity application)
+        {
+            await base.UpdateAsync(application);
+            await SaveChangesAsync();
+            return application;
+        }
+
+        // 인터페이스 요구사항: DeleteAsync(Guid) 구현
+        // BaseRepository에는 DeleteAsync(TEntity)만 있으므로 새로운 기능으로 구현
+        async Task<bool> IPlatformApplicationRepository.DeleteAsync(Guid id)
+        {
+            var entity = await GetByIdAsync(id);
+            if (entity == null) return false;
+
+            await base.DeleteAsync(entity);
+            return await SaveChangesAsync() > 0;
+        }
+
+        // 인터페이스 요구사항: SoftDeleteAsync(Guid, Guid) 구현
+        // BaseRepository에는 SoftDeleteAsync(Guid)만 있으므로 새로운 기능으로 구현
+        async Task<bool> IPlatformApplicationRepository.SoftDeleteAsync(Guid id, Guid deletedByConnectedId)
+        {
+            var entity = await GetByIdAsync(id);
+            if (entity == null) return false;
+
             entity.IsDeleted = true;
             entity.DeletedAt = DateTime.UtcNow;
-        }
-        _dbSet.UpdateRange(entities);
-        await _context.SaveChangesAsync();
-    }
+            // deletedByConnectedId 속성이 있다면 설정 (엔티티 구조에 따라)
+            // entity.DeletedBy = deletedByConnectedId;
 
-    public async Task SoftDeleteAsync(Guid id)
-    {
-        await DeleteAsync(id);
-    }
-
-    public async Task<bool> ExistsAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>> predicate)
-    {
-        return await _dbSet.Where(predicate).Where(x => !x.IsDeleted).AnyAsync();
-    }
-
-    public async Task<(IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> Items, int TotalCount)> GetPagedAsync(
-        int pageNumber,
-        int pageSize,
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>>? predicate = null,
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, object>>? orderBy = null,
-        bool isDescending = false)
-    {
-        var query = _dbSet.Where(x => !x.IsDeleted);
-
-        if (predicate != null)
-            query = query.Where(predicate);
-
-        var totalCount = await query.CountAsync();
-
-        if (orderBy != null)
-        {
-            query = isDescending 
-                ? query.OrderByDescending(orderBy) 
-                : query.OrderBy(orderBy);
+            await base.UpdateAsync(entity);
+            return await SaveChangesAsync() > 0;
         }
 
-        var items = await query
-            .Skip((pageNumber - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
+        // BaseRepository의 FindAsync를 그대로 사용
+        // 인터페이스에서 요구하는 FindAsync는 BaseRepository에서 구현됨
 
-        return (items, totalCount);
-    }
-
-    #endregion
-
-    #region IOrganizationScopedRepository<T> 구현
-
-    public async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> GetByOrganizationIdAsync(Guid organizationId)
-    {
-        return await _dbSet
-            .Where(x => x.OrganizationId == organizationId && !x.IsDeleted)
-            .Include(x => x.ApiKeys.Where(k => !k.IsDeleted))
-            .ToListAsync();
-    }
-
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication?> GetByIdAndOrganizationAsync(Guid id, Guid organizationId)
-    {
-        return await _dbSet
-            .Include(x => x.Organization)
-            .Include(x => x.ApiKeys.Where(k => !k.IsDeleted))
-            .FirstOrDefaultAsync(x => x.Id == id && x.OrganizationId == organizationId && !x.IsDeleted);
-    }
-
-    public async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> FindByOrganizationAsync(
-        Guid organizationId, 
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>> predicate)
-    {
-        return await _dbSet
-            .Where(x => x.OrganizationId == organizationId && !x.IsDeleted)
-            .Where(predicate)
-            .ToListAsync();
-    }
-
-    public async Task<(IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> Items, int TotalCount)> GetPagedByOrganizationAsync(
-        Guid organizationId,
-        int pageNumber,
-        int pageSize,
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>>? additionalPredicate = null,
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, object>>? orderBy = null,
-        bool isDescending = false)
-    {
-        var query = _dbSet.Where(x => x.OrganizationId == organizationId && !x.IsDeleted);
-
-        if (additionalPredicate != null)
-            query = query.Where(additionalPredicate);
-
-        var totalCount = await query.CountAsync();
-
-        if (orderBy != null)
+        public async Task<PlatformApplicationEntity?> FindSingleAsync(Expression<Func<PlatformApplicationEntity, bool>> predicate)
         {
-            query = isDescending 
-                ? query.OrderByDescending(orderBy) 
-                : query.OrderBy(orderBy);
+            return await Query().FirstOrDefaultAsync(predicate);
         }
 
-        var items = await query
-            .Skip((pageNumber - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
-
-        return (items, totalCount);
-    }
-
-    public async Task<bool> ExistsInOrganizationAsync(Guid id, Guid organizationId)
-    {
-        return await _dbSet.AnyAsync(x => x.Id == id && x.OrganizationId == organizationId && !x.IsDeleted);
-    }
-
-    public async Task<int> CountByOrganizationAsync(
-        Guid organizationId, 
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>>? predicate = null)
-    {
-        var query = _dbSet.Where(x => x.OrganizationId == organizationId && !x.IsDeleted);
-        
-        if (predicate != null)
-            query = query.Where(predicate);
-            
-        return await query.CountAsync();
-    }
-
-    public async Task DeleteAllByOrganizationAsync(Guid organizationId)
-    {
-        var entities = await GetByOrganizationIdAsync(organizationId);
-        
-        foreach (var entity in entities)
+        // 인터페이스 요구사항: GetPagedAsync with includes 구현
+        // BaseRepository의 GetPagedAsync와 다른 시그니처이므로 새로운 기능으로 구현
+        async Task<PaginationResponse<PlatformApplicationEntity>> IPlatformApplicationRepository.GetPagedAsync(
+            Expression<Func<PlatformApplicationEntity, bool>>? predicate,
+            PaginationRequest pagination,
+            params Expression<Func<PlatformApplicationEntity, object>>[] includes)
         {
-            entity.IsDeleted = true;
-            entity.DeletedAt = DateTime.UtcNow;
-        }
-        
-        _dbSet.UpdateRange(entities);
-        await _context.SaveChangesAsync();
-    }
+            var query = Query();
 
-    #endregion
+            if (predicate != null)
+            {
+                query = query.Where(predicate);
+            }
 
-    #region IApplicationRepository 구현
+            foreach (var include in includes)
+            {
+                query = query.Include(include);
+            }
 
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication?> GetByApplicationKeyAsync(string applicationKey)
-    {
-        return await _dbSet
-            .Include(x => x.Organization)
-            .Include(x => x.ApiKeys.Where(k => !k.IsDeleted))
-            .FirstOrDefaultAsync(x => x.ApplicationKey == applicationKey && !x.IsDeleted);
-    }
+            var totalCount = await query.CountAsync();
+            var items = await query
+                .Skip((pagination.PageNumber - 1) * pagination.PageSize)
+                .Take(pagination.PageSize)
+                .ToListAsync();
 
-    public async Task<Core.Entities.PlatformApplications.PlatformApplication?> FindSingleAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>> predicate)
-    {
-        return await _dbSet
-            .Where(predicate)
-            .Where(x => !x.IsDeleted)
-            .FirstOrDefaultAsync();
-    }
-
-    public async Task<PaginationResponse<Core.Entities.PlatformApplications.PlatformApplication>> GetPagedAsync(
-        Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, bool>>? predicate,
-        PaginationRequest pagination,
-        params Expression<Func<Core.Entities.PlatformApplications.PlatformApplication, object>>[] includes)
-    {
-        var query = _dbSet.Where(x => !x.IsDeleted);
-
-        if (predicate != null)
-            query = query.Where(predicate);
-
-        // Include 처리
-        foreach (var include in includes)
-        {
-            query = query.Include(include);
+            // PaginationResponse.Create 메서드가 없다면 생성자 사용
+            return PaginationResponse<PlatformApplicationEntity>.Create(items, totalCount, pagination.PageNumber, pagination.PageSize);
         }
 
-        var totalCount = await query.CountAsync();
-        var items = await query
-            .Skip((pagination.PageNumber - 1) * pagination.PageSize)
-            .Take(pagination.PageSize)
-            .ToListAsync();
-
-        return new PaginationResponse<Core.Entities.PlatformApplications.PlatformApplication>
+        public IQueryable<PlatformApplicationEntity> GetQueryable()
         {
-            Items = items,
-            TotalCount = totalCount,
-            PageNumber = pagination.PageNumber,
-            PageSize = pagination.PageSize
-        };
-    }
-
-    public IQueryable<Core.Entities.PlatformApplications.PlatformApplication> GetQueryable()
-    {
-        return _dbSet.Where(x => !x.IsDeleted);
-    }
-
-    public async Task<bool> ExistsByApplicationKeyAsync(string applicationKey, Guid? excludeId = null)
-    {
-        var query = _dbSet.Where(x => x.ApplicationKey == applicationKey && !x.IsDeleted);
-
-        if (excludeId.HasValue)
-            query = query.Where(x => x.Id != excludeId.Value);
-
-        return await query.AnyAsync();
-    }
-
-    public async Task<bool> IsDuplicateNameAsync(Guid organizationId, string name, Guid? excludeId = null)
-    {
-        var query = _dbSet.Where(x => x.OrganizationId == organizationId && 
-                                     x.Name == name && 
-                                     !x.IsDeleted);
-
-        if (excludeId.HasValue)
-            query = query.Where(x => x.Id != excludeId.Value);
-
-        return await query.AnyAsync();
-    }
-
-    public async Task<bool> DeleteRangeAsync(IEnumerable<Guid> ids)
-    {
-        var applications = await _dbSet
-            .Where(x => ids.Contains(x.Id) && !x.IsDeleted)
-            .ToListAsync();
-
-        foreach (var app in applications)
-        {
-            app.IsDeleted = true;
-            app.DeletedAt = DateTime.UtcNow;
+            return Query();
         }
 
-        _dbSet.UpdateRange(applications);
-        await _context.SaveChangesAsync();
-        return applications.Any();
-    }
+        // BaseRepository의 ExistsAsync(Guid)를 그대로 사용
+        // 인터페이스에서 요구하는 ExistsAsync는 BaseRepository에서 구현됨
 
-    public async Task<int> GetCountByOrganizationAsync(Guid organizationId)
-    {
-        return await _dbSet
-            .Where(x => x.OrganizationId == organizationId && !x.IsDeleted)
-            .CountAsync();
-    }
-
-    public async Task<int> GetActiveCountByOrganizationAsync(Guid organizationId)
-    {
-        return await _dbSet
-            .Where(x => x.OrganizationId == organizationId && 
-                       x.Status == ApplicationStatus.Active && 
-                       !x.IsDeleted)
-            .CountAsync();
-    }
-
-    public async Task<Dictionary<string, int>> GetCountByTypeAsync(Guid organizationId)
-    {
-        return await _dbSet
-            .Where(x => x.OrganizationId == organizationId && !x.IsDeleted)
-            .GroupBy(x => x.ApplicationType)
-            .ToDictionaryAsync(g => g.Key.ToString(), g => g.Count());
-    }
-
-    public async Task<int> SaveChangesAsync()
-    {
-        return await _context.SaveChangesAsync();
-    }
-
-    // IApplicationRepository에서 요구하는 특별한 반환 타입을 가진 메서드들
-    async Task<Core.Entities.PlatformApplications.PlatformApplication> IPlatformApplicationRepository.AddAsync(Core.Entities.PlatformApplications.PlatformApplication application)
-    {
-        await _dbSet.AddAsync(application);
-        await _context.SaveChangesAsync();
-        return application;
-    }
-
-    async Task<Core.Entities.PlatformApplications.PlatformApplication> IPlatformApplicationRepository.UpdateAsync(Core.Entities.PlatformApplications.PlatformApplication application)
-    {
-        _dbSet.Update(application);
-        await _context.SaveChangesAsync();
-        return application;
-    }
-
-    async Task<bool> IPlatformApplicationRepository.DeleteAsync(Guid id)
-    {
-        var entity = await GetByIdAsync(id);
-        if (entity == null) return false;
-
-        entity.IsDeleted = true;
-        entity.DeletedAt = DateTime.UtcNow;
-        _dbSet.Update(entity);
-        await _context.SaveChangesAsync();
-        return true;
-    }
-
-    async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> IPlatformApplicationRepository.AddRangeAsync(
-        IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> applications)
-    {
-        await _dbSet.AddRangeAsync(applications);
-        await _context.SaveChangesAsync();
-        return applications;
-    }
-
-    async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> IPlatformApplicationRepository.UpdateRangeAsync(
-        IEnumerable<Core.Entities.PlatformApplications.PlatformApplication> applications)
-    {
-        _dbSet.UpdateRange(applications);
-        await _context.SaveChangesAsync();
-        return applications;
-    }
-
-    #endregion
-
-    #region 비즈니스 메서드들
-
-    public async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> GetActiveApplicationsByOrganizationAsync(
-        Guid organizationId,
-        ApplicationEnvironment? environment = null)
-    {
-        var query = _dbSet
-            .Where(x => x.OrganizationId == organizationId && 
-                       x.Status == ApplicationStatus.Active &&
-                       !x.IsDeleted);
-
-        if (environment.HasValue)
+        public async Task<bool> ExistsByApplicationKeyAsync(string applicationKey, Guid? excludeId = null)
         {
-            query = query.Where(x => x.Environment == environment.Value);
+            var query = Query().Where(app => app.ApplicationKey == applicationKey);
+            if (excludeId.HasValue)
+            {
+                query = query.Where(app => app.Id != excludeId.Value);
+            }
+            return await query.AnyAsync();
         }
 
-        return await query
-            .Include(x => x.ApiKeys.Where(k => !k.IsDeleted))
-            .OrderBy(x => x.Name)
-            .ToListAsync();
-    }
-
-    public async Task<IEnumerable<Core.Entities.PlatformApplications.PlatformApplication>> GetQuotaExceededApplicationsAsync(
-        Guid? organizationId = null,
-        double thresholdPercentage = 80.0)
-    {
-        var query = _dbSet.Where(x => !x.IsDeleted && x.Status == ApplicationStatus.Active);
-
-        if (organizationId.HasValue)
+        public async Task<bool> IsDuplicateNameAsync(Guid organizationId, string name, Guid? excludeId = null)
         {
-            query = query.Where(x => x.OrganizationId == organizationId.Value);
+            var query = Query().Where(app => app.OrganizationId == organizationId && app.Name == name);
+            if (excludeId.HasValue)
+            {
+                query = query.Where(app => app.Id != excludeId.Value);
+            }
+            return await query.AnyAsync();
         }
 
-        return await query
-            .Where(x => 
-                // API 할당량 초과
-                (x.MonthlyApiQuota > 0 && 
-                 (x.CurrentMonthlyApiUsage * 100m / (decimal)x.MonthlyApiQuota) >= (decimal)thresholdPercentage) ||
-                // 스토리지 할당량 초과
-                (x.StorageQuotaGB > 0 && 
-                 (x.CurrentStorageUsageGB * 100m / x.StorageQuotaGB) >= (decimal)thresholdPercentage))
-            .Include(x => x.Organization)
-            .OrderByDescending(x => x.CurrentMonthlyApiUsage)
-            .ToListAsync();
+        // 인터페이스 요구사항: AddRangeAsync 구현
+        // BaseRepository의 AddRangeAsync를 확장하여 SaveChanges까지 처리 및 반환값 추가
+        async Task<IEnumerable<PlatformApplicationEntity>> IPlatformApplicationRepository.AddRangeAsync(IEnumerable<PlatformApplicationEntity> applications)
+        {
+            await base.AddRangeAsync(applications);
+            await SaveChangesAsync();
+            return applications;
+        }
+
+        // 인터페이스 요구사항: UpdateRangeAsync 구현  
+        // BaseRepository의 UpdateRangeAsync를 확장하여 SaveChanges까지 처리 및 반환값 추가
+        async Task<IEnumerable<PlatformApplicationEntity>> IPlatformApplicationRepository.UpdateRangeAsync(IEnumerable<PlatformApplicationEntity> applications)
+        {
+            await base.UpdateRangeAsync(applications);
+            await SaveChangesAsync();
+            return applications;
+        }
+
+        // 인터페이스 요구사항: DeleteRangeAsync(IEnumerable<Guid>) 구현
+        // BaseRepository에는 DeleteRangeAsync(IEnumerable<TEntity>)만 있으므로 새로운 기능으로 구현
+        async Task<bool> IPlatformApplicationRepository.DeleteRangeAsync(IEnumerable<Guid> ids)
+        {
+            var entities = await Query().Where(e => ids.Contains(e.Id)).ToListAsync();
+            if (!entities.Any()) return false;
+
+            await base.DeleteRangeAsync(entities);
+            return await SaveChangesAsync() > 0;
+        }
+
+        public async Task<int> GetCountByOrganizationAsync(Guid organizationId)
+        {
+            // BaseRepository의 CountByOrganizationAsync가 있다면 활용
+            return await CountByOrganizationAsync(organizationId);
+        }
+
+        public async Task<int> GetActiveCountByOrganizationAsync(Guid organizationId)
+        {
+            return await CountByOrganizationAsync(organizationId, app => app.IsActive);
+        }
+
+        public async Task<Dictionary<string, int>> GetCountByTypeAsync(Guid organizationId)
+        {
+            // BaseRepository의 GetGroupCountAsync 활용
+            return await GetGroupCountAsync(
+                app => app.ApplicationType.ToString(),
+                app => app.OrganizationId == organizationId);
+        }
+
+        public async Task<int> SaveChangesAsync()
+        {
+            return await _context.SaveChangesAsync();
+        }
+
+        #endregion
+
+        #region BaseRepository 메서드 활용 예시
+
+        /// <summary>
+        /// BaseRepository의 페이징 기능을 활용한 조직별 애플리케이션 조회
+        /// </summary>
+        public async Task<(IEnumerable<PlatformApplicationEntity> Items, int TotalCount)> GetPagedByOrganizationAsync(
+            Guid organizationId,
+            int pageNumber = 1,
+            int pageSize = 10,
+            bool activeOnly = false)
+        {
+            Expression<Func<PlatformApplicationEntity, bool>> predicate = app => app.OrganizationId == organizationId;
+
+            if (activeOnly)
+            {
+                predicate = app => app.OrganizationId == organizationId && app.IsActive;
+            }
+
+            return await GetPagedAsync(
+                pageNumber,
+                pageSize,
+                predicate,
+                app => app.Name); // 이름순 정렬
+        }
+
+        /// <summary>
+        /// BaseRepository의 통계 기능을 활용한 애플리케이션 상태별 통계
+        /// </summary>
+        public async Task<Dictionary<bool, int>> GetStatusStatisticsAsync(Guid organizationId)
+        {
+            return await GetGroupCountAsync(
+                app => app.IsActive,
+                app => app.OrganizationId == organizationId);
+        }
+
+        /// <summary>
+        /// BaseRepository의 날짜별 통계 기능 활용
+        /// </summary>
+        public async Task<Dictionary<DateTime, int>> GetDailyCreationStatsAsync(
+            Guid organizationId,
+            DateTime startDate,
+            DateTime endDate)
+        {
+            return await GetDailyCountAsync(
+                app => app.CreatedAt,
+                startDate,
+                endDate,
+                app => app.OrganizationId == organizationId);
+        }
+
+        #endregion
     }
-
-    public async Task UpdateApiUsageAsync(
-        Guid applicationId,
-        long dailyIncrement = 0,
-        long monthlyIncrement = 0)
-    {
-        var application = await GetByIdAsync(applicationId);
-        if (application == null) return;
-
-        if (dailyIncrement > 0)
-            application.CurrentDailyApiUsage += dailyIncrement;
-
-        if (monthlyIncrement > 0)
-            application.CurrentMonthlyApiUsage += monthlyIncrement;
-
-        application.LastActivityAt = DateTime.UtcNow;
-        
-        _dbSet.Update(application);
-        await _context.SaveChangesAsync();
-    }
-
-    #endregion
 }
-
-/*
-TODO: DbContext OnModelCreating에서 설정
-- ApplicationKey 유니크 인덱스
-- (OrganizationId, ApplicationKey) 복합 유니크 인덱스
-- (OrganizationId, Status) 복합 인덱스
-- Status, ApplicationType, Environment 인덱스
-- LastActivityAt 인덱스 (사용량 정렬용)
-*/

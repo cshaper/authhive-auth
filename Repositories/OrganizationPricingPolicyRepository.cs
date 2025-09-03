@@ -4,20 +4,26 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Business.Commerce.Billing.Common;
 using AuthHive.Core.Models.Business.Commerce.Common;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Enums.Business;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
     /// 조직 가격 정책 리포지토리 구현체 - AuthHive v15
     /// 조직별 커스터마이징된 가격 정책 관리를 담당합니다.
+    /// BaseRepository로 변경되어 자동 조직 필터링 및 캐싱 기능 활용
     /// </summary>
-    public class OrganizationPricingPolicyRepository : OrganizationScopedRepository<OrganizationPricingPolicy>, IOrganizationPricingPolicyRepository
+    public class OrganizationPricingPolicyRepository : BaseRepository<OrganizationPricingPolicy>, IOrganizationPricingPolicyRepository
     {
-        public OrganizationPricingPolicyRepository(AuthDbContext context) : base(context)
+        public OrganizationPricingPolicyRepository(
+            AuthDbContext context,
+            IOrganizationContext organizationContext,
+            IMemoryCache? cache = null) : base(context, organizationContext, cache)
         {
         }
 
@@ -31,9 +37,8 @@ namespace AuthHive.Auth.Repositories
             string policyName,
             CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .FirstOrDefaultAsync(p =>
-                    p.OrganizationId == organizationId &&
                     p.PolicyName == policyName &&
                     !p.IsDeleted,
                     cancellationToken);
@@ -48,10 +53,8 @@ namespace AuthHive.Auth.Repositories
             bool activeOnly = true,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.PolicyType == policyType &&
-                !p.IsDeleted);
+            var query = QueryForOrganization(organizationId)
+                .Where(p => p.PolicyType == policyType && !p.IsDeleted);
 
             if (activeOnly)
             {
@@ -73,11 +76,11 @@ namespace AuthHive.Auth.Repositories
             string? targetKey = null,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.TargetType == targetType &&
-                p.IsActive &&
-                !p.IsDeleted);
+            var query = QueryForOrganization(organizationId)
+                .Where(p =>
+                    p.TargetType == targetType &&
+                    p.IsActive &&
+                    !p.IsDeleted);
 
             if (!string.IsNullOrEmpty(targetKey))
             {
@@ -99,10 +102,10 @@ namespace AuthHive.Auth.Repositories
             Guid? excludePolicyId = null,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.PolicyName == policyName &&
-                !p.IsDeleted);
+            var query = QueryForOrganization(organizationId)
+                .Where(p =>
+                    p.PolicyName == policyName &&
+                    !p.IsDeleted);
 
             if (excludePolicyId.HasValue)
             {
@@ -258,12 +261,12 @@ namespace AuthHive.Auth.Repositories
             string? targetKey = null,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.TargetType == targetType &&
-                p.IsActive &&
-                !p.IsDeleted &&
-                (p.DiscountRate > 0 || p.DiscountAmount > 0));
+            var query = QueryForOrganization(organizationId)
+                .Where(p =>
+                    p.TargetType == targetType &&
+                    p.IsActive &&
+                    !p.IsDeleted &&
+                    (p.DiscountRate > 0 || p.DiscountAmount > 0));
 
             if (!string.IsNullOrEmpty(targetKey))
             {
@@ -364,9 +367,8 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.PolicyType == PricingPolicyType.NegotiatedRate &&
                     p.IsActive &&
                     !p.IsDeleted)
@@ -402,9 +404,8 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.PointBonusRate > 0 &&
                     p.IsActive &&
                     !p.IsDeleted)
@@ -459,9 +460,8 @@ namespace AuthHive.Auth.Repositories
         {
             var checkDate = asOfDate ?? DateTime.UtcNow;
 
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.IsActive &&
                     p.EffectiveFrom <= checkDate &&
                     (p.EffectiveUntil == null || p.EffectiveUntil >= checkDate) &&
@@ -479,9 +479,8 @@ namespace AuthHive.Auth.Repositories
         {
             var now = DateTime.UtcNow;
 
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.EffectiveUntil.HasValue &&
                     p.EffectiveUntil < now &&
                     !p.IsDeleted)
@@ -534,10 +533,8 @@ namespace AuthHive.Auth.Repositories
             PricingTargetType? targetType = null,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.IsActive &&
-                !p.IsDeleted);
+            var query = QueryForOrganization(organizationId)
+                .Where(p => p.IsActive && !p.IsDeleted);
 
             if (targetType.HasValue)
             {
@@ -559,11 +556,11 @@ namespace AuthHive.Auth.Repositories
             string? targetKey = null,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.TargetType == targetType &&
-                p.IsActive &&
-                !p.IsDeleted);
+            var query = QueryForOrganization(organizationId)
+                .Where(p =>
+                    p.TargetType == targetType &&
+                    p.IsActive &&
+                    !p.IsDeleted);
 
             if (!string.IsNullOrEmpty(targetKey))
             {
@@ -605,9 +602,8 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     !p.IsApproved &&
                     p.IsActive &&
                     !p.IsDeleted)
@@ -752,9 +748,8 @@ namespace AuthHive.Auth.Repositories
             OrganizationPricingPolicy policy,
             CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await QueryForOrganization(policy.OrganizationId)
                 .Where(p =>
-                    p.OrganizationId == policy.OrganizationId &&
                     p.TargetType == policy.TargetType &&
                     p.TargetKey == policy.TargetKey &&
                     p.PolicyType == policy.PolicyType &&
@@ -774,11 +769,11 @@ namespace AuthHive.Auth.Repositories
             string? targetKey,
             CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(p =>
-                p.OrganizationId == organizationId &&
-                p.TargetType == targetType &&
-                p.IsActive &&
-                !p.IsDeleted);
+            var query = QueryForOrganization(organizationId)
+                .Where(p =>
+                    p.TargetType == targetType &&
+                    p.IsActive &&
+                    !p.IsDeleted);
 
             if (!string.IsNullOrEmpty(targetKey))
             {
@@ -825,9 +820,8 @@ namespace AuthHive.Auth.Repositories
             Action<OrganizationPricingPolicy> updates,
             CancellationToken cancellationToken = default)
         {
-            var policies = await _dbSet
+            var policies = await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.PolicyType == policyType &&
                     !p.IsDeleted)
                 .ToListAsync(cancellationToken);
@@ -852,9 +846,8 @@ namespace AuthHive.Auth.Repositories
             DateTime olderThan,
             CancellationToken cancellationToken = default)
         {
-            var expiredPolicies = await _dbSet
+            var expiredPolicies = await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.EffectiveUntil.HasValue &&
                     p.EffectiveUntil < olderThan &&
                     !p.IsDeleted)
@@ -884,8 +877,8 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
-            var policies = await _dbSet
-                .Where(p => p.OrganizationId == organizationId && !p.IsDeleted)
+            var policies = await QueryForOrganization(organizationId)
+                .Where(p => !p.IsDeleted)
                 .ToListAsync(cancellationToken);
 
             var activePolicies = policies.Where(p => p.IsActive).ToList();
@@ -968,9 +961,8 @@ namespace AuthHive.Auth.Repositories
         {
             var fromDate = DateTime.UtcNow.AddDays(-period);
 
-            var policies = await _dbSet
+            var policies = await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.CreatedAt >= fromDate &&
                     (p.DiscountRate > 0 || p.DiscountAmount > 0) &&
                     !p.IsDeleted)
@@ -1021,9 +1013,8 @@ namespace AuthHive.Auth.Repositories
             TrendInterval interval = TrendInterval.Monthly,
             CancellationToken cancellationToken = default)
         {
-            var policies = await _dbSet
+            var policies = await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     p.CreatedAt >= startDate &&
                     p.CreatedAt <= endDate &&
                     !p.IsDeleted)
@@ -1062,9 +1053,8 @@ namespace AuthHive.Auth.Repositories
             string keyword,
             CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Where(p =>
-                    p.OrganizationId == organizationId &&
                     (p.PolicyName.Contains(keyword) ||
                      (p.Description != null && p.Description.Contains(keyword))) &&
                     !p.IsDeleted)

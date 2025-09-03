@@ -2,7 +2,10 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Base;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -10,13 +13,15 @@ namespace AuthHive.Auth.Repositories
     /// 액세스 토큰 저장소 구현 - AuthHive v15
     /// AccessToken 전용 Repository (RefreshToken 제거됨)
     /// </summary>
-    public class AccessTokenRepository : OrganizationScopedRepository<AccessToken>, IAccessTokenRepository
+    public class AccessTokenRepository : BaseRepository<AccessToken>, IAccessTokenRepository
     {
         private readonly ILogger<AccessTokenRepository> _logger;
 
         public AccessTokenRepository(
             AuthDbContext context,
-            ILogger<AccessTokenRepository> logger) : base(context)
+            IOrganizationContext organizationContext,
+            ILogger<AccessTokenRepository> logger,
+            IMemoryCache? cache = null) : base(context, organizationContext, cache)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
@@ -166,6 +171,7 @@ namespace AuthHive.Auth.Repositories
 
             return affectedRows;
         }
+
         public async Task<int> RevokeAllAccessTokensForClientAsync(Guid clientId, string reason)
         {
             var now = DateTime.UtcNow;
@@ -189,6 +195,7 @@ namespace AuthHive.Auth.Repositories
 
             return affectedRows;
         }
+
         #endregion
 
         #region Helper Methods

@@ -5,6 +5,7 @@ using System.Linq.Expressions;
 using System.Text.Json;
 using System.Threading.Tasks;
 using AuthHive.Auth.Data.Context;
+using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Enums.Core;
@@ -12,6 +13,7 @@ using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 
@@ -19,152 +21,71 @@ namespace AuthHive.Auth.Repositories
 {
     /// <summary>
     /// 세션 활동 로그 리포지토리 구현 - AuthHive v15
+    /// BaseRepository를 상속받아 캐시, 페이징 등 공통 기능을 활용합니다.
     /// </summary>
-    public class SessionActivityLogRepository : ISessionActivityLogRepository
+    public class SessionActivityLogRepository : BaseRepository<SessionActivityLog>, ISessionActivityLogRepository
     {
-        private readonly AuthDbContext _context;
         private readonly ILogger<SessionActivityLogRepository> _logger;
         private readonly Guid _currentOrganizationId;
         private readonly Guid? _currentConnectedId;
+        private readonly IConnectedIdContext _connectedIdContext;
 
         public SessionActivityLogRepository(
             AuthDbContext context,
             ILogger<SessionActivityLogRepository> logger,
             IOrganizationContext organizationContext,
-            IConnectedIdContext connectedIdContext)
+            IConnectedIdContext connectedIdContext,
+            IMemoryCache? cache = null)
+            : base(context, organizationContext, cache) // ✅ 수정: organizationContext 추가
         {
-            _context = context ?? throw new ArgumentNullException(nameof(context));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _currentOrganizationId = organizationContext?.OrganizationId ?? throw new ArgumentNullException(nameof(organizationContext));
             _currentConnectedId = connectedIdContext?.ConnectedId;
+            _connectedIdContext = connectedIdContext ?? throw new ArgumentNullException(nameof(connectedIdContext));
         }
 
-        #region IRepository<SessionActivityLog> Implementation
+        #region BaseRepository 메서드 오버라이드 (조직 필터링 적용)
 
-        public async Task<SessionActivityLog?> GetByIdAsync(Guid id)
+        /// <summary>
+        /// 기본 쿼리에 조직 필터링과 Include 적용
+        /// </summary>
+        public override IQueryable<SessionActivityLog> Query()
         {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Include(l => l.PlatformApplication)
+            return base.Query()
                 .Where(l => l.OrganizationId == _currentOrganizationId)
-                .FirstOrDefaultAsync(l => l.Id == id && !l.IsDeleted);
-        }
-
-        public async Task<IEnumerable<SessionActivityLog>> GetAllAsync()
-        {
-            return await _context.SessionActivityLogs
                 .Include(l => l.Session)
                 .Include(l => l.User)
                 .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted)
-                .OrderByDescending(l => l.OccurredAt)
-                .ToListAsync();
+                .Include(l => l.PlatformApplication);
         }
 
-        public async Task<IEnumerable<SessionActivityLog>> FindAsync(Expression<Func<SessionActivityLog, bool>> predicate)
-        {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted)
-                .Where(predicate)
-                .ToListAsync();
-        }
-
-        public async Task<SessionActivityLog?> FirstOrDefaultAsync(Expression<Func<SessionActivityLog, bool>> predicate)
-        {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted)
-                .Where(predicate)
-                .FirstOrDefaultAsync();
-        }
-
-        public async Task<bool> AnyAsync(Expression<Func<SessionActivityLog, bool>> predicate)
-        {
-            return await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted)
-                .AnyAsync(predicate);
-        }
-
-        public async Task<int> CountAsync(Expression<Func<SessionActivityLog, bool>>? predicate = null)
-        {
-            var query = _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted);
-
-            if (predicate != null)
-            {
-                query = query.Where(predicate);
-            }
-
-            return await query.CountAsync();
-        }
-
-        public async Task<(IEnumerable<SessionActivityLog> Items, int TotalCount)> GetPagedAsync(
-            int pageNumber,
-            int pageSize,
-            Expression<Func<SessionActivityLog, bool>>? predicate = null,
-            Expression<Func<SessionActivityLog, object>>? orderBy = null,
-            bool isDescending = false)
-        {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted);
-
-            if (predicate != null)
-            {
-                query = query.Where(predicate);
-            }
-
-            var totalCount = await query.CountAsync();
-
-            if (orderBy != null)
-            {
-                query = isDescending
-                    ? query.OrderByDescending(orderBy)
-                    : query.OrderBy(orderBy);
-            }
-            else
-            {
-                query = query.OrderByDescending(l => l.OccurredAt);
-            }
-
-            var items = await query
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
-
-            return (items, totalCount);
-        }
-
-        public async Task<SessionActivityLog> AddAsync(SessionActivityLog entity)
+        /// <summary>
+        /// 엔티티 추가 시 조직 정보 자동 설정
+        /// </summary>
+        public override async Task<SessionActivityLog> AddAsync(SessionActivityLog entity)
         {
             if (entity == null)
                 throw new ArgumentNullException(nameof(entity));
 
+            // 조직 및 감사 정보 자동 설정
             entity.OrganizationId = _currentOrganizationId;
             entity.CreatedAt = DateTime.UtcNow;
             entity.CreatedByConnectedId = _currentConnectedId;
             entity.Timestamp = entity.Timestamp == default ? DateTime.UtcNow : entity.Timestamp;
             entity.OccurredAt = entity.OccurredAt == default ? DateTime.UtcNow : entity.OccurredAt;
 
-            _context.SessionActivityLogs.Add(entity);
-            await _context.SaveChangesAsync();
-
+            var result = await base.AddAsync(entity);
+            
             _logger.LogDebug("Session activity logged: {ActivityType} for session {SessionId}",
                 entity.ActivityType, entity.SessionId);
 
-            return entity;
+            return result;
         }
 
-        public async Task AddRangeAsync(IEnumerable<SessionActivityLog> entities)
+        /// <summary>
+        /// 대량 추가 시 조직 정보 자동 설정
+        /// </summary>
+        public override async Task AddRangeAsync(IEnumerable<SessionActivityLog> entities)
         {
             var logs = entities.ToList();
             var now = DateTime.UtcNow;
@@ -178,11 +99,13 @@ namespace AuthHive.Auth.Repositories
                 log.OccurredAt = log.OccurredAt == default ? now : log.OccurredAt;
             }
 
-            _context.SessionActivityLogs.AddRange(logs);
-            await _context.SaveChangesAsync();
+            await base.AddRangeAsync(logs);
         }
 
-        public async Task UpdateAsync(SessionActivityLog entity)
+        /// <summary>
+        /// 업데이트 시 감사 정보 자동 설정
+        /// </summary>
+        public override Task UpdateAsync(SessionActivityLog entity)
         {
             if (entity == null)
                 throw new ArgumentNullException(nameof(entity));
@@ -195,11 +118,13 @@ namespace AuthHive.Auth.Repositories
             entity.UpdatedAt = DateTime.UtcNow;
             entity.UpdatedByConnectedId = _currentConnectedId;
 
-            _context.Entry(entity).State = EntityState.Modified;
-            await _context.SaveChangesAsync();
+            return base.UpdateAsync(entity);
         }
 
-        public async Task UpdateRangeAsync(IEnumerable<SessionActivityLog> entities)
+        /// <summary>
+        /// 대량 업데이트 시 감사 정보 자동 설정
+        /// </summary>
+        public override Task UpdateRangeAsync(IEnumerable<SessionActivityLog> entities)
         {
             var logs = entities.ToList();
             var now = DateTime.UtcNow;
@@ -213,188 +138,40 @@ namespace AuthHive.Auth.Repositories
 
                 log.UpdatedAt = now;
                 log.UpdatedByConnectedId = _currentConnectedId;
-                _context.Entry(log).State = EntityState.Modified;
             }
 
-            await _context.SaveChangesAsync();
+            return base.UpdateRangeAsync(logs);
         }
 
-        public async Task DeleteAsync(Guid id)
-        {
-            var log = await GetByIdAsync(id);
-            if (log == null)
-                return;
-
-            await DeleteAsync(log);
-        }
-
-        public async Task DeleteAsync(SessionActivityLog entity)
+        /// <summary>
+        /// 삭제 시 감사 정보 자동 설정
+        /// </summary>
+        public override Task DeleteAsync(SessionActivityLog entity)
         {
             if (entity == null)
                 throw new ArgumentNullException(nameof(entity));
 
-            entity.IsDeleted = true;
-            entity.DeletedAt = DateTime.UtcNow;
             entity.DeletedByConnectedId = _currentConnectedId;
-
-            await UpdateAsync(entity);
+            
+            return base.DeleteAsync(entity);
         }
 
-        public async Task DeleteRangeAsync(IEnumerable<SessionActivityLog> entities)
+        /// <summary>
+        /// 대량 삭제 시 감사 정보 자동 설정
+        /// </summary>
+        public override Task DeleteRangeAsync(IEnumerable<SessionActivityLog> entities)
         {
             var logs = entities.ToList();
-            var now = DateTime.UtcNow;
 
             foreach (var log in logs)
             {
                 if (log.OrganizationId == _currentOrganizationId)
                 {
-                    log.IsDeleted = true;
-                    log.DeletedAt = now;
                     log.DeletedByConnectedId = _currentConnectedId;
-                    _context.Entry(log).State = EntityState.Modified;
                 }
             }
 
-            await _context.SaveChangesAsync();
-        }
-
-        public async Task SoftDeleteAsync(Guid id)
-        {
-            await DeleteAsync(id);
-        }
-
-        public async Task<bool> ExistsAsync(Guid id)
-        {
-            return await _context.SessionActivityLogs
-                .AnyAsync(l => l.OrganizationId == _currentOrganizationId && l.Id == id && !l.IsDeleted);
-        }
-
-        public async Task<bool> ExistsAsync(Expression<Func<SessionActivityLog, bool>> predicate)
-        {
-            return await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted)
-                .AnyAsync(predicate);
-        }
-
-        #endregion
-
-        #region IOrganizationScopedRepository Implementation
-
-        public async Task<IEnumerable<SessionActivityLog>> GetByOrganizationIdAsync(Guid organizationId)
-        {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == organizationId && !l.IsDeleted)
-                .OrderByDescending(l => l.OccurredAt)
-                .ToListAsync();
-        }
-
-        public async Task<SessionActivityLog?> GetByIdAndOrganizationAsync(Guid id, Guid organizationId)
-        {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == organizationId)
-                .FirstOrDefaultAsync(l => l.Id == id && !l.IsDeleted);
-        }
-
-        public async Task<IEnumerable<SessionActivityLog>> FindByOrganizationAsync(
-            Guid organizationId,
-            Expression<Func<SessionActivityLog, bool>> predicate)
-        {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == organizationId && !l.IsDeleted)
-                .Where(predicate)
-                .ToListAsync();
-        }
-
-        public async Task<(IEnumerable<SessionActivityLog> Items, int TotalCount)> GetPagedByOrganizationAsync(
-            Guid organizationId,
-            int pageNumber,
-            int pageSize,
-            Expression<Func<SessionActivityLog, bool>>? additionalPredicate = null,
-            Expression<Func<SessionActivityLog, object>>? orderBy = null,
-            bool isDescending = false)
-        {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == organizationId && !l.IsDeleted);
-
-            if (additionalPredicate != null)
-            {
-                query = query.Where(additionalPredicate);
-            }
-
-            var totalCount = await query.CountAsync();
-
-            if (orderBy != null)
-            {
-                query = isDescending
-                    ? query.OrderByDescending(orderBy)
-                    : query.OrderBy(orderBy);
-            }
-            else
-            {
-                query = query.OrderByDescending(l => l.OccurredAt);
-            }
-
-            var items = await query
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
-
-            return (items, totalCount);
-        }
-
-        public async Task<bool> ExistsInOrganizationAsync(Guid id, Guid organizationId)
-        {
-            return await _context.SessionActivityLogs
-                .AnyAsync(l => l.OrganizationId == organizationId && l.Id == id && !l.IsDeleted);
-        }
-
-        public async Task<int> CountByOrganizationAsync(
-            Guid organizationId,
-            Expression<Func<SessionActivityLog, bool>>? predicate = null)
-        {
-            var query = _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == organizationId && !l.IsDeleted);
-
-            if (predicate != null)
-            {
-                query = query.Where(predicate);
-            }
-
-            return await query.CountAsync();
-        }
-
-        public async Task DeleteAllByOrganizationAsync(Guid organizationId)
-        {
-            var logs = await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == organizationId && !l.IsDeleted)
-                .ToListAsync();
-
-            foreach (var log in logs)
-            {
-                log.IsDeleted = true;
-                log.DeletedAt = DateTime.UtcNow;
-                log.DeletedByConnectedId = _currentConnectedId;
-            }
-
-            if (logs.Any())
-            {
-                await _context.SaveChangesAsync();
-                _logger.LogInformation("Deleted {Count} session activity logs for organization {OrganizationId}",
-                    logs.Count, organizationId);
-            }
+            return base.DeleteRangeAsync(logs);
         }
 
         #endregion
@@ -408,13 +185,7 @@ namespace AuthHive.Auth.Repositories
             int pageNumber = 1,
             int pageSize = 50)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.SessionId == sessionId &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => l.SessionId == sessionId);
 
             if (startDate.HasValue)
                 query = query.Where(l => l.OccurredAt >= startDate.Value);
@@ -444,13 +215,7 @@ namespace AuthHive.Auth.Repositories
             SessionActivityType? activityType = null,
             int limit = 100)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.UserId == userId &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => l.UserId == userId);
 
             if (activityType.HasValue)
                 query = query.Where(l => l.ActivityType == activityType.Value);
@@ -467,13 +232,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? startDate = null,
             DateTime? endDate = null)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.ConnectedId == connectedId &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => l.ConnectedId == connectedId);
 
             if (category.HasValue)
                 query = query.Where(l => l.Category == category.Value);
@@ -494,14 +253,7 @@ namespace AuthHive.Auth.Repositories
             bool? isSuccess = null,
             int limit = 100)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Include(l => l.PlatformApplication)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.ApplicationId == applicationId &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => l.ApplicationId == applicationId);
 
             if (isSuccess.HasValue)
                 query = query.Where(l => l.IsSuccess == isSuccess.Value);
@@ -514,13 +266,7 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<IEnumerable<SessionActivityLog>> GetBySessionIdAsync(Guid sessionId, DateTime? since = null)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.SessionId == sessionId &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => l.SessionId == sessionId);
 
             if (since.HasValue)
                 query = query.Where(l => l.OccurredAt >= since.Value);
@@ -639,16 +385,16 @@ namespace AuthHive.Auth.Repositories
             DateTime? endDate = null,
             int minRiskScore = 70)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => !l.IsDeleted && l.RiskScore >= minRiskScore);
+            // Repository는 현재 조직의 데이터에만 접근하도록 제한
+            // 다른 조직의 데이터가 필요한 경우 서비스 레이어에서 처리해야 함
+            if (organizationId.HasValue && organizationId.Value != _currentOrganizationId)
+            {
+                throw new UnauthorizedAccessException(
+                    "Repository cannot access data from different organization. " +
+                    "Cross-organization queries should be handled at service layer with proper authorization.");
+            }
 
-            if (organizationId.HasValue)
-                query = query.Where(l => l.OrganizationId == organizationId.Value);
-            else
-                query = query.Where(l => l.OrganizationId == _currentOrganizationId);
+            var query = Query().Where(l => l.RiskScore >= minRiskScore);
 
             if (startDate.HasValue)
                 query = query.Where(l => l.OccurredAt >= startDate.Value);
@@ -666,7 +412,7 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             int limit = 50)
         {
-            return await _context.SessionActivityLogs
+            return await _dbSet
                 .Include(l => l.Session)
                 .Include(l => l.User)
                 .Include(l => l.Connected)
@@ -683,13 +429,7 @@ namespace AuthHive.Auth.Repositories
             SessionActivityType? activityType = null,
             int limit = 100)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           !l.IsSuccess &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => !l.IsSuccess);
 
             if (sessionId.HasValue)
                 query = query.Where(l => l.SessionId == sessionId.Value);
@@ -708,13 +448,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? startDate = null,
             DateTime? endDate = null)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.IPAddress == ipAddress &&
-                           !l.IsDeleted);
+            var query = Query().Where(l => l.IPAddress == ipAddress);
 
             if (startDate.HasValue)
                 query = query.Where(l => l.OccurredAt >= startDate.Value);
@@ -740,8 +474,6 @@ namespace AuthHive.Auth.Repositories
             log.RiskScore = riskScore;
             log.IsSuspicious = isSuspicious;
             log.SecurityAlert = securityAlert;
-            log.UpdatedAt = DateTime.UtcNow;
-            log.UpdatedByConnectedId = _currentConnectedId;
 
             await UpdateAsync(log);
             return true;
@@ -752,14 +484,8 @@ namespace AuthHive.Auth.Repositories
             Guid resourceId,
             string? action = null)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.ResourceType == resourceType &&
-                           l.ResourceId == resourceId &&
-                           !l.IsDeleted);
+            var query = Query()
+                .Where(l => l.ResourceType == resourceType && l.ResourceId == resourceId);
 
             if (!string.IsNullOrEmpty(action))
                 query = query.Where(l => l.Action == action);
@@ -774,34 +500,24 @@ namespace AuthHive.Auth.Repositories
             Guid resourceId,
             int limit = 50)
         {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.ResourceType == resourceType &&
-                           l.ResourceId == resourceId &&
-                           !l.IsDeleted)
+            return await Query()
+                .Where(l => l.ResourceType == resourceType && l.ResourceId == resourceId)
                 .OrderByDescending(l => l.OccurredAt)
                 .Take(limit)
                 .ToListAsync();
         }
 
+        // BaseRepository의 통계 메서드를 활용한 특화 구현들
         public async Task<Dictionary<SessionActivityType, int>> GetActivityTypeStatisticsAsync(
             Guid organizationId,
             DateTime startDate,
             DateTime endDate)
         {
-            var result = await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == organizationId &&
-                           l.OccurredAt >= startDate &&
-                           l.OccurredAt <= endDate &&
-                           !l.IsDeleted)
-                .GroupBy(l => l.ActivityType)
-                .Select(g => new { ActivityType = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.ActivityType, x => x.Count);
-
-            return result;
+            return await GetGroupCountAsync(
+                l => l.ActivityType,
+                l => l.OrganizationId == organizationId &&
+                     l.OccurredAt >= startDate &&
+                     l.OccurredAt <= endDate);
         }
 
         public async Task<Dictionary<int, int>> GetHourlyActivityDistributionAsync(
@@ -811,7 +527,7 @@ namespace AuthHive.Auth.Repositories
             var startOfDay = date.Date;
             var endOfDay = startOfDay.AddDays(1);
 
-            var activities = await _context.SessionActivityLogs
+            var activities = await _dbSet
                 .Where(l => l.OrganizationId == organizationId &&
                            l.OccurredAt >= startOfDay &&
                            l.OccurredAt < endOfDay &&
@@ -830,16 +546,11 @@ namespace AuthHive.Auth.Repositories
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
 
-            var result = await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == organizationId &&
-                           l.OccurredAt >= startDate &&
-                           l.DeviceType.HasValue &&
-                           !l.IsDeleted)
-                .GroupBy(l => l.DeviceType!.Value)
-                .Select(g => new { DeviceType = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.DeviceType, x => x.Count);
-
-            return result;
+            return await GetGroupCountAsync(
+                l => l.DeviceType!.Value,
+                l => l.OrganizationId == organizationId &&
+                     l.OccurredAt >= startDate &&
+                     l.DeviceType.HasValue);
         }
 
         public async Task<Dictionary<BrowserType, int>> GetBrowserStatisticsAsync(
@@ -848,16 +559,11 @@ namespace AuthHive.Auth.Repositories
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
 
-            var result = await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == organizationId &&
-                           l.OccurredAt >= startDate &&
-                           l.Browser.HasValue &&
-                           !l.IsDeleted)
-                .GroupBy(l => l.Browser!.Value)
-                .Select(g => new { BrowserType = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.BrowserType, x => x.Count);
-
-            return result;
+            return await GetGroupCountAsync(
+                l => l.Browser!.Value,
+                l => l.OrganizationId == organizationId &&
+                     l.OccurredAt >= startDate &&
+                     l.Browser.HasValue);
         }
 
         public async Task<double> GetAverageResponseTimeAsync(
@@ -866,11 +572,8 @@ namespace AuthHive.Auth.Repositories
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
 
-            var query = _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.OccurredAt >= startDate &&
-                           l.ResponseTimeMs.HasValue &&
-                           !l.IsDeleted);
+            var query = Query()
+                .Where(l => l.OccurredAt >= startDate && l.ResponseTimeMs.HasValue);
 
             if (!string.IsNullOrEmpty(endpoint))
                 query = query.Where(l => l.ApiEndpoint == endpoint);
@@ -886,11 +589,8 @@ namespace AuthHive.Auth.Repositories
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
 
-            var query = _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.OccurredAt >= startDate &&
-                           l.ActivityType == SessionActivityType.ApiCall &&
-                           !l.IsDeleted);
+            var query = Query()
+                .Where(l => l.OccurredAt >= startDate && l.ActivityType == SessionActivityType.ApiCall);
 
             if (applicationId.HasValue)
                 query = query.Where(l => l.ApplicationId == applicationId.Value);
@@ -910,7 +610,7 @@ namespace AuthHive.Auth.Repositories
         {
             var orgId = organizationId ?? _currentOrganizationId;
 
-            return await _context.SessionActivityLogs
+            return await _dbSet
                 .Include(l => l.Session)
                 .Include(l => l.User)
                 .Include(l => l.Connected)
@@ -928,16 +628,11 @@ namespace AuthHive.Auth.Repositories
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
 
-            var result = await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == organizationId &&
-                           l.OccurredAt >= startDate &&
-                           !string.IsNullOrEmpty(l.CountryCode) &&
-                           !l.IsDeleted)
-                .GroupBy(l => l.CountryCode!)
-                .Select(g => new { CountryCode = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.CountryCode, x => x.Count);
-
-            return result;
+            return await GetGroupCountAsync(
+                l => l.CountryCode!,
+                l => l.OrganizationId == organizationId &&
+                     l.OccurredAt >= startDate &&
+                     !string.IsNullOrEmpty(l.CountryCode));
         }
 
         public async Task<bool> DetectGeographicalAnomalyAsync(
@@ -947,11 +642,10 @@ namespace AuthHive.Auth.Repositories
         {
             var timeWindow = DateTime.UtcNow.AddMinutes(-timeWindowMinutes);
 
-            var recentLocations = await _context.SessionActivityLogs
+            var recentLocations = await Query()
                 .Where(l => l.UserId == userId &&
                            l.OccurredAt >= timeWindow &&
-                           !string.IsNullOrEmpty(l.Location) &&
-                           !l.IsDeleted)
+                           !string.IsNullOrEmpty(l.Location))
                 .Select(l => l.Location)
                 .Distinct()
                 .ToListAsync();
@@ -968,26 +662,16 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<IEnumerable<SessionActivityLog>> GetByTraceIdAsync(string traceId)
         {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.TraceId == traceId &&
-                           !l.IsDeleted)
+            return await Query()
+                .Where(l => l.TraceId == traceId)
                 .OrderBy(l => l.OccurredAt)
                 .ToListAsync();
         }
 
         public async Task<SessionActivityLog?> GetBySpanIdAsync(string spanId)
         {
-            return await _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.SpanId == spanId &&
-                           !l.IsDeleted)
+            return await Query()
+                .Where(l => l.SpanId == spanId)
                 .FirstOrDefaultAsync();
         }
 
@@ -1014,10 +698,8 @@ namespace AuthHive.Auth.Repositories
 
             while (true)
             {
-                var logsToArchive = await _context.SessionActivityLogs
-                    .Where(l => l.OrganizationId == _currentOrganizationId &&
-                               l.OccurredAt < cutoffDate &&
-                               !l.IsDeleted)
+                var logsToArchive = await Query()
+                    .Where(l => l.OccurredAt < cutoffDate)
                     .Take(batchSize)
                     .ToListAsync();
 
@@ -1026,14 +708,7 @@ namespace AuthHive.Auth.Repositories
 
                 // 실제 구현에서는 아카이브 테이블로 이동
                 // 여기서는 소프트 삭제로 처리
-                foreach (var log in logsToArchive)
-                {
-                    log.IsDeleted = true;
-                    log.DeletedAt = DateTime.UtcNow;
-                    log.DeletedByConnectedId = _currentConnectedId;
-                }
-
-                await _context.SaveChangesAsync();
+                await DeleteRangeAsync(logsToArchive);
                 totalArchived += logsToArchive.Count;
             }
 
@@ -1043,10 +718,8 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<int> DeleteBySessionAsync(Guid sessionId)
         {
-            var logs = await _context.SessionActivityLogs
-                .Where(l => l.OrganizationId == _currentOrganizationId &&
-                           l.SessionId == sessionId &&
-                           !l.IsDeleted)
+            var logs = await Query()
+                .Where(l => l.SessionId == sessionId)
                 .ToListAsync();
 
             if (logs.Any())
@@ -1064,12 +737,7 @@ namespace AuthHive.Auth.Repositories
             int pageNumber = 1,
             int pageSize = 50)
         {
-            var query = _context.SessionActivityLogs
-                .Include(l => l.Session)
-                .Include(l => l.User)
-                .Include(l => l.Connected)
-                .Where(l => l.OrganizationId == _currentOrganizationId && !l.IsDeleted)
-                .Where(criteria);
+            var query = Query().Where(criteria);
 
             var totalCount = await query.CountAsync();
 
@@ -1106,7 +774,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? endDate,
             int? minRiskScore)
         {
-            var query = _context.SessionActivityLogs
+            var query = _dbSet
                 .Include(l => l.Session)
                 .Include(l => l.User)
                 .Include(l => l.Connected)

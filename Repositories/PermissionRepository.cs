@@ -1,12 +1,17 @@
-// Path: AuthHive.Auth/Repositories/PermissionRepository.cs
 using Microsoft.EntityFrameworkCore;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
+using AuthHive.Core.Interfaces.Base;
+using Microsoft.Extensions.Caching.Memory;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using System.Linq.Expressions;
 using AuthHive.Core.Models.Common;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System;
+using System.Linq;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -16,15 +21,16 @@ namespace AuthHive.Auth.Repositories
     /// </summary>
     public class PermissionRepository : BaseRepository<Permission>, IPermissionRepository
     {
-        public PermissionRepository(AuthDbContext context) : base(context)
+        public PermissionRepository(
+            AuthDbContext context, 
+            IOrganizationContext organizationContext,
+            IMemoryCache? cache = null) 
+            : base(context, organizationContext, cache)
         {
         }
 
         #region 고유 조회 메서드
 
-        /// <summary>
-        /// Scope로 권한 조회
-        /// </summary>
         public async Task<Permission?> GetByScopeAsync(string scope)
         {
             return await _dbSet
@@ -34,8 +40,43 @@ namespace AuthHive.Auth.Repositories
         }
 
         /// <summary>
-        /// 여러 Scope로 권한 일괄 조회
+        /// 특정 ConnectedId가 가진 모든 활성 역할을 통해 최종적으로 부여받는 모든 권한을 조회합니다.
         /// </summary>
+        public async Task<IEnumerable<Permission>> GetPermissionsForConnectedIdAsync(
+            Guid connectedId,
+            bool includeInactive = false)
+        {
+            // 1. ConnectedId를 기준으로 활성 상태인 모든 역할들의 ID를 조회합니다.
+            var activeRoleIds = await _context.Set<ConnectedIdRole>()
+                .Where(cr =>
+                    cr.ConnectedId == connectedId &&
+                    cr.IsActive &&
+                    (!cr.ExpiresAt.HasValue || cr.ExpiresAt > DateTime.UtcNow))
+                .Select(cr => cr.RoleId)
+                .Distinct()
+                .ToListAsync();
+
+            if (!activeRoleIds.Any())
+            {
+                return Enumerable.Empty<Permission>();
+            }
+
+            // 2. 해당 역할 ID들에 연결된 모든 권한들을 조회합니다.
+            // Role -> RolePermission -> Permission 엔티티를 거쳐 조회합니다.
+            var query = _context.Set<RolePermission>()
+                .Where(rp => activeRoleIds.Contains(rp.RoleId))
+                .Select(rp => rp.Permission);
+
+            if (!includeInactive)
+            {
+                // Permission 테이블 자체에도 IsActive 플래그가 있다고 가정
+                query = query.Where(p => p.IsActive);
+            }
+            
+            // 3. 중복을 제거하고 최종 권한 목록을 반환합니다.
+            return await query.Distinct().ToListAsync();
+        }
+
         public async Task<IEnumerable<Permission>> GetByScopesAsync(IEnumerable<string> scopes)
         {
             return await _dbSet
@@ -47,12 +88,9 @@ namespace AuthHive.Auth.Repositories
         #endregion
 
         #region 카테고리별 조회 메서드
-
-        /// <summary>
-        /// 카테고리별 권한 조회
-        /// </summary>
+        
         public async Task<IEnumerable<Permission>> GetByCategoryAsync(
-            PermissionCategory category, 
+            PermissionCategory category,
             bool includeInactive = false)
         {
             var query = _dbSet.AsQueryable();
@@ -69,10 +107,7 @@ namespace AuthHive.Auth.Repositories
         #endregion
 
         #region 계층 구조 조회 메서드
-
-        /// <summary>
-        /// 자식 권한 조회
-        /// </summary>
+        
         public async Task<IEnumerable<Permission>> GetChildPermissionsAsync(
             Guid parentPermissionId,
             bool includeInactive = false)
@@ -88,9 +123,6 @@ namespace AuthHive.Auth.Repositories
                 .ToListAsync();
         }
 
-        /// <summary>
-        /// 권한 트리 조회 (재귀적)
-        /// </summary>
         public async Task<IEnumerable<Permission>> GetPermissionTreeAsync(
             Guid? rootPermissionId = null,
             int? maxDepth = null)
@@ -101,7 +133,6 @@ namespace AuthHive.Auth.Repositories
                 .Include(p => p.ChildPermissions)
                 .ToListAsync();
 
-            // 루트 권한들부터 시작
             var rootPermissions = rootPermissionId.HasValue
                 ? allPermissions.Where(p => p.Id == rootPermissionId.Value)
                 : allPermissions.Where(p => p.ParentPermissionId == null);
@@ -116,7 +147,7 @@ namespace AuthHive.Auth.Repositories
             return result;
         }
 
-        private void BuildPermissionTree(Permission current, IEnumerable<Permission> allPermissions, 
+        private void BuildPermissionTree(Permission current, IEnumerable<Permission> allPermissions,
             List<Permission> result, int currentDepth, int maxDepth)
         {
             if (currentDepth > maxDepth) return;
@@ -133,10 +164,7 @@ namespace AuthHive.Auth.Repositories
         #endregion
 
         #region 시스템 권한 메서드
-
-        /// <summary>
-        /// 시스템 권한만 조회
-        /// </summary>
+        
         public async Task<IEnumerable<Permission>> GetSystemPermissionsAsync(bool includeInactive = false)
         {
             var query = _dbSet.Where(p => p.IsSystemPermission && !p.IsDeleted);
@@ -153,37 +181,31 @@ namespace AuthHive.Auth.Repositories
         #endregion
 
         #region 리소스/액션 기반 조회 메서드
-
-        /// <summary>
-        /// 리소스와 액션으로 권한 조회
-        /// </summary>
+        
         public async Task<Permission?> GetByResourceAndActionAsync(
             string resourceType,
             string actionType)
         {
             return await _dbSet
-                .FirstOrDefaultAsync(p => 
-                    p.ResourceType == resourceType && 
-                    p.ActionType == actionType && 
-                    p.IsActive && 
+                .FirstOrDefaultAsync(p =>
+                    p.ResourceType == resourceType &&
+                    p.ActionType == actionType &&
+                    p.IsActive &&
                     !p.IsDeleted);
         }
 
         #endregion
 
-        #region 역할 관련 메서드
+        #region 역할 및 ConnectedId 관련 메서드
 
-        /// <summary>
-        /// 특정 역할에 할당된 권한 조회
-        /// </summary>
         public async Task<IEnumerable<Permission>> GetByRoleIdAsync(
             Guid roleId,
             bool includeInactive = false)
         {
             var query = from p in _dbSet
-                       join rp in _context.Set<RolePermission>() on p.Id equals rp.PermissionId
-                       where rp.RoleId == roleId && !p.IsDeleted && rp.IsActive
-                       select p;
+                        join rp in _context.Set<RolePermission>() on p.Id equals rp.PermissionId
+                        where rp.RoleId == roleId && !p.IsDeleted && rp.IsActive
+                        select p;
 
             if (!includeInactive)
                 query = query.Where(p => p.IsActive);
@@ -191,31 +213,50 @@ namespace AuthHive.Auth.Repositories
             return await query.Distinct().ToListAsync();
         }
 
-        /// <summary>
-        /// 여러 역할에 할당된 권한 조회 (중복 제거)
-        /// </summary>
         public async Task<IEnumerable<Permission>> GetByRoleIdsAsync(
             IEnumerable<Guid> roleIds,
             bool includeInactive = false)
         {
             var query = from p in _dbSet
-                       join rp in _context.Set<RolePermission>() on p.Id equals rp.PermissionId
-                       where roleIds.Contains(rp.RoleId) && !p.IsDeleted && rp.IsActive
-                       select p;
+                        join rp in _context.Set<RolePermission>() on p.Id equals rp.PermissionId
+                        where roleIds.Contains(rp.RoleId) && !p.IsDeleted && rp.IsActive
+                        select p;
 
             if (!includeInactive)
                 query = query.Where(p => p.IsActive);
 
             return await query.Distinct().ToListAsync();
         }
+        
+        /// <summary>
+        /// 특정 ConnectedId가 보유한 모든 권한을 조회합니다. (역할을 통해 상속된 권한 포함)
+        /// 1. ConnectedId에 할당된 모든 활성 Role의 ID를 찾습니다.
+        /// 2. 해당 Role ID들에 연결된 모든 활성 Permission을 조회합니다.
+        /// </summary>
+        public async Task<IEnumerable<Permission>> GetPermissionsForConnectedIdAsync(Guid connectedId)
+        {
+            // 1. 이 ConnectedId에 직접 할당된 모든 활성 역할(Role)의 ID를 조회합니다.
+            var activeRoleIds = await _context.Set<ConnectedIdRole>()
+                .Where(cr => cr.ConnectedId == connectedId && cr.IsActive &&
+                              (!cr.ExpiresAt.HasValue || cr.ExpiresAt > DateTime.UtcNow))
+                .Select(cr => cr.RoleId)
+                .Distinct()
+                .ToListAsync();
+
+            if (!activeRoleIds.Any())
+            {
+                // 할당된 역할이 없으면 빈 권한 목록을 반환합니다.
+                return Enumerable.Empty<Permission>();
+            }
+
+            // 2. 이미 구현된 GetByRoleIdsAsync 메서드를 재사용하여 효율적으로 권한을 조회합니다.
+            return await GetByRoleIdsAsync(activeRoleIds, includeInactive: false);
+        }
 
         #endregion
 
         #region 통계 메서드
-
-        /// <summary>
-        /// 권한 통계 조회
-        /// </summary>
+        
         public async Task<PermissionStatistics> GetStatisticsAsync()
         {
             var totalCount = await _dbSet.CountAsync(p => !p.IsDeleted);
@@ -263,10 +304,7 @@ namespace AuthHive.Auth.Repositories
         #endregion
 
         #region 관계 로딩 메서드
-
-        /// <summary>
-        /// 관련 엔티티를 포함하여 조회
-        /// </summary>
+        
         public async Task<Permission?> GetWithRelatedDataAsync(
             Guid id,
             bool includeParent = false,

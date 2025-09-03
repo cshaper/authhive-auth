@@ -6,6 +6,8 @@ using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Constants.Auth;
 using AuthHive.Auth.Data.Context;
 using System.Text.Json;
+using AuthHive.Core.Interfaces.Base;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace AuthHive.Auth.Repositories;
 
@@ -15,8 +17,13 @@ namespace AuthHive.Auth.Repositories;
 /// </summary>
 public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, IConnectedIdContextRepository
 {
-    public ConnectedIdContextRepository(AuthDbContext context) : base(context)
+    public ConnectedIdContextRepository(
+        AuthDbContext context,
+        IOrganizationContext organizationContext,
+        IMemoryCache? cache = null)
+        : base(context, organizationContext, cache)
     {
+
     }
 
     #region 기본 조회 메서드
@@ -25,12 +32,12 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     /// ConnectedId와 컨텍스트 타입으로 컨텍스트 조회
     /// </summary>
     public async Task<ConnectedIdContext?> GetByConnectedIdAndTypeAsync(
-        Guid connectedId, 
+        Guid connectedId,
         ConnectedIdContextType contextType,
         Guid? applicationId = null)
     {
         var query = Query()
-            .Where(c => c.ConnectedId == connectedId && 
+            .Where(c => c.ConnectedId == connectedId &&
                        c.ContextType == contextType &&
                        c.ExpiresAt > DateTime.UtcNow);
 
@@ -71,7 +78,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     /// ConnectedId의 모든 활성 컨텍스트 조회
     /// </summary>
     public async Task<IEnumerable<ConnectedIdContext>> GetByConnectedIdAsync(
-        Guid connectedId, 
+        Guid connectedId,
         bool includeExpired = false)
     {
         var query = Query().Where(c => c.ConnectedId == connectedId);
@@ -128,8 +135,8 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
         int limit = 100)
     {
         return await Query()
-            .Where(c => c.OrganizationId == organizationId && 
-                       c.IsHotPath && 
+            .Where(c => c.OrganizationId == organizationId &&
+                       c.IsHotPath &&
                        c.ExpiresAt > DateTime.UtcNow)
             .OrderByDescending(c => c.AccessCount)
             .ThenByDescending(c => c.LastAccessedAt)
@@ -143,8 +150,8 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<IEnumerable<ConnectedIdContext>> GetGrpcCacheEnabledContextsAsync(Guid organizationId)
     {
         return await Query()
-            .Where(c => c.OrganizationId == organizationId && 
-                       c.GrpcCacheEnabled && 
+            .Where(c => c.OrganizationId == organizationId &&
+                       c.GrpcCacheEnabled &&
                        c.ExpiresAt > DateTime.UtcNow)
             .OrderByDescending(c => c.AccessCount)
             .ToListAsync();
@@ -156,7 +163,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<IEnumerable<ConnectedIdContext>> GetContextsNeedingRefreshAsync(int expiryThreshold = 5)
     {
         var threshold = DateTime.UtcNow.AddMinutes(expiryThreshold);
-        
+
         return await Query()
             .Where(c => c.AutoRefresh && c.ExpiresAt <= threshold)
             .ToListAsync();
@@ -202,7 +209,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<int> UpdateHotPathStatusAsync(int threshold = ConnectedIdConstants.Limits.HighPriorityThreshold, int timeWindow = 1)
     {
         var cutoffTime = DateTime.UtcNow.AddHours(-timeWindow);
-        
+
         return await _context.Database.ExecuteSqlRawAsync(
             """
             UPDATE "ConnectedIdContexts" 
@@ -227,7 +234,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<IEnumerable<ConnectedIdContext>> GetExpiredContextsAsync(Guid? organizationId = null)
     {
         var query = Query().Where(c => c.ExpiresAt <= DateTime.UtcNow);
-        
+
         if (organizationId.HasValue)
         {
             query = query.Where(c => c.OrganizationId == organizationId);
@@ -255,7 +262,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<int> CleanupExpiredContextsAsync(int retentionDays = 7)
     {
         var cutoffDate = DateTime.UtcNow.AddDays(-retentionDays);
-        
+
         return await _context.Database.ExecuteSqlRawAsync(
             """
             DELETE FROM "ConnectedIdContexts" 
@@ -270,7 +277,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<int> CleanupInactiveContextsAsync(int inactiveDays = 30)
     {
         var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
-        
+
         return await _context.Database.ExecuteSqlRawAsync(
             """
             DELETE FROM "ConnectedIdContexts" 
@@ -342,7 +349,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
         foreach (var context in contextList)
         {
             var existing = await Query()
-                .FirstOrDefaultAsync(c => c.ConnectedId == context.ConnectedId && 
+                .FirstOrDefaultAsync(c => c.ConnectedId == context.ConnectedId &&
                                         c.ContextKey == context.ContextKey);
 
             if (existing != null)
@@ -353,7 +360,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
                 existing.ExpiresAt = context.ExpiresAt;
                 existing.LastAccessedAt = DateTime.UtcNow;
                 existing.Checksum = GenerateChecksum(context.ContextData);
-                
+
                 await UpdateAsync(existing);
             }
             else
@@ -468,13 +475,13 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     /// <summary>
     /// 컨텍스트 타입별 통계 조회
     /// </summary>
-    public async Task<Dictionary<ConnectedIdContextType, (int Count, double AvgAccessCount)>> 
+    public async Task<Dictionary<ConnectedIdContextType, (int Count, double AvgAccessCount)>>
         GetContextStatisticsByTypeAsync(Guid organizationId)
     {
         var stats = await Query()
             .Where(c => c.OrganizationId == organizationId)
             .GroupBy(c => c.ContextType)
-            .Select(g => new 
+            .Select(g => new
             {
                 ContextType = g.Key,
                 Count = g.Count(),
@@ -483,7 +490,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
             .ToListAsync();
 
         return stats.ToDictionary(
-            s => s.ContextType, 
+            s => s.ContextType,
             s => (s.Count, s.AvgAccessCount));
     }
 
@@ -510,11 +517,11 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
         DateTime endDate)
     {
         var analytics = await Query()
-            .Where(c => c.OrganizationId == organizationId && 
-                       c.LastAccessedAt >= startDate && 
+            .Where(c => c.OrganizationId == organizationId &&
+                       c.LastAccessedAt >= startDate &&
                        c.LastAccessedAt <= endDate)
             .GroupBy(c => c.LastAccessedAt.Date)
-            .Select(g => new 
+            .Select(g => new
             {
                 Date = g.Key,
                 TotalAccess = g.Sum(c => c.AccessCount),
@@ -537,9 +544,9 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public async Task<string> ExportContextsAsJsonAsync(Guid connectedId)
     {
         var contexts = await GetByConnectedIdAsync(connectedId, true);
-        return JsonSerializer.Serialize(contexts, new JsonSerializerOptions 
-        { 
-            WriteIndented = true 
+        return JsonSerializer.Serialize(contexts, new JsonSerializerOptions
+        {
+            WriteIndented = true
         });
     }
 
@@ -555,7 +562,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
         foreach (var context in contexts)
         {
             var existing = await Query()
-                .FirstOrDefaultAsync(c => c.ConnectedId == context.ConnectedId && 
+                .FirstOrDefaultAsync(c => c.ConnectedId == context.ConnectedId &&
                                         c.ContextKey == context.ContextKey);
 
             if (existing == null || overwrite)
@@ -577,124 +584,6 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
 
     #endregion
 
-    #region IOrganizationScopedRepository 구현
-
-    /// <summary>
-    /// 조직별 모든 컨텍스트 조회
-    /// </summary>
-    public async Task<IEnumerable<ConnectedIdContext>> GetByOrganizationIdAsync(Guid organizationId)
-    {
-        return await Query()
-            .Where(c => c.OrganizationId == organizationId)
-            .OrderBy(c => c.Priority)
-            .ThenByDescending(c => c.LastAccessedAt)
-            .ToListAsync();
-    }
-
-    /// <summary>
-    /// ID와 조직으로 컨텍스트 조회
-    /// </summary>
-    public async Task<ConnectedIdContext?> GetByIdAndOrganizationAsync(Guid id, Guid organizationId)
-    {
-        return await Query()
-            .FirstOrDefaultAsync(c => c.Id == id && c.OrganizationId == organizationId);
-    }
-
-    /// <summary>
-    /// 조건과 조직으로 컨텍스트 조회
-    /// </summary>
-    public async Task<IEnumerable<ConnectedIdContext>> FindByOrganizationAsync(
-        Guid organizationId, 
-        System.Linq.Expressions.Expression<Func<ConnectedIdContext, bool>> predicate)
-    {
-        return await Query()
-            .Where(c => c.OrganizationId == organizationId)
-            .Where(predicate)
-            .ToListAsync();
-    }
-
-    /// <summary>
-    /// 조직별 페이징된 컨텍스트 조회
-    /// </summary>
-    public async Task<(IEnumerable<ConnectedIdContext> Items, int TotalCount)> GetPagedByOrganizationAsync(
-        Guid organizationId,
-        int pageNumber,
-        int pageSize,
-        System.Linq.Expressions.Expression<Func<ConnectedIdContext, bool>>? predicate = null,
-        System.Linq.Expressions.Expression<Func<ConnectedIdContext, object>>? orderBy = null,
-        bool isDescending = false)
-    {
-        var query = Query().Where(c => c.OrganizationId == organizationId);
-
-        if (predicate != null)
-        {
-            query = query.Where(predicate);
-        }
-
-        var totalCount = await query.CountAsync();
-
-        if (orderBy != null)
-        {
-            query = isDescending
-                ? query.OrderByDescending(orderBy)
-                : query.OrderBy(orderBy);
-        }
-        else
-        {
-            query = query.OrderBy(c => c.Priority).ThenByDescending(c => c.LastAccessedAt);
-        }
-
-        var items = await query
-            .Skip((pageNumber - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
-
-        return (items, totalCount);
-    }
-
-    /// <summary>
-    /// 조직 내 컨텍스트 존재 여부 확인
-    /// </summary>
-    public async Task<bool> ExistsInOrganizationAsync(Guid id, Guid organizationId)
-    {
-        return await Query()
-            .AnyAsync(c => c.Id == id && c.OrganizationId == organizationId);
-    }
-
-    /// <summary>
-    /// 조직별 컨텍스트 개수 조회
-    /// </summary>
-    public async Task<int> CountByOrganizationAsync(
-        Guid organizationId, 
-        System.Linq.Expressions.Expression<Func<ConnectedIdContext, bool>>? predicate = null)
-    {
-        var query = Query().Where(c => c.OrganizationId == organizationId);
-
-        if (predicate != null)
-        {
-            query = query.Where(predicate);
-        }
-
-        return await query.CountAsync();
-    }
-
-    /// <summary>
-    /// 조직의 모든 컨텍스트 삭제
-    /// </summary>
-    public async Task DeleteAllByOrganizationAsync(Guid organizationId)
-    {
-        var contexts = await Query()
-            .Where(c => c.OrganizationId == organizationId)
-            .ToListAsync();
-
-        if (contexts.Any())
-        {
-            await DeleteRangeAsync(contexts);
-        }
-    }
-
-    #endregion
-
     #region 유틸리티
 
     /// <summary>
@@ -710,10 +599,10 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
         CancellationToken cancellationToken = default)
     {
         var expiresAt = DateTime.UtcNow.Add(expiration ?? TimeSpan.FromMinutes(ConnectedIdConstants.Cache.ContextTtl / 60));
-        
+
         var existing = await Query()
-            .FirstOrDefaultAsync(c => c.ConnectedId == connectedId && 
-                                    c.ContextKey == contextKey, 
+            .FirstOrDefaultAsync(c => c.ConnectedId == connectedId &&
+                                    c.ContextKey == contextKey,
                                cancellationToken);
 
         if (existing != null)
@@ -724,7 +613,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
             existing.ExpiresAt = expiresAt;
             existing.LastAccessedAt = DateTime.UtcNow;
             existing.AccessCount++;
-            
+
             // Hot Path 자동 감지
             if (existing.AccessCount >= ConnectedIdConstants.Limits.HighPriorityThreshold)
             {
@@ -733,7 +622,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
             }
 
             existing.Checksum = GenerateChecksum(contextData);
-            
+
             await UpdateAsync(existing);
             return existing;
         }
@@ -765,17 +654,17 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
     public string GenerateContextKey(Guid connectedId, ConnectedIdContextType contextType, Guid? applicationId = null, string? suffix = null)
     {
         var key = $"{ConnectedIdConstants.Cache.ContextCacheKeyPrefix}{connectedId}:{contextType}";
-        
+
         if (applicationId.HasValue)
         {
             key += $":app:{applicationId}";
         }
-        
+
         if (!string.IsNullOrEmpty(suffix))
         {
             key += $":{suffix}";
         }
-        
+
         return key;
     }
 
@@ -816,7 +705,7 @@ public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContext>, 
         var accessScore = Math.Min(context.AccessCount / 10, 5); // 최대 5점
         var recentScore = IsRecentlyAccessed(context) ? 3 : 0;    // 최대 3점
         var hotPathScore = context.IsHotPath ? 2 : 0;             // 최대 2점
-        
+
         return Math.Min(accessScore + recentScore + hotPathScore, ConnectedIdConstants.Limits.MaxPriority);
     }
 

@@ -12,14 +12,27 @@ using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Enums.Auth;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Constants.Auth;
-using ConnectedIdEntity = AuthHive.Core.Entities.Auth.ConnectedId; 
+using System.Collections.Generic;
+using System.Security.Claims;
+using System;
+using System.Threading.Tasks;
+using System.Linq;
+using ConnectedIdEntity = AuthHive.Core.Entities.Auth.ConnectedId;
+
 namespace AuthHive.Auth.Services.Authentication
 {
+    /// <summary>
+    /// 토큰 관련 비즈니스 로직을 총괄하는 서비스입니다. (ITokenService 구현체)
+    /// ITokenProvider가 생성한 토큰 문자열을 받아 데이터베이스에 저장하고,
+    /// 토큰 갱신(Refresh), 폐기(Revoke) 등 상태와 생명주기를 관리하는 역할을 담당합니다.
+    /// </summary>
     public class TokenService : ITokenService
     {
+        // 의존성 주입(Dependency Injection)을 통해 필요한 서비스와 리포지토리를 가져옵니다.
         private readonly ITokenProvider _tokenProvider;
         private readonly IAccessTokenRepository _accessTokenRepository;
-        private readonly IRefreshTokenRepository _refreshTokenRepository; // 분리된 Repository
+        private readonly IRefreshTokenRepository _refreshTokenRepository;
+        private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IOAuthClientRepository _clientRepository;
         private readonly ISessionRepository _sessionRepository;
         private readonly ILogger<TokenService> _logger;
@@ -27,23 +40,29 @@ namespace AuthHive.Auth.Services.Authentication
         public TokenService(
             ITokenProvider tokenProvider,
             IAccessTokenRepository accessTokenRepository,
-            IRefreshTokenRepository refreshTokenRepository, // 추가
+            IRefreshTokenRepository refreshTokenRepository,
+            IConnectedIdRepository connectedIdRepository,
             IOAuthClientRepository clientRepository,
             ISessionRepository sessionRepository,
             ILogger<TokenService> logger)
         {
             _tokenProvider = tokenProvider;
             _accessTokenRepository = accessTokenRepository;
-            _refreshTokenRepository = refreshTokenRepository; // 추가
+            _refreshTokenRepository = refreshTokenRepository;
+            _connectedIdRepository = connectedIdRepository;
             _clientRepository = clientRepository;
             _sessionRepository = sessionRepository;
             _logger = logger;
         }
 
+        /// <summary>
+        /// 서비스의 상태를 확인합니다. (Health Check)
+        /// </summary>
         public async Task<bool> IsHealthyAsync()
         {
             try
             {
+                // DB에 정상적으로 접근 가능한지 확인
                 await _accessTokenRepository.CountAsync();
                 await _refreshTokenRepository.CountAsync();
                 return true;
@@ -55,19 +74,26 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// 서비스 초기화 로직 (현재는 특별한 작업 없음)
+        /// </summary>
         public Task InitializeAsync() => Task.CompletedTask;
 
-        // Session 엔티티를 받는 버전 (기존 호환성)
+        /// <summary>
+        /// 세션 엔티티를 기반으로 액세스 토큰을 생성합니다. (내부 시스템용)
+        /// </summary>
         public async Task<string> GenerateTokenAsync(ConnectedIdEntity connectedId, SessionEntity session)
         {
+            var additionalClaims = new List<Claim>
+            {
+                new Claim("session_id", session.Id.ToString()),
+                new Claim("org_id", (session.OrganizationId ?? Guid.Empty).ToString())
+            };
+
             var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
                 session.UserId,
                 session.ConnectedId ?? Guid.Empty,
-                new Dictionary<string, object>
-                {
-                    ["session_id"] = session.Id.ToString(),
-                    ["org_id"] = (session.OrganizationId ?? Guid.Empty).ToString()
-                });
+                additionalClaims);
 
             if (!tokenResult.IsSuccess || tokenResult.Data == null)
                 throw new InvalidOperationException("Failed to generate token");
@@ -75,7 +101,10 @@ namespace AuthHive.Auth.Services.Authentication
             return tokenResult.Data.AccessToken;
         }
 
-        // SessionDto를 받는 버전
+        /// <summary>
+        /// 새로운 세션에 대해 액세스 토큰과 리프레시 토큰을 모두 발급합니다.
+        /// 로그인 성공 시 최종적으로 호출되는 메서드입니다.
+        /// </summary>
         public async Task<ServiceResult<TokenIssueResponse>> IssueTokensAsync(SessionDto sessionDto)
         {
             try
@@ -86,14 +115,16 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult<TokenIssueResponse>.Failure("Default OAuth client not found");
                 }
 
+                var additionalClaims = new List<Claim>
+                {
+                    new Claim("session_id", sessionDto.Id.ToString()),
+                    new Claim("org_id", (sessionDto.OrganizationId ?? Guid.Empty).ToString())
+                };
+
                 var accessTokenResult = await _tokenProvider.GenerateAccessTokenAsync(
                     sessionDto.UserId,
                     sessionDto.ConnectedId ?? Guid.Empty,
-                    new Dictionary<string, object>
-                    {
-                        ["session_id"] = sessionDto.Id.ToString(),
-                        ["org_id"] = (sessionDto.OrganizationId ?? Guid.Empty).ToString()
-                    });
+                    additionalClaims);
 
                 if (!accessTokenResult.IsSuccess || accessTokenResult.Data == null)
                 {
@@ -103,12 +134,11 @@ namespace AuthHive.Auth.Services.Authentication
                 var accessTokenValue = accessTokenResult.Data.AccessToken;
 
                 var refreshTokenResult = await _tokenProvider.GenerateRefreshTokenAsync(sessionDto.UserId);
-                if (!refreshTokenResult.IsSuccess || refreshTokenResult.Data == null)
+                if (!refreshTokenResult.IsSuccess || string.IsNullOrEmpty(refreshTokenResult.Data))
                 {
                     return ServiceResult<TokenIssueResponse>.Failure("Failed to generate refresh token");
                 }
 
-                // AccessToken 엔티티 생성 및 저장
                 var accessTokenEntity = new AccessToken
                 {
                     ClientId = client.Id,
@@ -119,7 +149,7 @@ namespace AuthHive.Auth.Services.Authentication
                     TokenHash = HashToken(accessTokenValue),
                     TokenType = OAuthTokenType.Bearer,
                     Scopes = "[\"read\",\"write\"]",
-                    IssuedAt = DateTime.UtcNow,
+                    IssuedAt = accessTokenResult.Data.IssuedAt,
                     ExpiresAt = accessTokenResult.Data.ExpiresAt,
                     IsActive = true,
                     GrantType = OAuthGrantType.ResourceOwnerPassword,
@@ -129,7 +159,6 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var savedAccessToken = await _accessTokenRepository.AddAsync(accessTokenEntity);
 
-                // RefreshToken 엔티티 생성 및 저장
                 var refreshTokenEntity = new RefreshToken
                 {
                     AccessTokenId = savedAccessToken.Id,
@@ -147,7 +176,7 @@ namespace AuthHive.Auth.Services.Authentication
                     UserAgent = sessionDto.UserAgent ?? string.Empty
                 };
 
-                await _refreshTokenRepository.AddAsync(refreshTokenEntity); // 분리된 Repository 사용
+                await _refreshTokenRepository.AddAsync(refreshTokenEntity);
 
                 return ServiceResult<TokenIssueResponse>.Success(new TokenIssueResponse
                 {
@@ -163,12 +192,15 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// 리프레시 토큰을 사용하여 만료된 액세스 토큰을 새로 발급받습니다.
+        /// </summary>
         public async Task<ServiceResult<TokenRefreshResponse>> RefreshTokenAsync(string refreshToken)
         {
             try
             {
                 var tokenHash = HashToken(refreshToken);
-                var storedToken = await _refreshTokenRepository.GetByTokenHashAsync(tokenHash); // RefreshTokenRepository 사용
+                var storedToken = await _refreshTokenRepository.GetByTokenHashAsync(tokenHash);
 
                 if (storedToken == null)
                     return ServiceResult<TokenRefreshResponse>.Failure("Invalid refresh token");
@@ -185,7 +217,6 @@ namespace AuthHive.Auth.Services.Authentication
                 if (session == null || session.Status != SessionStatus.Active)
                     return ServiceResult<TokenRefreshResponse>.Failure("Session is invalid");
 
-                // Session 엔티티를 SessionDto로 변환
                 var sessionDto = new SessionDto
                 {
                     Id = session.Id,
@@ -200,10 +231,8 @@ namespace AuthHive.Auth.Services.Authentication
                     Level = session.Level
                 };
 
-                // 기존 RefreshToken 폐기
                 await RevokeRefreshTokenInternalAsync(storedToken.Id, "Token rotation");
 
-                // 새 토큰 발급
                 var newTokens = await IssueTokensAsync(sessionDto);
 
                 if (!newTokens.IsSuccess || newTokens.Data == null)
@@ -224,6 +253,9 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// 액세스 토큰이 유효한지 검증하고, 토큰에 담긴 주요 정보를 반환합니다.
+        /// </summary>
         public async Task<ServiceResult<TokenValidationResponse>> ValidateTokenAsync(string token)
         {
             try
@@ -237,7 +269,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var principal = validationResult.Data;
-                var userIdClaim = principal.FindFirst("user_id")?.Value;
+                var userIdClaim = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
                 var connectedIdClaim = principal.FindFirst("connected_id")?.Value;
                 var orgIdClaim = principal.FindFirst("org_id")?.Value;
 
@@ -256,12 +288,15 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// 리프레시 토큰을 폐기합니다. (로그아웃 시 사용)
+        /// </summary>
         public async Task<ServiceResult> RevokeTokenAsync(string refreshToken)
         {
             try
             {
                 var tokenHash = HashToken(refreshToken);
-                var storedToken = await _refreshTokenRepository.GetByTokenHashAsync(tokenHash); // 수정
+                var storedToken = await _refreshTokenRepository.GetByTokenHashAsync(tokenHash);
 
                 if (storedToken != null)
                 {
@@ -277,32 +312,53 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// 특정 사용자의 모든 토큰을 폐기합니다. (AuthHive 철학에 맞게 수정됨)
+        /// 1. User ID로 모든 ConnectedId를 조회합니다.
+        /// 2. 각 ConnectedId에 대해 모든 AccessToken을 폐기합니다.
+        /// 3. User ID로 모든 RefreshToken을 폐기합니다.
+        /// </summary>
         public async Task<ServiceResult<int>> RevokeAllTokensForUserAsync(Guid userId)
         {
             try
             {
-                // AccessToken과 RefreshToken을 각각 폐기
-                var accessTokenCount = await _accessTokenRepository.RevokeAllAccessTokensForConnectedIdAsync(
-                    userId, "User requested logout from all devices");
+                // BaseRepository의 FindAsync 메서드 활용
+                var connectedIds = await _connectedIdRepository.FindAsync(c => c.UserId == userId);
+
+                if (connectedIds == null || !connectedIds.Any())
+                {
+                    _logger.LogInformation("No ConnectedIds found for user {UserId}, proceeding to revoke refresh tokens only.", userId);
+                }
+
+                var totalAccessTokenCount = 0;
+                if (connectedIds != null)
+                {
+                    foreach (var connectedId in connectedIds)
+                    {
+                        totalAccessTokenCount += await _accessTokenRepository.RevokeAllAccessTokensForConnectedIdAsync(
+                            connectedId.Id, "User requested logout from all devices");
+                    }
+                }
 
                 var refreshTokenCount = await _refreshTokenRepository.RevokeAllForUserAsync(userId);
+                var totalCount = totalAccessTokenCount + refreshTokenCount;
 
-                var totalCount = accessTokenCount + refreshTokenCount;
-
-                _logger.LogInformation("Revoked {AccessTokenCount} access tokens and {RefreshTokenCount} refresh tokens for user {UserId}", 
-                    accessTokenCount, refreshTokenCount, userId);
+                _logger.LogInformation("Revoked {AccessTokenCount} access tokens and {RefreshTokenCount} refresh tokens for user {UserId}",
+                    totalAccessTokenCount, refreshTokenCount, userId);
 
                 return ServiceResult<int>.Success(totalCount);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to revoke all tokens");
+                _logger.LogError(ex, "Failed to revoke all tokens for user {UserId}", userId);
                 return ServiceResult<int>.Failure($"Failed to revoke tokens: {ex.Message}");
             }
         }
-
         #region Private Helper Methods
 
+        /// <summary>
+        /// DB에 저장된 리프레시 토큰을 폐기 상태로 업데이트하는 내부 메서드
+        /// </summary>
         private async Task RevokeRefreshTokenInternalAsync(Guid tokenId, string reason)
         {
             var token = await _refreshTokenRepository.GetByIdAsync(tokenId);
@@ -315,6 +371,9 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        /// <summary>
+        /// 보안을 위해 토큰을 SHA256으로 해싱하는 헬퍼 메서드
+        /// </summary>
         private string HashToken(string token)
         {
             using var sha256 = SHA256.Create();

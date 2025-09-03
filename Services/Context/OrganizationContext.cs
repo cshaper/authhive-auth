@@ -48,7 +48,7 @@ namespace AuthHive.Auth.Services.Context
                 return _organizationId.Value;
             }
         }
-
+        public Guid? CurrentOrganizationId => HasOrganization ? OrganizationId : null;
         /// <summary>
         /// 조직이 설정되어 있는지 여부
         /// </summary>
@@ -83,7 +83,7 @@ namespace AuthHive.Auth.Services.Context
             if (httpContext.User?.Identity?.IsAuthenticated == true)
             {
                 // org_id 클레임 확인
-                var orgIdClaim = httpContext.User.FindFirst("org_id") 
+                var orgIdClaim = httpContext.User.FindFirst("org_id")
                     ?? httpContext.User.FindFirst("organization_id")
                     ?? httpContext.User.FindFirst(ClaimTypes.GroupSid)
                     ?? httpContext.User.FindFirst("OrganizationId");

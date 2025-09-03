@@ -1,90 +1,136 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Enums.Audit;
 using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Core.Models.Common;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using System.Text.Json;
 using static AuthHive.Core.Enums.Core.UserEnums;
-using AuthHive.Core.Enums.Audit;
-
 
 namespace AuthHive.Auth.Repositories.Organization
 {
     /// <summary>
     /// 조직 데이터 정책 Repository 구현체 - AuthHive v15
-    /// 조직의 데이터 관리 정책(보존, 암호화, 개인정보 처리 등)을 관리합니다.
+    /// 조직의 데이터 관리 정책(보존, 암호화, 개인정보 처리 등)을 관리
+    /// BaseRepository를 상속받아 캐싱, 통계, 조직 스코프 기능 활용
     /// </summary>
-    public class OrganizationDataPolicyRepository : OrganizationScopedRepository<OrganizationDataPolicy>, IOrganizationDataPolicyRepository
+    public class OrganizationDataPolicyRepository : 
+        BaseRepository<OrganizationDataPolicy>, 
+        IOrganizationDataPolicyRepository
     {
-        public OrganizationDataPolicyRepository(AuthDbContext context) : base(context)
+        // JSON 직렬화 옵션 (성능 최적화)
+        private static readonly JsonSerializerOptions _jsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        public OrganizationDataPolicyRepository(
+            AuthDbContext context,
+            IOrganizationContext organizationContext,
+            IMemoryCache? cache = null) 
+            : base(context, organizationContext, cache)
         {
         }
 
-        #region 기본 조회
+        #region 기본 조회 - 캐싱 최적화
 
         /// <summary>
-        /// 조직의 데이터 정책 조회
+        /// 조직의 데이터 정책 조회 (캐시 활용)
+        /// API 권한 체크 및 정책 적용에서 빈번하게 호출
         /// </summary>
         public async Task<OrganizationDataPolicy?> GetByOrganizationAsync(Guid organizationId)
         {
-            return await _dbSet
-                .FirstOrDefaultAsync(p => p.OrganizationId == organizationId && !p.IsDeleted);
+            // 캐시 키 생성
+            string cacheKey = $"DataPolicy:{organizationId}";
+            
+            if (_cache != null && _cache.TryGetValue(cacheKey, out OrganizationDataPolicy? cached))
+            {
+                return cached;
+            }
+
+            // QueryForOrganization 활용하여 조직 격리 보장
+            var policy = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync();
+
+            // 캐시 저장 (10분간 유지)
+            if (policy != null && _cache != null)
+            {
+                _cache.Set(cacheKey, policy, TimeSpan.FromMinutes(10));
+            }
+
+            return policy;
         }
 
         /// <summary>
         /// 여러 조직의 데이터 정책 일괄 조회
+        /// 배치 작업에서 사용
         /// </summary>
         public async Task<IEnumerable<OrganizationDataPolicy>> GetByOrganizationsAsync(
             IEnumerable<Guid> organizationIds)
         {
             var orgIds = organizationIds.ToList();
+            
+            // 전체 조직 대상이므로 _dbSet 직접 사용
             return await _dbSet
                 .Where(p => orgIds.Contains(p.OrganizationId) && !p.IsDeleted)
                 .ToListAsync();
         }
 
         /// <summary>
-        /// 조직의 정책 존재 여부 확인
+        /// 조직의 정책 존재 여부 확인 (캐시 활용)
+        /// 정책 생성 전 중복 체크
         /// </summary>
         public async Task<bool> PolicyExistsForOrganizationAsync(Guid organizationId)
         {
-            return await _dbSet
-                .AnyAsync(p => p.OrganizationId == organizationId && !p.IsDeleted);
+            // GetByOrganizationAsync가 캐시를 활용하므로 재사용
+            var policy = await GetByOrganizationAsync(organizationId);
+            return policy != null;
         }
 
         /// <summary>
         /// 정책 버전으로 조회
+        /// 정책 이력 추적에 사용
         /// </summary>
         public async Task<OrganizationDataPolicy?> GetByVersionAsync(
             Guid organizationId,
             int version)
         {
-            return await _dbSet
-                .FirstOrDefaultAsync(p => p.OrganizationId == organizationId && 
-                                         p.PolicyVersion == version && 
-                                         !p.IsDeleted);
+            return await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(p => p.PolicyVersion == version);
         }
 
         #endregion
 
-        #region 컴플라이언스 검증 - 표준화된 버전
+        #region 컴플라이언스 검증 - 최적화된 버전
 
         /// <summary>
-        /// 컴플라이언스 표준별 정책 준수 확인 (임시 enum 정의 사용)
+        /// 컴플라이언스 표준별 정책 준수 확인 (캐시 활용)
+        /// 규정 준수 대시보드에서 자주 호출
         /// </summary>
         public async Task<(bool IsCompliant, List<string> Violations)> CheckComplianceAsync(
             Guid organizationId,
             ComplianceReportType complianceType)
         {
+            // 캐시 키 생성
+            string cacheKey = $"Compliance:{organizationId}:{complianceType}";
+            
+            if (_cache != null && _cache.TryGetValue(cacheKey, out (bool, List<string>) cachedResult))
+            {
+                return cachedResult;
+            }
+
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return (false, new List<string> { "조직 데이터 정책이 없습니다" });
 
             var violations = new List<string>();
 
+            // 컴플라이언스 타입별 검증
             switch (complianceType)
             {
                 case ComplianceReportType.GDPR:
@@ -108,21 +154,40 @@ namespace AuthHive.Auth.Repositories.Organization
                     break;
             }
 
-            return (violations.Count == 0, violations);
+            var result = (violations.Count == 0, violations);
+            
+            // 캐시 저장 (5분간 유지)
+            if (_cache != null)
+            {
+                _cache.Set(cacheKey, result, TimeSpan.FromMinutes(5));
+            }
+
+            return result;
         }
 
         /// <summary>
         /// 여러 컴플라이언스 표준 동시 검증
+        /// 종합 컴플라이언스 리포트에서 사용
         /// </summary>
-        public async Task<Dictionary<ComplianceReportType, (bool IsCompliant, List<string> Violations)>> CheckMultipleComplianceAsync(
-            Guid organizationId,
-            IEnumerable<ComplianceReportType> complianceTypes)
+        public async Task<Dictionary<ComplianceReportType, (bool IsCompliant, List<string> Violations)>> 
+            CheckMultipleComplianceAsync(
+                Guid organizationId,
+                IEnumerable<ComplianceReportType> complianceTypes)
         {
             var results = new Dictionary<ComplianceReportType, (bool, List<string>)>();
             
-            foreach (var type in complianceTypes)
+            // 병렬 처리로 성능 개선
+            var tasks = complianceTypes.Select(async type =>
             {
-                results[type] = await CheckComplianceAsync(organizationId, type);
+                var result = await CheckComplianceAsync(organizationId, type);
+                return new { Type = type, Result = result };
+            });
+
+            var completedTasks = await Task.WhenAll(tasks);
+            
+            foreach (var task in completedTasks)
+            {
+                results[task.Type] = task.Result;
             }
             
             return results;
@@ -132,63 +197,79 @@ namespace AuthHive.Auth.Repositories.Organization
 
         private void ValidateGDPRCompliance(OrganizationDataPolicy policy, List<string> violations)
         {
+            // GDPR Article 17 - Right to erasure
             if (!policy.EnableAutoAnonymization)
                 violations.Add("GDPR requires data anonymization capability (Article 17)");
                 
+            // GDPR Article 5 - Data minimization
             if (policy.DataRetentionDays > 1095) // 3년
                 violations.Add("GDPR recommends data retention period under 3 years (Article 5)");
                 
+            // GDPR Article 32 - Security of processing
             if (policy.EncryptionLevel == DataEncryptionLevel.None)
                 violations.Add("GDPR requires appropriate security measures including encryption (Article 32)");
                 
+            // GDPR Article 20 - Data portability
             if (!policy.AllowDataExport)
                 violations.Add("GDPR requires data portability capability (Article 20)");
         }
 
         private void ValidateHIPAACompliance(OrganizationDataPolicy policy, List<string> violations)
         {
+            // HIPAA Security Rule § 164.312(a)(2)(iv)
             if (policy.EncryptionLevel < DataEncryptionLevel.Enhanced)
                 violations.Add("HIPAA requires enhanced encryption for PHI (§ 164.312(a)(2)(iv))");
                 
+            // HIPAA § 164.316(b)(2) - Documentation retention
             if (policy.AuditLogRetentionDays < 2190) // 6년
                 violations.Add("HIPAA requires audit log retention for at least 6 years (§ 164.316(b)(2))");
                 
+            // PHI export restrictions
             if (policy.AllowDataExport && !IsHealthcareSystemOnly(policy))
                 violations.Add("HIPAA restricts PHI export to authorized healthcare systems only");
         }
 
         private void ValidateSOC2Compliance(OrganizationDataPolicy policy, List<string> violations)
         {
+            // SOC2 audit requirements
             if (policy.AuditLogRetentionDays < 365)
                 violations.Add("SOC2 requires audit log retention for at least 1 year");
                 
+            // SOC2 policy review requirements
             if (policy.LastReviewedAt == null || policy.LastReviewedAt < DateTime.UtcNow.AddMonths(-6))
                 violations.Add("SOC2 requires policy review at least every 6 months");
                 
+            // SOC2 encryption requirements
             if (policy.EncryptionLevel == DataEncryptionLevel.None)
                 violations.Add("SOC2 requires data encryption at rest and in transit");
         }
 
         private void ValidateISO27001Compliance(OrganizationDataPolicy policy, List<string> violations)
         {
+            // ISO27001 A.10.1 - Cryptographic controls
             if (policy.EncryptionLevel < DataEncryptionLevel.Standard)
                 violations.Add("ISO27001 requires appropriate cryptographic controls (A.10.1)");
                 
+            // ISO27001 A.18.1.4 - Privacy and protection
             if (!policy.EnableAutoAnonymization)
                 violations.Add("ISO27001 requires data minimization practices (A.18.1.4)");
                 
+            // ISO27001 A.5.1.1 - Policy review
             if (policy.LastReviewedAt == null || policy.LastReviewedAt < DateTime.UtcNow.AddYears(-1))
                 violations.Add("ISO27001 requires annual policy review (A.5.1.1)");
         }
 
         private void ValidatePCIDSSCompliance(OrganizationDataPolicy policy, List<string> violations)
         {
+            // PCI DSS Requirement 3.4 - Strong cryptography
             if (policy.EncryptionLevel < DataEncryptionLevel.Enhanced)
                 violations.Add("PCI DSS requires strong encryption for cardholder data (Requirement 3.4)");
                 
+            // PCI DSS Requirement 3.1 - Data retention
             if (policy.DataRetentionDays > 365)
                 violations.Add("PCI DSS requires minimal data retention for cardholder data (Requirement 3.1)");
                 
+            // PCI DSS database export restrictions
             if (policy.AllowSqlDumpExport)
                 violations.Add("PCI DSS prohibits unencrypted database exports (Requirement 3.4)");
         }
@@ -200,8 +281,11 @@ namespace AuthHive.Auth.Repositories.Organization
                 
             try
             {
-                var systems = JsonSerializer.Deserialize<List<string>>(policy.AllowedExternalSystems);
-                return systems?.All(s => s.Contains("Healthcare") || s.Contains("Medical")) ?? false;
+                var systems = JsonSerializer.Deserialize<List<string>>(
+                    policy.AllowedExternalSystems, _jsonOptions);
+                return systems?.All(s => 
+                    s.Contains("Healthcare", StringComparison.OrdinalIgnoreCase) || 
+                    s.Contains("Medical", StringComparison.OrdinalIgnoreCase)) ?? false;
             }
             catch
             {
@@ -213,13 +297,17 @@ namespace AuthHive.Auth.Repositories.Organization
 
         #endregion
 
-        #region 정책 생성 및 업데이트 - 표준화된 버전
+        #region 정책 생성 및 업데이트 - 캐시 무효화 포함
 
         /// <summary>
-        /// 데이터 정책 생성 또는 업데이트 (표준화된 검증 포함)
+        /// 데이터 정책 생성 또는 업데이트
+        /// 조직 온보딩 및 정책 변경 시 사용
         /// </summary>
         public async Task<OrganizationDataPolicy> UpsertAsync(OrganizationDataPolicy policy)
         {
+            // 캐시 무효화
+            InvalidatePolicyCache(policy.OrganizationId);
+
             // 정책 유효성 검증
             var (isValid, errors) = await ValidatePolicyAsync(policy);
             if (!isValid)
@@ -231,24 +319,28 @@ namespace AuthHive.Auth.Repositories.Organization
             
             if (existing == null)
             {
+                // 새 정책 생성
                 policy.PolicyVersion = 1;
-                return await AddAsync(policy);
+                var newPolicy = await AddAsync(policy); // BaseRepository 메서드 활용
+                await _context.SaveChangesAsync();
+                return newPolicy;
             }
             else
             {
-                // 기존 정책을 업데이트하고 버전 증가
+                // 기존 정책 업데이트
                 UpdatePolicyFields(existing, policy);
                 existing.PolicyVersion++;
                 existing.UpdatedAt = DateTime.UtcNow;
                 existing.UpdatedByConnectedId = policy.UpdatedByConnectedId;
 
-                await UpdateAsync(existing);
+                await UpdateAsync(existing); // BaseRepository 메서드 활용
+                await _context.SaveChangesAsync();
                 return existing;
             }
         }
 
         /// <summary>
-        /// 정책 필드 업데이트 (표준화된 방식)
+        /// 정책 필드 업데이트 헬퍼
         /// </summary>
         private void UpdatePolicyFields(OrganizationDataPolicy existing, OrganizationDataPolicy newPolicy)
         {
@@ -270,7 +362,8 @@ namespace AuthHive.Auth.Repositories.Organization
         }
 
         /// <summary>
-        /// 정책 유효성 검증 (표준화된 버전)
+        /// 정책 유효성 검증
+        /// 정책 저장 전 비즈니스 규칙 검증
         /// </summary>
         public Task<(bool IsValid, List<string> Errors)> ValidatePolicyAsync(
             OrganizationDataPolicy policy)
@@ -297,58 +390,103 @@ namespace AuthHive.Auth.Repositories.Organization
             if (policy.AllowSqlDumpExport && policy.EncryptionLevel < DataEncryptionLevel.Enhanced)
                 errors.Add("SQL 덤프 내보내기를 허용하려면 향상된 암호화 이상이 필요합니다");
 
+            // 보존 기간 논리 검증
+            if (policy.AnonymizationAfterDays > policy.DataRetentionDays)
+                errors.Add("익명화 기간은 데이터 보존 기간보다 짧아야 합니다");
+
             return Task.FromResult((errors.Count == 0, errors));
         }
 
         #endregion
 
-        #region 통계 및 분석 - 표준화된 버전
+        #region 통계 및 분석 - BaseRepository 기능 활용
 
         /// <summary>
-        /// 정책 사용 통계 (표준화된 구조)
+        /// 정책 사용 통계 (캐시 활용)
+        /// 관리자 대시보드에서 사용
         /// </summary>
         public async Task<DataPolicyStatistics> GetDataPolicyStatisticsAsync()
         {
-            var policies = await _dbSet.Where(p => !p.IsDeleted).ToListAsync();
-
-            return new DataPolicyStatistics
+            // 캐시 키
+            string cacheKey = "DataPolicyStatistics:Global";
+            
+            if (_cache != null && _cache.TryGetValue(cacheKey, out DataPolicyStatistics? cached))
             {
-                TotalOrganizations = policies.Count, // TotalPolicies 대신 사용
-                OrganizationsWithPolicy = policies.Count, // 정책이 있는 조직 수
-                EncryptionLevelDist = policies.GroupBy(p => p.EncryptionLevel).ToDictionary(g => g.Key.ToString(), g => g.Count()),
-                MetadataModeDist = policies.GroupBy(p => p.UserMetadataMode).ToDictionary(g => g.Key.ToString(), g => g.Count()),
+                return cached ?? new DataPolicyStatistics();
+            }
+
+            // BaseRepository의 Query() 활용
+            var policies = await Query().ToListAsync();
+
+            var stats = new DataPolicyStatistics
+            {
+                TotalOrganizations = policies.Count,
+                OrganizationsWithPolicy = policies.Count,
+                EncryptionLevelDist = policies
+                    .GroupBy(p => p.EncryptionLevel)
+                    .ToDictionary(g => g.Key.ToString(), g => g.Count()),
+                MetadataModeDist = policies
+                    .GroupBy(p => p.UserMetadataMode)
+                    .ToDictionary(g => g.Key.ToString(), g => g.Count()),
                 AllowDataExportCount = policies.Count(p => p.AllowDataExport),
                 AutoAnonymizationEnabledCount = policies.Count(p => p.EnableAutoAnonymization),
-                RegulationComplianceDist = GetComplianceBreakdown(policies)
+                RegulationComplianceDist = await GetComplianceBreakdownAsync(policies)
             };
+
+            // 캐시 저장 (15분간 유지)
+            if (_cache != null)
+            {
+                _cache.Set(cacheKey, stats, TimeSpan.FromMinutes(15));
+            }
+
+            return stats;
         }
 
         /// <summary>
-        /// 컴플라이언스별 분석
+        /// 컴플라이언스별 분석 (비동기 최적화)
         /// </summary>
-        private Dictionary<string, int> GetComplianceBreakdown(List<OrganizationDataPolicy> policies)
+        private async Task<Dictionary<string, int>> GetComplianceBreakdownAsync(
+            List<OrganizationDataPolicy> policies)
         {
             var breakdown = new Dictionary<string, int>();
             
-            foreach (ComplianceReportType complianceType in Enum.GetValues<ComplianceReportType>())
+            // 병렬 처리로 성능 개선
+            var tasks = Enum.GetValues<ComplianceReportType>().Select(async complianceType =>
             {
                 int compliantCount = 0;
                 foreach (var policy in policies)
                 {
-                    var (isCompliant, _) = CheckComplianceAsync(policy.OrganizationId, complianceType).Result;
+                    var (isCompliant, _) = await CheckComplianceAsync(
+                        policy.OrganizationId, complianceType);
                     if (isCompliant) compliantCount++;
                 }
-                breakdown[complianceType.ToString()] = compliantCount;
+                return new { Type = complianceType.ToString(), Count = compliantCount };
+            });
+
+            var results = await Task.WhenAll(tasks);
+            
+            foreach (var result in results)
+            {
+                breakdown[result.Type] = result.Count;
             }
             
             return breakdown;
         }
 
         /// <summary>
-        /// 조직별 정책 준수율 계산 (표준화된 버전)
+        /// 조직별 정책 준수율 계산 (캐시 활용)
+        /// 컴플라이언스 스코어카드에서 사용
         /// </summary>
         public async Task<double> GetComplianceScoreAsync(Guid organizationId)
         {
+            // 캐시 키
+            string cacheKey = $"ComplianceScore:{organizationId}";
+            
+            if (_cache != null && _cache.TryGetValue(cacheKey, out double cachedScore))
+            {
+                return cachedScore;
+            }
+
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return 0.0;
@@ -356,44 +494,77 @@ namespace AuthHive.Auth.Repositories.Organization
             var score = 0.0;
             var maxScore = 10.0;
 
-            // 암호화 수준 (2점)
+            // 점수 계산 로직
             if (policy.EncryptionLevel != DataEncryptionLevel.None) 
                 score += 2.0;
 
-            // 데이터 보존 정책 (2점)
             if (policy.DataRetentionDays <= 1095) // 3년 이하
                 score += 2.0;
 
-            // 감사 로그 보존 (2점)
             if (policy.AuditLogRetentionDays >= 365) // 1년 이상
                 score += 2.0;
 
-            // 자동 익명화 (2점)
             if (policy.EnableAutoAnonymization) 
                 score += 2.0;
 
-            // 외부 시스템 제한 (1점)
             if (!string.IsNullOrEmpty(policy.AllowedExternalSystems)) 
                 score += 1.0;
 
-            // 정기 검토 (1점)
-            if (policy.LastReviewedAt != null && policy.LastReviewedAt > DateTime.UtcNow.AddMonths(-6)) 
+            if (policy.LastReviewedAt != null && 
+                policy.LastReviewedAt > DateTime.UtcNow.AddMonths(-6)) 
                 score += 1.0;
 
-            return Math.Round((score / maxScore) * 100, 2);
+            var result = Math.Round((score / maxScore) * 100, 2);
+            
+            // 캐시 저장 (10분간 유지)
+            if (_cache != null)
+            {
+                _cache.Set(cacheKey, result, TimeSpan.FromMinutes(10));
+            }
+
+            return result;
         }
 
         #endregion
 
-        #region 정책 업데이트 메서드들
+        #region Helper Methods
+
+        /// <summary>
+        /// 정책 관련 캐시 무효화
+        /// 정책 변경 시 관련 캐시 모두 제거
+        /// </summary>
+        private void InvalidatePolicyCache(Guid organizationId)
+        {
+            if (_cache == null) return;
+
+            // 조직별 캐시 무효화
+            _cache.Remove($"DataPolicy:{organizationId}");
+            _cache.Remove($"ComplianceScore:{organizationId}");
+            
+            // 컴플라이언스 캐시 무효화
+            foreach (ComplianceReportType type in Enum.GetValues(typeof(ComplianceReportType)))
+            {
+                _cache.Remove($"Compliance:{organizationId}:{type}");
+            }
+            
+            // 전역 통계 캐시 무효화
+            _cache.Remove("DataPolicyStatistics:Global");
+        }
+
+        #endregion
+
+        #region 추가 구현 메서드들
 
         /// <summary>
         /// 정책 업데이트 (버전 자동 증가)
+        /// 관리자의 정책 수정 시 사용
         /// </summary>
         public async Task<OrganizationDataPolicy?> UpdatePolicyAsync(
             Guid organizationId,
             Action<OrganizationDataPolicy> updates)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return null;
@@ -403,14 +574,18 @@ namespace AuthHive.Auth.Repositories.Organization
             policy.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(policy);
+            await _context.SaveChangesAsync();
             return policy;
         }
 
         /// <summary>
         /// 정책 버전 증가
+        /// 중요 변경사항 추적에 사용
         /// </summary>
         public async Task<int> IncrementVersionAsync(Guid organizationId)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return -1;
@@ -419,15 +594,13 @@ namespace AuthHive.Auth.Repositories.Organization
             policy.UpdatedAt = DateTime.UtcNow;
             
             await UpdateAsync(policy);
+            await _context.SaveChangesAsync();
             return policy.PolicyVersion;
         }
 
-        #endregion
-
-        #region 데이터 보존 정책
-
         /// <summary>
         /// 데이터 보존 기간 업데이트
+        /// 컴플라이언스 요구사항 반영 시 사용
         /// </summary>
         public async Task<bool> UpdateRetentionPolicyAsync(
             Guid organizationId,
@@ -435,6 +608,8 @@ namespace AuthHive.Auth.Repositories.Organization
             int? auditLogRetentionDays = null,
             int? pointTransactionRetentionDays = null)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -464,6 +639,7 @@ namespace AuthHive.Auth.Repositories.Organization
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
             }
 
             return updated;
@@ -471,6 +647,7 @@ namespace AuthHive.Auth.Repositories.Organization
 
         /// <summary>
         /// 보존 기간이 만료된 조직 조회
+        /// 데이터 정리 배치 작업에서 사용
         /// </summary>
         public async Task<IEnumerable<OrganizationDataPolicy>> GetExpiredRetentionPoliciesAsync(
             string dataType)
@@ -479,52 +656,78 @@ namespace AuthHive.Auth.Repositories.Organization
             
             return dataType.ToLower() switch
             {
-                "audit" => await _dbSet
+                "audit" => await Query()
                     .Where(p => p.AuditLogRetentionDays > 0 && 
-                               p.CreatedAt.AddDays(p.AuditLogRetentionDays) < cutoffDate && 
-                               !p.IsDeleted)
+                               p.CreatedAt.AddDays(p.AuditLogRetentionDays) < cutoffDate)
                     .ToListAsync(),
                 
-                "point" => await _dbSet
+                "point" => await Query()
                     .Where(p => p.PointTransactionRetentionDays > 0 && 
-                               p.CreatedAt.AddDays(p.PointTransactionRetentionDays) < cutoffDate && 
-                               !p.IsDeleted)
+                               p.CreatedAt.AddDays(p.PointTransactionRetentionDays) < cutoffDate)
                     .ToListAsync(),
                 
-                _ => await _dbSet
+                _ => await Query()
                     .Where(p => p.DataRetentionDays > 0 && 
-                               p.CreatedAt.AddDays(p.DataRetentionDays) < cutoffDate && 
-                               !p.IsDeleted)
+                               p.CreatedAt.AddDays(p.DataRetentionDays) < cutoffDate)
                     .ToListAsync()
             };
         }
 
         /// <summary>
         /// 보존 정책별 조직 조회
+        /// 정책 분석에 사용
         /// </summary>
         public async Task<IEnumerable<OrganizationDataPolicy>> GetByRetentionRangeAsync(
             int minRetentionDays,
             int maxRetentionDays)
         {
-            return await _dbSet
+            return await Query()
                 .Where(p => p.DataRetentionDays >= minRetentionDays && 
-                           p.DataRetentionDays <= maxRetentionDays && 
-                           !p.IsDeleted)
+                           p.DataRetentionDays <= maxRetentionDays)
                 .OrderBy(p => p.DataRetentionDays)
                 .ToListAsync();
         }
 
-        #endregion
+        /// <summary>
+        /// 규정 준수 확인 (문자열 버전 - 하위 호환성)
+        /// 레거시 시스템 호환용
+        /// </summary>
+        public async Task<(bool IsCompliant, List<string> Violations)> CheckComplianceAsync(
+            Guid organizationId,
+            IEnumerable<string> regulations)
+        {
+            var policy = await GetByOrganizationAsync(organizationId);
+            if (policy == null)
+                return (false, new List<string> { "No data policy found" });
 
-        #region 사용자 데이터 정책
+            var violations = new List<string>();
+
+            foreach (var regulation in regulations)
+            {
+                if (Enum.TryParse<ComplianceReportType>(regulation, true, out var complianceType))
+                {
+                    var (_, typeViolations) = await CheckComplianceAsync(organizationId, complianceType);
+                    violations.AddRange(typeViolations);
+                }
+                else
+                {
+                    violations.Add($"Unknown regulation type: {regulation}");
+                }
+            }
+
+            return (violations.Count == 0, violations);
+        }
 
         /// <summary>
         /// 사용자 메타데이터 모드 업데이트
+        /// 개인정보 수집 정책 변경 시 사용
         /// </summary>
         public async Task<bool> UpdateUserMetadataModeAsync(
             Guid organizationId,
             UserMetadataMode mode)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -534,17 +737,21 @@ namespace AuthHive.Auth.Repositories.Organization
             policy.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(policy);
+            await _context.SaveChangesAsync();
             return true;
         }
 
         /// <summary>
         /// 프로필 수집 설정 업데이트
+        /// GDPR 등 규정 대응 시 사용
         /// </summary>
         public async Task<bool> UpdateProfileCollectionAsync(
             Guid organizationId,
             bool? collectMemberProfile = null,
             bool? collectUserProfile = null)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -568,6 +775,7 @@ namespace AuthHive.Auth.Repositories.Organization
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
             }
 
             return updated;
@@ -575,55 +783,19 @@ namespace AuthHive.Auth.Repositories.Organization
 
         /// <summary>
         /// 특정 메타데이터 모드를 사용하는 조직 조회
+        /// 정책별 조직 분류 시 사용
         /// </summary>
         public async Task<IEnumerable<OrganizationDataPolicy>> GetByMetadataModeAsync(
             UserMetadataMode mode)
         {
-            return await _dbSet
-                .Where(p => p.UserMetadataMode == mode && !p.IsDeleted)
+            return await Query()
+                .Where(p => p.UserMetadataMode == mode)
                 .ToListAsync();
         }
-
-        #endregion
-
-        #region API 키 관리
-
-        /// <summary>
-        /// API 키 관리 정책 업데이트
-        /// </summary>
-        public async Task<bool> UpdateApiKeyManagementAsync(
-            Guid organizationId,
-            ApiKeyManagementPolicy policy)
-        {
-            var dataPolicy = await GetByOrganizationAsync(organizationId);
-            if (dataPolicy == null)
-                return false;
-
-            dataPolicy.ApiKeyManagement = policy;
-            dataPolicy.PolicyVersion++;
-            dataPolicy.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(dataPolicy);
-            return true;
-        }
-
-        /// <summary>
-        /// API 키 관리 정책별 조직 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationDataPolicy>> GetByApiKeyPolicyAsync(
-            ApiKeyManagementPolicy policy)
-        {
-            return await _dbSet
-                .Where(p => p.ApiKeyManagement == policy && !p.IsDeleted)
-                .ToListAsync();
-        }
-
-        #endregion
-
-        #region 데이터 내보내기
 
         /// <summary>
         /// 데이터 내보내기 권한 설정
+        /// 데이터 이동성 정책 관리 시 사용
         /// </summary>
         public async Task<bool> UpdateExportPermissionsAsync(
             Guid organizationId,
@@ -631,6 +803,8 @@ namespace AuthHive.Auth.Repositories.Organization
             bool? allowSqlDumpExport = null,
             bool? allowBulkApiAccess = null)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -660,50 +834,46 @@ namespace AuthHive.Auth.Repositories.Organization
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
             }
 
             return updated;
         }
 
         /// <summary>
-        /// 데이터 내보내기가 허용된 조직 조회
+        /// 암호화 수준 업데이트
+        /// 보안 정책 강화 시 사용
         /// </summary>
-        public async Task<IEnumerable<OrganizationDataPolicy>> GetOrganizationsWithExportAsync(
-            string exportType)
+        public async Task<bool> UpdateEncryptionLevelAsync(
+            Guid organizationId,
+            DataEncryptionLevel level)
         {
-            return exportType.ToLower() switch
-            {
-                "data" => await _dbSet
-                    .Where(p => p.AllowDataExport && !p.IsDeleted)
-                    .ToListAsync(),
-                
-                "sql" => await _dbSet
-                    .Where(p => p.AllowSqlDumpExport && !p.IsDeleted)
-                    .ToListAsync(),
-                
-                "bulk" => await _dbSet
-                    .Where(p => p.AllowBulkApiAccess && !p.IsDeleted)
-                    .ToListAsync(),
-                
-                _ => await _dbSet
-                    .Where(p => (p.AllowDataExport || p.AllowSqlDumpExport || p.AllowBulkApiAccess) && 
-                               !p.IsDeleted)
-                    .ToListAsync()
-            };
+            InvalidatePolicyCache(organizationId);
+            
+            var policy = await GetByOrganizationAsync(organizationId);
+            if (policy == null)
+                return false;
+
+            policy.EncryptionLevel = level;
+            policy.PolicyVersion++;
+            policy.UpdatedAt = DateTime.UtcNow;
+
+            await UpdateAsync(policy);
+            await _context.SaveChangesAsync();
+            return true;
         }
-
-        #endregion
-
-        #region 개인정보 보호
 
         /// <summary>
         /// 익명화 설정 업데이트
+        /// 개인정보 보호 강화 시 사용
         /// </summary>
         public async Task<bool> UpdateAnonymizationSettingsAsync(
             Guid organizationId,
             bool? enableAutoAnonymization = null,
             int? anonymizationAfterDays = null)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -727,6 +897,7 @@ namespace AuthHive.Auth.Repositories.Organization
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
             }
 
             return updated;
@@ -734,59 +905,28 @@ namespace AuthHive.Auth.Repositories.Organization
 
         /// <summary>
         /// 익명화가 필요한 조직 조회
+        /// 익명화 배치 작업에서 사용
         /// </summary>
         public async Task<IEnumerable<OrganizationDataPolicy>> GetOrganizationsNeedingAnonymizationAsync(
             DateTime asOfDate)
         {
-            return await _dbSet
+            return await Query()
                 .Where(p => p.EnableAutoAnonymization && 
-                           p.CreatedAt.AddDays(p.AnonymizationAfterDays) <= asOfDate && 
-                           !p.IsDeleted)
+                           p.CreatedAt.AddDays(p.AnonymizationAfterDays) <= asOfDate)
                 .ToListAsync();
         }
-
-        /// <summary>
-        /// 암호화 수준 업데이트
-        /// </summary>
-        public async Task<bool> UpdateEncryptionLevelAsync(
-            Guid organizationId,
-            DataEncryptionLevel level)
-        {
-            var policy = await GetByOrganizationAsync(organizationId);
-            if (policy == null)
-                return false;
-
-            policy.EncryptionLevel = level;
-            policy.PolicyVersion++;
-            policy.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(policy);
-            return true;
-        }
-
-        /// <summary>
-        /// 암호화 수준별 조직 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationDataPolicy>> GetByEncryptionLevelAsync(
-            DataEncryptionLevel level)
-        {
-            return await _dbSet
-                .Where(p => p.EncryptionLevel == level && !p.IsDeleted)
-                .ToListAsync();
-        }
-
-        #endregion
-
-        #region 외부 시스템 동기화
 
         /// <summary>
         /// 외부 동기화 설정 업데이트
+        /// 서드파티 통합 관리 시 사용
         /// </summary>
         public async Task<bool> UpdateExternalSyncSettingsAsync(
             Guid organizationId,
             bool? allowExternalSync = null,
             IEnumerable<string>? allowedSystems = null)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -801,7 +941,7 @@ namespace AuthHive.Auth.Repositories.Organization
             
             if (allowedSystems != null)
             {
-                policy.AllowedExternalSystems = JsonSerializer.Serialize(allowedSystems.ToList());
+                policy.AllowedExternalSystems = JsonSerializer.Serialize(allowedSystems.ToList(), _jsonOptions);
                 updated = true;
             }
 
@@ -810,32 +950,22 @@ namespace AuthHive.Auth.Repositories.Organization
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
             }
 
             return updated;
         }
 
         /// <summary>
-        /// 특정 외부 시스템과 동기화 가능한 조직 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationDataPolicy>> GetOrganizationsAllowingSystemAsync(
-            string systemName)
-        {
-            return await _dbSet
-                .Where(p => p.AllowExternalSync && 
-                           p.AllowedExternalSystems != null &&
-                           p.AllowedExternalSystems.Contains(systemName) && 
-                           !p.IsDeleted)
-                .ToListAsync();
-        }
-
-        /// <summary>
         /// 허용된 외부 시스템 추가
+        /// 새로운 통합 승인 시 사용
         /// </summary>
         public async Task<bool> AddAllowedExternalSystemAsync(
             Guid organizationId,
             string systemName)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -844,17 +974,19 @@ namespace AuthHive.Auth.Repositories.Organization
             
             if (!string.IsNullOrEmpty(policy.AllowedExternalSystems))
             {
-                allowedSystems = JsonSerializer.Deserialize<List<string>>(policy.AllowedExternalSystems) ?? new List<string>();
+                allowedSystems = JsonSerializer.Deserialize<List<string>>(
+                    policy.AllowedExternalSystems, _jsonOptions) ?? new List<string>();
             }
 
             if (!allowedSystems.Contains(systemName))
             {
                 allowedSystems.Add(systemName);
-                policy.AllowedExternalSystems = JsonSerializer.Serialize(allowedSystems);
+                policy.AllowedExternalSystems = JsonSerializer.Serialize(allowedSystems, _jsonOptions);
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
                 return true;
             }
 
@@ -863,42 +995,46 @@ namespace AuthHive.Auth.Repositories.Organization
 
         /// <summary>
         /// 허용된 외부 시스템 제거
+        /// 통합 해제 시 사용
         /// </summary>
         public async Task<bool> RemoveAllowedExternalSystemAsync(
             Guid organizationId,
             string systemName)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null || string.IsNullOrEmpty(policy.AllowedExternalSystems))
                 return false;
 
-            var allowedSystems = JsonSerializer.Deserialize<List<string>>(policy.AllowedExternalSystems) ?? new List<string>();
+            var allowedSystems = JsonSerializer.Deserialize<List<string>>(
+                policy.AllowedExternalSystems, _jsonOptions) ?? new List<string>();
             
             if (allowedSystems.Remove(systemName))
             {
-                policy.AllowedExternalSystems = JsonSerializer.Serialize(allowedSystems);
+                policy.AllowedExternalSystems = JsonSerializer.Serialize(allowedSystems, _jsonOptions);
                 policy.PolicyVersion++;
                 policy.UpdatedAt = DateTime.UtcNow;
                 
                 await UpdateAsync(policy);
+                await _context.SaveChangesAsync();
                 return true;
             }
 
             return false;
         }
 
-        #endregion
-
-        #region 정책 검토
-
         /// <summary>
         /// 정책 검토 날짜 업데이트
+        /// 정기 정책 검토 프로세스에서 사용
         /// </summary>
         public async Task<bool> UpdateReviewDatesAsync(
             Guid organizationId,
             DateTime reviewedAt,
             DateTime? nextReviewDate = null)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -909,53 +1045,26 @@ namespace AuthHive.Auth.Repositories.Organization
             policy.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(policy);
+            await _context.SaveChangesAsync();
             return true;
         }
 
         /// <summary>
         /// 검토가 필요한 정책 조회
+        /// 정책 검토 리마인더에서 사용
         /// </summary>
         public async Task<IEnumerable<OrganizationDataPolicy>> GetPoliciesNeedingReviewAsync(
             DateTime asOfDate)
         {
-            return await _dbSet
-                .Where(p => (p.NextReviewDate == null || p.NextReviewDate <= asOfDate) && 
-                           !p.IsDeleted)
+            return await Query()
+                .Where(p => p.NextReviewDate == null || p.NextReviewDate <= asOfDate)
                 .OrderBy(p => p.NextReviewDate ?? DateTime.MinValue)
                 .ToListAsync();
         }
 
         /// <summary>
-        /// 검토 이력 조회 (간단 구현 - 실제로는 별도 테이블 필요)
-        /// </summary>
-        public async Task<IEnumerable<DataPolicyReviewHistory>> GetReviewHistoryAsync(
-            Guid organizationId,
-            int limit = 10)
-        {
-            // 실제 구현에서는 별도의 ReviewHistory 테이블이 필요
-            // 여기서는 간단한 구현으로 정책의 LastReviewedAt 정보만 반환
-            var policy = await GetByOrganizationAsync(organizationId);
-            if (policy?.LastReviewedAt == null)
-                return new List<DataPolicyReviewHistory>();
-
-            return new List<DataPolicyReviewHistory>
-            {
-                new DataPolicyReviewHistory
-                {
-                    OrganizationId = organizationId,
-                    ReviewDate = policy.LastReviewedAt.Value,
-                    PolicyVersion = policy.PolicyVersion,
-                    ReviewedByConnectedId = policy.UpdatedByConnectedId ?? Guid.Empty
-                }
-            };
-        }
-
-        #endregion
-
-        #region 일괄 작업
-
-        /// <summary>
         /// 여러 조직에 기본 정책 적용
+        /// 대량 온보딩 시 사용
         /// </summary>
         public async Task<int> ApplyDefaultPolicyAsync(
             IEnumerable<Guid> organizationIds,
@@ -996,44 +1105,22 @@ namespace AuthHive.Auth.Repositories.Organization
             if (newPolicies.Any())
             {
                 await AddRangeAsync(newPolicies);
+                await _context.SaveChangesAsync();
             }
 
             return newPolicies.Count;
         }
 
         /// <summary>
-        /// 정책 일괄 업데이트
-        /// </summary>
-        public async Task<int> BulkUpdateAsync(
-            IEnumerable<Guid> organizationIds,
-            Action<OrganizationDataPolicy> updates)
-        {
-            var policies = await GetByOrganizationsAsync(organizationIds);
-            var updateCount = 0;
-
-            foreach (var policy in policies)
-            {
-                updates(policy);
-                policy.PolicyVersion++;
-                policy.UpdatedAt = DateTime.UtcNow;
-                updateCount++;
-            }
-
-            if (updateCount > 0)
-            {
-                await UpdateRangeAsync(policies);
-            }
-
-            return updateCount;
-        }
-
-        /// <summary>
-        /// 플랜별 정책 자동 조정 (간단 구현)
+        /// 플랜별 정책 자동 조정
+        /// 구독 플랜 변경 시 사용
         /// </summary>
         public async Task<bool> AdjustPolicyForPlanAsync(
             Guid organizationId,
             string planType)
         {
+            InvalidatePolicyCache(organizationId);
+            
             var policy = await GetByOrganizationAsync(organizationId);
             if (policy == null)
                 return false;
@@ -1061,38 +1148,31 @@ namespace AuthHive.Auth.Repositories.Organization
                     policy.AllowBulkApiAccess = true;
                     policy.EncryptionLevel = DataEncryptionLevel.Maximum;
                     break;
+                    
+                default:
+                    return false;
             }
 
             policy.PolicyVersion++;
             policy.UpdatedAt = DateTime.UtcNow;
             await UpdateAsync(policy);
+            await _context.SaveChangesAsync();
             return true;
         }
 
-        #endregion
-
-        #region 통계 및 분석 - 기존 메서드명 수정
-
         /// <summary>
-        /// 정책 사용 통계 (인터페이스와 일치)
-        /// </summary>
-        public async Task<DataPolicyStatistics> GetDataolicyStatisticsAsync()
-        {
-            return await GetDataPolicyStatisticsAsync();
-        }
-
-        /// <summary>
-        /// 정책 트렌드 분석 (간단 구현)
+        /// 정책 트렌드 분석
+        /// 정책 변화 추세 모니터링에 사용
         /// </summary>
         public async Task<IEnumerable<DataPolicyTrend>> GetDataPolicyTrendsAsync(int period = 30)
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
-            var policies = await _dbSet
-                .Where(p => p.UpdatedAt >= startDate && !p.IsDeleted)
+            var policies = await Query()
+                .Where(p => p.UpdatedAt >= startDate)
                 .OrderBy(p => p.UpdatedAt)
                 .ToListAsync();
 
-            // 간단한 트렌드 분석
+            // 일별 트렌드 분석
             return policies
                 .GroupBy(p => p.UpdatedAt?.Date ?? p.CreatedAt.Date)
                 .Select(g => new DataPolicyTrend
@@ -1105,53 +1185,5 @@ namespace AuthHive.Auth.Repositories.Organization
         }
 
         #endregion
-
-        #region 검증 및 규정 준수 - 기존 string 버전
-
-        /// <summary>
-        /// 규정 준수 확인 (기존 string 파라미터 버전)
-        /// </summary>
-        public async Task<(bool IsCompliant, List<string> Violations)> CheckComplianceAsync(
-            Guid organizationId,
-            IEnumerable<string> regulations)
-        {
-            var policy = await GetByOrganizationAsync(organizationId);
-            if (policy == null)
-                return (false, new List<string> { "No data policy found" });
-
-            var violations = new List<string>();
-
-            foreach (var regulation in regulations)
-            {
-                switch (regulation.ToUpper())
-                {
-                    case "GDPR":
-                        ValidateGDPRCompliance(policy, violations);
-                        break;
-
-                    case "HIPAA":
-                        ValidateHIPAACompliance(policy, violations);
-                        break;
-
-                    case "SOC2":
-                        ValidateSOC2Compliance(policy, violations);
-                        break;
-
-                    case "ISO27001":
-                        ValidateISO27001Compliance(policy, violations);
-                        break;
-
-                    case "PCI_DSS":
-                        ValidatePCIDSSCompliance(policy, violations);
-                        break;
-                }
-            }
-
-            return (violations.Count == 0, violations);
-        }
-
-        #endregion
-
-
     }
 }

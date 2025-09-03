@@ -2,12 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using AuthHive.Auth.Data;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Base;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 
@@ -16,6 +17,7 @@ namespace AuthHive.Auth.Repositories
     /// <summary>
     /// 세션 저장소 구현 - AuthHive v15
     /// 전역 세션과 조직별 세션을 모두 관리합니다.
+    /// BaseRepository의 기능을 최대한 활용하도록 리팩토링됨
     /// </summary>
     public class SessionRepository : BaseRepository<SessionEntity>, ISessionRepository
     {
@@ -23,17 +25,22 @@ namespace AuthHive.Auth.Repositories
 
         public SessionRepository(
             AuthDbContext context,
-            ILogger<SessionRepository> logger) : base(context)
+            IOrganizationContext organizationContext,
+            ILogger<SessionRepository> logger,
+            IMemoryCache? cache = null) 
+            : base(context, organizationContext, cache)
         {
-            _logger = logger;
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
         #region 전역 세션 관리
 
         public async Task<SessionEntity?> GetGlobalSessionAsync(Guid userId)
         {
-            return await Query()
-                .Where(s => s.UserId == userId && 
+            // 전역 세션은 조직 필터링을 우회해야 하므로 _dbSet 직접 사용
+            return await _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.UserId == userId && 
                            s.Level == SessionLevel.Global &&
                            s.Status == SessionStatus.Active)
                 .FirstOrDefaultAsync();
@@ -41,8 +48,10 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<IEnumerable<SessionEntity>> GetActiveGlobalSessionsAsync()
         {
-            return await Query()
-                .Where(s => s.Level == SessionLevel.Global &&
+            // 전역 세션 조회 - 조직 필터링 우회
+            return await _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.Level == SessionLevel.Global &&
                            s.Status == SessionStatus.Active)
                 .ToListAsync();
         }
@@ -55,8 +64,8 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             bool activeOnly = true)
         {
-            var query = Query()
-                .Where(s => s.OrganizationId == organizationId);
+            // BaseRepository의 QueryForOrganization 활용
+            var query = QueryForOrganization(organizationId);
 
             if (activeOnly)
             {
@@ -68,6 +77,7 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<SessionEntity?> GetByConnectedIdAsync(Guid connectedId)
         {
+            // 현재 조직 컨텍스트 내에서 검색
             return await Query()
                 .Where(s => s.ConnectedId == connectedId &&
                            s.Status == SessionStatus.Active)
@@ -99,8 +109,10 @@ namespace AuthHive.Auth.Repositories
             if (string.IsNullOrWhiteSpace(sessionToken))
                 return null;
 
-            return await Query()
-                .Where(s => s.SessionToken == sessionToken &&
+            // 토큰 조회는 전역적으로 수행 (조직 관계없이)
+            return await _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.SessionToken == sessionToken &&
                            s.Status == SessionStatus.Active &&
                            s.ExpiresAt > DateTime.UtcNow)
                 .FirstOrDefaultAsync();
@@ -108,8 +120,10 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<IEnumerable<SessionEntity>> GetActiveSessionsByUserAsync(Guid userId)
         {
-            return await Query()
-                .Where(s => s.UserId == userId &&
+            // 사용자의 모든 활성 세션 (전역 + 모든 조직)
+            return await _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.UserId == userId &&
                            s.Status == SessionStatus.Active)
                 .OrderByDescending(s => s.LastActivityAt)
                 .ToListAsync();
@@ -117,6 +131,7 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<IEnumerable<SessionEntity>> GetActiveSessionsAsync(Guid connectedId)
         {
+            // 현재 조직 컨텍스트 내에서 활성 세션 조회
             return await Query()
                 .Where(s => s.ConnectedId == connectedId &&
                            s.Status == SessionStatus.Active)
@@ -132,19 +147,27 @@ namespace AuthHive.Auth.Repositories
             if (!sessionIdsList.Any())
                 return 0;
 
-            var sessions = await Query()
+            var sessions = await _dbSet
                 .Where(s => sessionIdsList.Contains(s.Id))
                 .ToListAsync();
 
+            var timestamp = DateTime.UtcNow;
             foreach (var session in sessions)
             {
                 session.Status = SessionStatus.Terminated;
                 session.EndReason = reason;
-                session.EndedAt = DateTime.UtcNow;
-                session.UpdatedAt = DateTime.UtcNow;
+                session.EndedAt = timestamp;
+                session.UpdatedAt = timestamp;
             }
 
             await _context.SaveChangesAsync();
+            
+            // 캐시 무효화
+            foreach (var session in sessions)
+            {
+                InvalidateCache(session.Id);
+            }
+            
             return sessions.Count;
         }
 
@@ -166,8 +189,10 @@ namespace AuthHive.Auth.Repositories
         public async Task<IEnumerable<SessionEntity>> GetExpiredSessionsAsync(
             DateTime? since = null)
         {
-            var query = Query()
-                .Where(s => s.ExpiresAt < DateTime.UtcNow &&
+            // 만료된 세션은 전역적으로 조회
+            var query = _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.ExpiresAt < DateTime.UtcNow &&
                            s.Status != SessionStatus.Terminated);
 
             if (since.HasValue)
@@ -181,8 +206,10 @@ namespace AuthHive.Auth.Repositories
         public async Task<IEnumerable<SessionEntity>> GetInactiveSessionsAsync(
             DateTime inactiveSince)
         {
-            return await Query()
-                .Where(s => s.LastActivityAt < inactiveSince &&
+            // 비활성 세션은 전역적으로 조회
+            return await _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.LastActivityAt < inactiveSince &&
                            s.Status == SessionStatus.Active)
                 .ToListAsync();
         }
@@ -197,6 +224,7 @@ namespace AuthHive.Auth.Repositories
                 session.Status = status;
                 session.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(session);
+                await _context.SaveChangesAsync();
             }
         }
 
@@ -208,7 +236,9 @@ namespace AuthHive.Auth.Repositories
             if (session != null)
             {
                 session.LastActivityAt = activityTime ?? DateTime.UtcNow;
+                session.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(session);
+                await _context.SaveChangesAsync();
             }
         }
 
@@ -220,11 +250,13 @@ namespace AuthHive.Auth.Repositories
             var session = await GetByIdAsync(sessionId);
             if (session != null)
             {
+                var timestamp = DateTime.UtcNow;
                 session.Status = SessionStatus.Terminated;
                 session.EndReason = reason;
-                session.EndedAt = endedAt ?? DateTime.UtcNow;
-                session.UpdatedAt = DateTime.UtcNow;
+                session.EndedAt = endedAt ?? timestamp;
+                session.UpdatedAt = timestamp;
                 await UpdateAsync(session);
+                await _context.SaveChangesAsync();
             }
         }
 
@@ -232,8 +264,10 @@ namespace AuthHive.Auth.Repositories
             Guid userId,
             SessionLevel? level = null)
         {
-            var query = Query()
-                .Where(s => s.UserId == userId &&
+            // 사용자의 동시 세션 수는 전역적으로 카운트
+            var query = _dbSet
+                .Where(s => !s.IsDeleted &&
+                           s.UserId == userId &&
                            s.Status == SessionStatus.Active);
 
             if (level.HasValue)
@@ -277,6 +311,7 @@ namespace AuthHive.Auth.Repositories
                 parentSession.ActiveChildSessionId = childSessionId;
                 parentSession.UpdatedAt = DateTime.UtcNow;
                 await UpdateAsync(parentSession);
+                await _context.SaveChangesAsync();
             }
         }
 
@@ -284,8 +319,9 @@ namespace AuthHive.Auth.Repositories
             SessionLevel level,
             bool activeOnly = true)
         {
-            var query = Query()
-                .Where(s => s.Level == level);
+            // 레벨별 조회는 전역적으로 수행
+            var query = _dbSet
+                .Where(s => !s.IsDeleted && s.Level == level);
 
             if (activeOnly)
             {
@@ -312,26 +348,33 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region IQueryable 메서드
+        #region IQueryable 메서드 (BaseRepository 활용)
 
+        // GetQueryable은 Query() 메서드로 대체
         public IQueryable<SessionEntity> GetQueryable(bool includeDeleted = false)
         {
-            var query = _context.Set<SessionEntity>().AsQueryable();
-
-            if (!includeDeleted)
+            if (includeDeleted)
             {
-                query = query.Where(s => !s.IsDeleted);
+                return _dbSet.AsQueryable();
             }
-
-            return query;
+            
+            // 조직 컨텍스트가 없을 때는 전역 쿼리
+            return _organizationContext.CurrentOrganizationId == null
+                ? _dbSet.Where(e => !e.IsDeleted)
+                : Query();
         }
 
         public IQueryable<SessionEntity> GetOrganizationQueryable(
             Guid organizationId,
             bool includeDeleted = false)
         {
-            var query = GetQueryable(includeDeleted);
-            return query.Where(s => s.OrganizationId == organizationId);
+            // BaseRepository의 QueryForOrganization 활용
+            if (includeDeleted)
+            {
+                return _dbSet.Where(s => s.OrganizationId == organizationId);
+            }
+            
+            return QueryForOrganization(organizationId);
         }
 
         #endregion
@@ -346,7 +389,8 @@ namespace AuthHive.Auth.Repositories
             bool includeParentSession = false,
             bool includeChildSessions = false)
         {
-            var query = Query().Where(s => s.Id == sessionId);
+            // 전역 조회 (특정 ID로 조회하므로)
+            var query = _dbSet.Where(s => !s.IsDeleted && s.Id == sessionId);
 
             if (includeUser)
             {
@@ -376,6 +420,20 @@ namespace AuthHive.Auth.Repositories
             return await query.FirstOrDefaultAsync();
         }
 
+        #endregion
+        
+        #region Override 메서드
+        
+        /// <summary>
+        /// SessionEntity는 조직 스코프이지만 전역 세션도 있어서 특별 처리 필요
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity()
+        {
+            // SessionEntity는 조직별/전역 모두 가능하므로 
+            // 컨텍스트에 따라 다르게 처리
+            return _organizationContext.CurrentOrganizationId.HasValue;
+        }
+        
         #endregion
     }
 }

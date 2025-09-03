@@ -4,6 +4,8 @@ using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
+using AuthHive.Core.Interfaces.Base;
+using Microsoft.Extensions.Caching.Memory;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 
 namespace AuthHive.Auth.Repositories.Organization
@@ -12,9 +14,13 @@ namespace AuthHive.Auth.Repositories.Organization
     /// 조직 SSO 설정 Repository 구현체 - AuthHive v15
     /// SSO 설정 관리, 검증, 우선순위 처리 등 SSO 관련 모든 데이터 접근을 담당합니다.
     /// </summary>
-    public class OrganizationSSORepository : OrganizationScopedRepository<OrganizationSSO>, IOrganizationSSORepository
+    public class OrganizationSSORepository : BaseRepository<OrganizationSSO>, IOrganizationSSORepository
     {
-        public OrganizationSSORepository(AuthDbContext context) : base(context)
+        public OrganizationSSORepository(
+            AuthDbContext context, 
+            IOrganizationContext organizationContext, 
+            IMemoryCache? cache = null) 
+            : base(context, organizationContext, cache)
         {
         }
 
@@ -27,13 +33,25 @@ namespace AuthHive.Auth.Repositories.Organization
         /// <returns>기본 SSO 설정</returns>
         public async Task<OrganizationSSO?> GetDefaultByOrganizationAsync(Guid organizationId)
         {
-            return await _dbSet
+            // 캐시 확인
+            var cacheKey = $"OrgSSO:Default:{organizationId}";
+            if (_cache?.TryGetValue(cacheKey, out OrganizationSSO? cached) == true)
+            {
+                return cached;
+            }
+
+            var result = await QueryForOrganization(organizationId)
                 .Include(s => s.Organization)
                 .Include(s => s.DefaultRole)
-                .FirstOrDefaultAsync(s => s.OrganizationId == organizationId && 
-                                         s.IsDefault && 
-                                         s.IsActive && 
-                                         !s.IsDeleted);
+                .FirstOrDefaultAsync(s => s.IsDefault && s.IsActive);
+
+            // 캐시 저장
+            if (result != null && _cache != null)
+            {
+                _cache.Set(cacheKey, result, TimeSpan.FromMinutes(10));
+            }
+
+            return result;
         }
 
         /// <summary>
@@ -48,12 +66,10 @@ namespace AuthHive.Auth.Repositories.Organization
             OSType ssoType,
             bool includeInactive = false)
         {
-            var query = _dbSet
+            var query = QueryForOrganization(organizationId)
                 .Include(s => s.Organization)
                 .Include(s => s.DefaultRole)
-                .Where(s => s.OrganizationId == organizationId && 
-                           s.SSOType == ssoType && 
-                           !s.IsDeleted);
+                .Where(s => s.SSOType == ssoType);
 
             if (!includeInactive)
             {
@@ -62,6 +78,7 @@ namespace AuthHive.Auth.Repositories.Organization
 
             return await query
                 .OrderBy(s => s.Priority)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
@@ -75,14 +92,12 @@ namespace AuthHive.Auth.Repositories.Organization
             Guid organizationId,
             SSOProvider provider)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Include(s => s.Organization)
                 .Include(s => s.DefaultRole)
-                .Where(s => s.OrganizationId == organizationId && 
-                           s.ProviderName == provider && 
-                           s.IsActive && 
-                           !s.IsDeleted)
+                .Where(s => s.ProviderName == provider && s.IsActive)
                 .OrderBy(s => s.Priority)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
@@ -97,14 +112,13 @@ namespace AuthHive.Auth.Repositories.Organization
         /// <returns>활성 SSO 설정 목록</returns>
         public async Task<IEnumerable<OrganizationSSO>> GetActiveByOrganizationAsync(Guid organizationId)
         {
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Include(s => s.Organization)
                 .Include(s => s.DefaultRole)
-                .Where(s => s.OrganizationId == organizationId && 
-                           s.IsActive && 
-                           !s.IsDeleted)
+                .Where(s => s.IsActive)
                 .OrderBy(s => s.Priority)
                 .ThenBy(s => s.CreatedAt)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
@@ -118,10 +132,10 @@ namespace AuthHive.Auth.Repositories.Organization
             Guid organizationId,
             bool onlyActive = true)
         {
-            var query = _dbSet
+            var query = QueryForOrganization(organizationId)
                 .Include(s => s.Organization)
                 .Include(s => s.DefaultRole)
-                .Where(s => s.OrganizationId == organizationId && !s.IsDeleted);
+                .AsQueryable();  // 명시적 변환
 
             if (onlyActive)
             {
@@ -132,6 +146,7 @@ namespace AuthHive.Auth.Repositories.Organization
                 .OrderBy(s => s.Priority)
                 .ThenByDescending(s => s.IsDefault)
                 .ThenBy(s => s.CreatedAt)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
@@ -156,25 +171,27 @@ namespace AuthHive.Auth.Repositories.Organization
                            (s.LastTestedAt == null || s.LastTestedAt < cutoffDate))
                 .OrderBy(s => s.LastTestedAt ?? DateTime.MinValue)
                 .ThenBy(s => s.OrganizationId)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
         /// <summary>
-        /// 테스트 실패한 SSO 설정 조회 (구현 예시 - 실제로는 테스트 결과를 별도 저장해야 함)
+        /// 테스트 실패한 SSO 설정 조회
         /// </summary>
         /// <param name="organizationId">조직 ID (null이면 전체)</param>
         /// <returns>테스트 실패 SSO 목록</returns>
         public async Task<IEnumerable<OrganizationSSO>> GetFailedTestsAsync(Guid? organizationId = null)
         {
-            // 실제 구현에서는 테스트 결과를 별도 테이블에 저장하고 조인해야 합니다.
-            // 여기서는 예시로 오래된 테스트나 한 번도 테스트되지 않은 것을 반환합니다.
+            // Note: 실제 구현에서는 테스트 결과를 별도 테이블에 저장하고 조인해야 합니다.
+            // 현재는 60일 이상 테스트되지 않은 항목을 반환하는 임시 로직입니다.
+            var cutoffDate = DateTime.UtcNow.AddDays(-60);
+            
             var query = _dbSet
                 .Include(s => s.Organization)
                 .Include(s => s.LastTestedBy)
                 .Where(s => s.IsActive && 
                            !s.IsDeleted &&
-                           (s.LastTestedAt == null || 
-                            s.LastTestedAt < DateTime.UtcNow.AddDays(-60))); // 60일 이상 테스트되지 않은 것
+                           (s.LastTestedAt == null || s.LastTestedAt < cutoffDate));
 
             if (organizationId.HasValue)
             {
@@ -183,6 +200,7 @@ namespace AuthHive.Auth.Repositories.Organization
 
             return await query
                 .OrderBy(s => s.LastTestedAt ?? DateTime.MinValue)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
@@ -198,6 +216,12 @@ namespace AuthHive.Auth.Repositories.Organization
         /// <returns>업데이트된 개수</returns>
         public async Task<int> UnsetDefaultExceptAsync(Guid organizationId, Guid excludeSsoId)
         {
+            // 캐시 무효화
+            if (_cache != null)
+            {
+                _cache.Remove($"OrgSSO:Default:{organizationId}");
+            }
+
             var ssoToUpdate = await _dbSet
                 .Where(s => s.OrganizationId == organizationId && 
                            s.Id != excludeSsoId && 
@@ -205,20 +229,19 @@ namespace AuthHive.Auth.Repositories.Organization
                            !s.IsDeleted)
                 .ToListAsync();
 
-            var updateCount = ssoToUpdate.Count;
-            
+            if (ssoToUpdate.Count == 0)
+            {
+                return 0;
+            }
+
             foreach (var sso in ssoToUpdate)
             {
                 sso.IsDefault = false;
                 sso.UpdatedAt = DateTime.UtcNow;
             }
 
-            if (updateCount > 0)
-            {
-                await _context.SaveChangesAsync();
-            }
-
-            return updateCount;
+            await _context.SaveChangesAsync();
+            return ssoToUpdate.Count;
         }
 
         #endregion
@@ -241,6 +264,22 @@ namespace AuthHive.Auth.Repositories.Organization
         }
 
         /// <summary>
+        /// 조직별 SSO 타입별 사용 통계
+        /// </summary>
+        /// <param name="organizationId">특정 조직 ID</param>
+        /// <returns>타입별 카운트</returns>
+        public async Task<Dictionary<OSType, int>> GetTypeStatisticsByOrganizationAsync(Guid organizationId)
+        {
+            var statistics = await _dbSet
+                .Where(s => s.OrganizationId == organizationId && s.IsActive && !s.IsDeleted)
+                .GroupBy(s => s.SSOType)
+                .Select(g => new { Type = g.Key, Count = g.Count() })
+                .ToListAsync();
+
+            return statistics.ToDictionary(s => s.Type, s => s.Count);
+        }
+
+        /// <summary>
         /// 제공자별 사용 통계
         /// </summary>
         /// <returns>제공자별 카운트</returns>
@@ -248,6 +287,22 @@ namespace AuthHive.Auth.Repositories.Organization
         {
             var statistics = await _dbSet
                 .Where(s => s.IsActive && !s.IsDeleted)
+                .GroupBy(s => s.ProviderName)
+                .Select(g => new { Provider = g.Key, Count = g.Count() })
+                .ToListAsync();
+
+            return statistics.ToDictionary(s => s.Provider, s => s.Count);
+        }
+
+        /// <summary>
+        /// 조직별 제공자별 사용 통계
+        /// </summary>
+        /// <param name="organizationId">특정 조직 ID</param>
+        /// <returns>제공자별 카운트</returns>
+        public async Task<Dictionary<SSOProvider, int>> GetProviderStatisticsByOrganizationAsync(Guid organizationId)
+        {
+            var statistics = await _dbSet
+                .Where(s => s.OrganizationId == organizationId && s.IsActive && !s.IsDeleted)
                 .GroupBy(s => s.ProviderName)
                 .Select(g => new { Provider = g.Key, Count = g.Count() })
                 .ToListAsync();
@@ -292,7 +347,7 @@ namespace AuthHive.Auth.Repositories.Organization
         }
 
         /// <summary>
-        /// 기본 SSO 설정 변경 (기존 기본 설정 해제 + 새 기본 설정)
+        /// 기본 SSO 설정 변경
         /// </summary>
         /// <param name="ssoId">새로운 기본 SSO ID</param>
         /// <param name="updatedByConnectedId">업데이트 실행자 ConnectedId</param>
@@ -306,16 +361,23 @@ namespace AuthHive.Auth.Repositories.Organization
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                // 1. 기존 기본 설정들을 해제
+                // 기존 기본 설정들을 해제
                 await UnsetDefaultExceptAsync(newDefaultSso.OrganizationId, ssoId);
 
-                // 2. 새 기본 설정 설정
+                // 새 기본 설정 지정
                 newDefaultSso.IsDefault = true;
                 newDefaultSso.UpdatedAt = DateTime.UtcNow;
                 newDefaultSso.UpdatedByConnectedId = updatedByConnectedId;
 
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
+                
+                // 캐시 업데이트
+                if (_cache != null)
+                {
+                    var cacheKey = $"OrgSSO:Default:{newDefaultSso.OrganizationId}";
+                    _cache.Set(cacheKey, newDefaultSso, TimeSpan.FromMinutes(10));
+                }
                 
                 return true;
             }
@@ -355,18 +417,20 @@ namespace AuthHive.Auth.Repositories.Organization
             string displayName)
         {
             if (string.IsNullOrWhiteSpace(displayName))
+            {
                 return await GetActiveByOrganizationAsync(organizationId);
+            }
 
             var searchTerm = displayName.Trim().ToLower();
 
-            return await _dbSet
+            return await QueryForOrganization(organizationId)
                 .Include(s => s.Organization)
                 .Include(s => s.DefaultRole)
-                .Where(s => s.OrganizationId == organizationId && 
-                           s.IsActive && 
-                           !s.IsDeleted &&
-                           (s.DisplayName != null && s.DisplayName.ToLower().Contains(searchTerm)))
+                .Where(s => s.IsActive && 
+                           s.DisplayName != null && 
+                           s.DisplayName.ToLower().Contains(searchTerm))
                 .OrderBy(s => s.Priority)
+                .AsNoTracking()
                 .ToListAsync();
         }
 
