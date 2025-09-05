@@ -22,6 +22,7 @@ using UserProfileEntity = AuthHive.Core.Entities.User.UserProfile;
 using MfaBypassTokenEntity = AuthHive.Core.Entities.Auth.MfaBypassToken;
 using MfaBypassTokenDto = AuthHive.Core.Models.Auth.Authentication.Common.MfaBypassToken;
 using AuthHive.Core.Constants.Auth;
+using AuthHive.Core.Enums.Auth;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -62,7 +63,6 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region MFA 인증 플로우
 
-
         public async Task<ServiceResult<MfaChallengeResponse>> InitiateMfaAsync(
             Guid userId,
             string method,
@@ -74,41 +74,47 @@ namespace AuthHive.Auth.Services.Authentication
                 if (user == null)
                     return ServiceResult<MfaChallengeResponse>.Failure("User not found");
 
-                var challengeId = Guid.NewGuid();
+                // Parse method string to enum
+                if (!Enum.TryParse<MfaMethod>(method, true, out var mfaMethod))
+                    return ServiceResult<MfaChallengeResponse>.Failure($"Invalid MFA method: {method}");
+
+                var challengeId = Guid.NewGuid().ToString();
                 var challenge = new MfaChallengeResponse
                 {
                     ChallengeId = challengeId,
-                    Method = method,
-                    ChallengeType = GetChallengeType(method),
+                    Method = mfaMethod,
+                    CodeSent = false,
                     ExpiresAt = DateTime.UtcNow.AddMinutes(MFA_CODE_VALIDITY_MINUTES),
-                    AttemptsRemaining = 3,
-                    Metadata = new Dictionary<string, object>()
+                    AttemptsAllowed = 5,
+                    AlternativeMethods = GetAlternativeMethods(user, mfaMethod)
                 };
 
                 var cacheKey = $"mfa_challenge_{userId}_{challengeId}";
                 _cache.Set(cacheKey, challenge, TimeSpan.FromMinutes(MFA_CODE_VALIDITY_MINUTES));
 
-                switch (method.ToLower())
+                switch (mfaMethod)
                 {
-                    case "sms":
+                    case MfaMethod.Sms:
                         if (string.IsNullOrEmpty(user.UserProfile?.PhoneNumber))
                             return ServiceResult<MfaChallengeResponse>.Failure("Phone number not configured");
 
                         var smsCode = GenerateCode();
                         await SendSmsCode(user.UserProfile.PhoneNumber, smsCode);
-                        CacheCode(userId, challengeId, smsCode);
-                        challenge.Metadata["maskedPhone"] = MaskPhoneNumber(user.UserProfile.PhoneNumber);
+                        CacheCode(userId, Guid.Parse(challengeId), smsCode);
+                        challenge.CodeSent = true;
+                        challenge.Hint = $"SMS sent to {MaskPhoneNumber(user.UserProfile.PhoneNumber)}";
                         break;
 
-                    case "email":
+                    case MfaMethod.Email:
                         var emailCode = GenerateCode();
                         await SendEmailCode(user.Email, emailCode);
-                        CacheCode(userId, challengeId, emailCode);
-                        challenge.Metadata["maskedEmail"] = MaskEmail(user.Email);
+                        CacheCode(userId, Guid.Parse(challengeId), emailCode);
+                        challenge.CodeSent = true;
+                        challenge.Hint = $"Email sent to {MaskEmail(user.Email)}";
                         break;
 
-                    case "totp":
-                        challenge.Metadata["message"] = "Enter code from your authenticator app";
+                    case MfaMethod.Totp:
+                        challenge.Message = "Enter code from your authenticator app";
                         break;
                 }
 
@@ -141,6 +147,9 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult<AuthenticationResponse>.Failure("Invalid MFA code");
                 }
 
+                // Update last used time for the method
+                UpdateMethodLastUsedTime(userId, method);
+
                 ClearUserCodes(userId);
 
                 var response = new AuthenticationResponse
@@ -168,7 +177,9 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 return ServiceResult<MfaChallengeResponse>.Failure("Challenge not found or expired");
             }
-            return await InitiateMfaAsync(userId, challenge!.Method);
+            
+            // Use the MfaMethod enum directly
+            return await InitiateMfaAsync(userId, challenge!.Method.ToString());
         }
 
         public Task<ServiceResult> CancelMfaChallengeAsync(
@@ -187,7 +198,6 @@ namespace AuthHive.Auth.Services.Authentication
         public Task<ServiceResult<MfaPolicyDto>> GetMfaPolicyAsync(Guid organizationId)
         {
             // TODO: DB에서 organizationId에 해당하는 MFA 정책을 조회하는 로직 구현 필요.
-            // 현재는 기본 정책을 반환합니다.
             var policy = new MfaPolicyDto
             {
                 OrganizationId = organizationId,
@@ -211,7 +221,6 @@ namespace AuthHive.Auth.Services.Authentication
         public Task<ServiceResult<MfaRequirement>> CheckMfaRequirementAsync(Guid userId, Guid? organizationId = null, string? resource = null)
         {
             // TODO: 조직의 정책과 사용자의 MFA 상태를 교차 확인하는 복잡한 로직 구현 필요.
-            // 현재는 기본적으로 MFA가 필수가 아니라고 응답합니다.
             var requirement = new MfaRequirement
             {
                 IsRequired = false,
@@ -241,7 +250,7 @@ namespace AuthHive.Auth.Services.Authentication
                     DeviceName = sourceDto.DeviceName,
                     DeviceType = sourceDto.DeviceType,
                     TrustedAt = sourceDto.TrustedAt,
-                    LastUsedAt = sourceDto.LastUsedAt ?? default, // Nullable<DateTime>을 DateTime으로 변환
+                    LastUsedAt = sourceDto.LastUsedAt ?? default,
                     Browser = sourceDto.Browser,
                     OperatingSystem = sourceDto.OperatingSystem,
                     IpAddress = sourceDto.IpAddress
@@ -255,9 +264,9 @@ namespace AuthHive.Auth.Services.Authentication
                 return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure("Failed to get trusted devices.");
             }
         }
+        
         public Task<ServiceResult> TrustCurrentDeviceAsync(Guid userId, TrustedDeviceRequest request)
         {
-            // 메서드 이름이 다르므로 매핑해줍니다. (TrustCurrentDevice -> RegisterTrustedDevice)
             return _accountSecurityService.RegisterTrustedDeviceAsync(userId, request);
         }
 
@@ -339,22 +348,32 @@ namespace AuthHive.Auth.Services.Authentication
                     user.UserProfile = new UserProfileEntity();
                 }
 
+                // Parse method string to enum
+                if (!Enum.TryParse<MfaMethod>(method, true, out var mfaMethod))
+                    return ServiceResult<MfaSetupResponse>.Failure($"Invalid MFA method: {method}");
+
                 var response = new MfaSetupResponse
                 {
                     Success = true,
-                    Method = method,
+                    Method = mfaMethod,
                     SetupToken = GenerateSetupToken(),
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(10)
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(10),
+                    Metadata = new Dictionary<string, object>()
                 };
 
-                switch (method.ToLower())
+                switch (mfaMethod)
                 {
-                    case "totp":
+                    case MfaMethod.Totp:
                         var totpResponse = await GenerateTotpSecretAsync(userId);
                         if (totpResponse.IsSuccess && totpResponse.Data != null)
                         {
                             response.Secret = totpResponse.Data.ManualEntryKey;
                             response.QrCodeUrl = totpResponse.Data.QrCodeUrl;
+                            response.Issuer = totpResponse.Data.Issuer;
+                            response.AccountName = totpResponse.Data.AccountName;
+                            response.Metadata["algorithm"] = "SHA1";
+                            response.Metadata["digits"] = 6;
+                            response.Metadata["period"] = 30;
                         }
                         else
                         {
@@ -362,7 +381,7 @@ namespace AuthHive.Auth.Services.Authentication
                         }
                         break;
 
-                    case "sms":
+                    case MfaMethod.Sms:
                         if (string.IsNullOrEmpty(request.PhoneNumber))
                             return ServiceResult<MfaSetupResponse>.Failure("Phone number required");
 
@@ -372,12 +391,36 @@ namespace AuthHive.Auth.Services.Authentication
                         var verificationCode = GenerateCode();
                         await SendSmsCode(request.PhoneNumber, verificationCode);
                         CacheCode(userId, Guid.Parse(response.SetupToken), verificationCode);
-                        response.SetupToken = $"sms_verify_{userId}";
+                        response.PhoneNumber = MaskPhoneNumber(request.PhoneNumber);
+                        response.VerificationCodeSent = true;
+                        response.Message = "Verification code sent to phone";
                         break;
 
-                    case "email":
+                    case MfaMethod.Email:
+                        var emailCode = GenerateCode();
+                        await SendEmailCode(user.Email, emailCode);
+                        CacheCode(userId, Guid.Parse(response.SetupToken), emailCode);
+                        response.Email = MaskEmail(user.Email);
+                        response.VerificationCodeSent = true;
+                        response.Message = "Verification code sent to email";
+                        break;
+
+                    case MfaMethod.BackupCode:
+                        // Generate backup codes
+                        var backupCodes = new List<string>();
+                        for (int i = 0; i < 10; i++)
+                        {
+                            backupCodes.Add(GenerateBackupCode());
+                        }
+                        response.BackupCodes = backupCodes;
+                        
+                        // Store hashed backup codes
+                        user.BackupCodes = backupCodes.Select(HashCode).ToList();
+                        await _userRepository.UpdateAsync(user);
+                        response.Message = "Backup codes generated. Store them safely.";
                         break;
                 }
+                
                 return ServiceResult<MfaSetupResponse>.Success(response);
             }
             catch (Exception ex)
@@ -422,13 +465,123 @@ namespace AuthHive.Auth.Services.Authentication
         public Task<ServiceResult<IEnumerable<MfaMethodDto>>> GetAvailableMfaMethodsAsync(
             Guid? organizationId = null)
         {
+            // organizationId를 사용하여 사용자의 MFA 메서드 정보를 가져올 수 있도록 개선
+            // 현재는 기본 메서드만 반환
             var methods = new List<MfaMethodDto>
             {
-                new MfaMethodDto { Method = "totp", DisplayName = "Authenticator App", IsEnabled = true, Description = "Use an authenticator app like Google Authenticator", Priority = 1 },
-                new MfaMethodDto { Method = "sms", DisplayName = "SMS", IsEnabled = true, Description = "Receive codes via SMS", Priority = 2 },
-                new MfaMethodDto { Method = "email", DisplayName = "Email", IsEnabled = true, Description = "Receive codes via email", Priority = 3 }
+                new MfaMethodDto 
+                { 
+                    Method = MfaMethod.Totp,
+                    IsConfigured = false,
+                    IsVerified = false,
+                    IsPreferred = false,
+                    DisplayInfo = "Authenticator App",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["description"] = "Use an authenticator app like Google Authenticator",
+                        ["priority"] = 1
+                    }
+                },
+                new MfaMethodDto 
+                { 
+                    Method = MfaMethod.Sms,
+                    IsConfigured = false,
+                    IsVerified = false,
+                    IsPreferred = false,
+                    DisplayInfo = "SMS",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["description"] = "Receive codes via SMS",
+                        ["priority"] = 2
+                    }
+                },
+                new MfaMethodDto 
+                { 
+                    Method = MfaMethod.Email,
+                    IsConfigured = false,
+                    IsVerified = false,
+                    IsPreferred = false,
+                    DisplayInfo = "Email",
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["description"] = "Receive codes via email",
+                        ["priority"] = 3
+                    }
+                }
             };
+            
             return Task.FromResult(ServiceResult<IEnumerable<MfaMethodDto>>.Success(methods));
+        }
+
+        // 사용자별 MFA 메서드 상태를 가져오는 새로운 메서드
+        public async Task<ServiceResult<IEnumerable<MfaMethodDto>>> GetUserMfaMethodsAsync(Guid userId)
+        {
+            try
+            {
+                var user = await _userRepository.GetByIdWithProfileAsync(userId);
+                if (user == null)
+                    return ServiceResult<IEnumerable<MfaMethodDto>>.Failure("User not found");
+
+                var methods = new List<MfaMethodDto>();
+                
+                // TOTP 메서드
+                var totpMethod = new MfaMethodDto
+                {
+                    Method = MfaMethod.Totp,
+                    IsConfigured = !string.IsNullOrEmpty(user.TotpSecret),
+                    IsVerified = !string.IsNullOrEmpty(user.TotpSecret),
+                    IsPreferred = user.TwoFactorMethod?.ToLower() == "totp",
+                    DisplayInfo = "Authenticator App",
+                    ConfiguredAt = GetMethodConfiguredAt(user, "totp"),
+                    LastUsedAt = await GetMethodLastUsedAt(userId, "totp"),
+                    DeviceName = GetTotpDeviceName(user),
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["appName"] = ISSUER
+                    }
+                };
+                methods.Add(totpMethod);
+                
+                // SMS 메서드
+                if (user.UserProfile != null)
+                {
+                    var smsMethod = new MfaMethodDto
+                    {
+                        Method = MfaMethod.Sms,
+                        IsConfigured = !string.IsNullOrEmpty(user.UserProfile.PhoneNumber),
+                        IsVerified = user.UserProfile.PhoneVerified,
+                        IsPreferred = user.TwoFactorMethod?.ToLower() == "sms",
+                        DisplayInfo = !string.IsNullOrEmpty(user.UserProfile.PhoneNumber) 
+                            ? MaskPhoneNumber(user.UserProfile.PhoneNumber) 
+                            : null,
+                        ConfiguredAt = GetMethodConfiguredAt(user, "sms"),
+                        LastUsedAt = await GetMethodLastUsedAt(userId, "sms"),
+                        Metadata = new Dictionary<string, object>()
+                    };
+                    methods.Add(smsMethod);
+                }
+                
+                // Email 메서드
+                var emailMethod = new MfaMethodDto
+                {
+                    Method = MfaMethod.Email,
+                    IsConfigured = true, // Email은 항상 설정됨
+                    IsVerified = user.IsEmailVerified,
+                    IsPreferred = user.TwoFactorMethod?.ToLower() == "email",
+                    DisplayInfo = MaskEmail(user.Email),
+                    ConfiguredAt = user.CreatedAt, // 계정 생성 시점
+                    LastUsedAt = await GetMethodLastUsedAt(userId, "email"),
+                    Metadata = new Dictionary<string, object>()
+                };
+                methods.Add(emailMethod);
+
+                return ServiceResult<IEnumerable<MfaMethodDto>>.Success(methods);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to get user MFA methods for user {UserId}", userId);
+                return ServiceResult<IEnumerable<MfaMethodDto>>.Failure("Failed to get MFA methods");
+            }
         }
 
         public async Task<ServiceResult> SetPreferredMfaMethodAsync(
@@ -652,7 +805,6 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-
         public async Task<ServiceResult<AuthenticationResponse>> UseMfaBypassTokenAsync(string bypassToken)
         {
             try
@@ -739,7 +891,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     Id = log.Id,
                     AttemptedAt = log.AttemptedAt,
-                    Method = log.Method.ToString(), // Enum to string
+                    Method = log.Method.ToString(),
                     Success = log.IsSuccess,
                     FailureReason = log.FailureReason.ToString(),
                     IpAddress = log.IpAddress
@@ -774,7 +926,7 @@ namespace AuthHive.Auth.Services.Authentication
             DateTime? from = null,
             DateTime? to = null)
         {
-            var stats = new MfaStatistics(); // Default values
+            var stats = new MfaStatistics();
             return Task.FromResult(ServiceResult<MfaStatistics>.Success(stats));
         }
 
@@ -829,14 +981,18 @@ namespace AuthHive.Auth.Services.Authentication
             var user = await _userRepository.GetByIdAsync(userId);
             if (user == null) return false;
 
-            switch (method.ToLower())
+            // Parse method string to enum
+            if (!Enum.TryParse<MfaMethod>(method, true, out var mfaMethod))
+                return false;
+
+            switch (mfaMethod)
             {
-                case "totp":
+                case MfaMethod.Totp:
                     if (string.IsNullOrEmpty(user.TotpSecret)) return false;
                     var secret = DecryptSecret(user.TotpSecret);
                     return _twoFactorAuthenticator.ValidateTwoFactorPIN(secret, code);
 
-                case "backup":
+                case MfaMethod.BackupCode:
                     if (user.BackupCodes == null || !user.BackupCodes.Any()) return false;
                     var hashedCode = HashCode(code);
                     return user.BackupCodes.Contains(hashedCode);
@@ -846,11 +1002,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        private string GetChallengeType(string method) => method.ToLower() switch
+        private string GetChallengeType(MfaMethod method) => method switch
         {
-            "sms" => "SMS_CODE",
-            "email" => "EMAIL_CODE",
-            "totp" => "TOTP_CODE",
+            MfaMethod.Sms => "SMS_CODE",
+            MfaMethod.Email => "EMAIL_CODE",
+            MfaMethod.Totp => "TOTP_CODE",
+            MfaMethod.BackupCode => "BACKUP_CODE",
             _ => "UNKNOWN"
         };
 
@@ -903,16 +1060,14 @@ namespace AuthHive.Auth.Services.Authentication
 
         private async Task RecordFailedAttempt(Guid userId, string method, string reason)
         {
-            // This could be a fire-and-forget or a required log. 
-            // For now, assume it's a required part of the transaction.
             var log = new AuthenticationAttemptLog
             {
                 UserId = userId,
-                Method = Enum.Parse<AuthHive.Core.Enums.Auth.AuthenticationMethod>(method, true),
+                Method = Enum.Parse<AuthenticationMethod>(method, true),
                 IsSuccess = false,
-                FailureReason = Enum.Parse<AuthHive.Core.Enums.Auth.AuthenticationResult>(reason, true),
+                FailureReason = Enum.Parse<AuthenticationResult>(reason, true),
                 AttemptedAt = DateTime.UtcNow,
-                IpAddress = CommonDefaults.DefaultLocalIpV6// Placeholder: Should get from HttpContext
+                IpAddress = CommonDefaults.DefaultLocalIpV6
             };
             await _logRepository.AddAsync(log);
         }
@@ -927,6 +1082,61 @@ namespace AuthHive.Auth.Services.Authentication
         {
             _logger.LogInformation("Email code {Code} would be sent to {Email}", code, email);
             await _emailService.SendEmailAsync(email, "Your Verification Code", $"Your verification code is: {code}");
+        }
+
+        // Helper methods
+        private List<MfaMethod> GetAlternativeMethods(UserEntity user, MfaMethod currentMethod)
+        {
+            var alternatives = new List<MfaMethod>();
+            
+            // Add available methods except the current one
+            if (currentMethod != MfaMethod.Totp && !string.IsNullOrEmpty(user.TotpSecret))
+                alternatives.Add(MfaMethod.Totp);
+                
+            if (currentMethod != MfaMethod.Sms && !string.IsNullOrEmpty(user.UserProfile?.PhoneNumber))
+                alternatives.Add(MfaMethod.Sms);
+                
+            if (currentMethod != MfaMethod.Email)
+                alternatives.Add(MfaMethod.Email);
+                
+            if (currentMethod != MfaMethod.BackupCode && user.BackupCodes?.Any() == true)
+                alternatives.Add(MfaMethod.BackupCode);
+                
+            return alternatives;
+        }
+
+        private DateTime? GetMethodConfiguredAt(UserEntity user, string method)
+        {
+            // This would ideally come from a separate MFA configuration table
+            // For now, return user creation date as a placeholder
+            return user.CreatedAt;
+        }
+
+        private async Task<DateTime?> GetMethodLastUsedAt(Guid userId, string method)
+        {
+            // Query the authentication logs for the last successful use of this method
+            var logs = await _logRepository.GetHistoryForUserAsync(userId, DateTime.UtcNow.AddYears(-1), DateTime.UtcNow);
+            var lastLog = logs
+                .Where(l => l.IsSuccess && l.Method.ToString().Equals(method, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(l => l.AttemptedAt)
+                .FirstOrDefault();
+                
+            return lastLog?.AttemptedAt;
+        }
+
+        private void UpdateMethodLastUsedTime(Guid userId, string method)
+        {
+            // This would update the last used time in the MFA configuration table
+            // For now, we'll just log it
+            _logger.LogInformation("MFA method {Method} used by user {UserId} at {Time}", 
+                method, userId, DateTime.UtcNow);
+        }
+
+        private string? GetTotpDeviceName(UserEntity user)
+        {
+            // This could be stored when the TOTP was initially configured
+            // For now, return a default value
+            return !string.IsNullOrEmpty(user.TotpSecret) ? "Authenticator App" : null;
         }
 
         #endregion
@@ -960,6 +1170,5 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         #endregion
-
     }
 }

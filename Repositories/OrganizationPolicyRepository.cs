@@ -380,50 +380,50 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-private List<CompliancePolicyRequirement> GetRequiredPoliciesForCompliance(ComplianceReportType complianceType)
-{
-    return complianceType switch
-    {
-        ComplianceReportType.GDPR => new List<CompliancePolicyRequirement>
+        private List<CompliancePolicyRequirement> GetRequiredPoliciesForCompliance(ComplianceReportType complianceType)
+        {
+            return complianceType switch
+            {
+                ComplianceReportType.GDPR => new List<CompliancePolicyRequirement>
         {
             new(CompliancePolicyName.DataEncryption, OrganizationPolicyType.Security, PolicyRuleKeys.DataEncryption, true),
             new(CompliancePolicyName.AccessLogging, OrganizationPolicyType.Monitoring, PolicyRuleKeys.AuditEnabled, true),
             new(CompliancePolicyName.DataRetention, OrganizationPolicyType.Compliance, PolicyRuleKeys.DataRetentionDays, true),
             new(CompliancePolicyName.ConsentManagement, OrganizationPolicyType.Compliance, PolicyRuleKeys.ConsentRequired, true)
         },
-        
-        ComplianceReportType.HIPAA => new List<CompliancePolicyRequirement>
+
+                ComplianceReportType.HIPAA => new List<CompliancePolicyRequirement>
         {
             new(CompliancePolicyName.PHIEncryption, OrganizationPolicyType.Security, PolicyRuleKeys.PHIEncryption, true),
             new(CompliancePolicyName.AccessControls, OrganizationPolicyType.AccessControl, PolicyRuleKeys.MFARequired, true),
             new(CompliancePolicyName.AuditTrails, OrganizationPolicyType.Monitoring, PolicyRuleKeys.DetailedAudit, true),
             new(CompliancePolicyName.BreachDetection, OrganizationPolicyType.Security, PolicyRuleKeys.BreachDetection, true)
         },
-        
-        ComplianceReportType.SOC2 => new List<CompliancePolicyRequirement>
+
+                ComplianceReportType.SOC2 => new List<CompliancePolicyRequirement>
         {
             new(CompliancePolicyName.SystemMonitoring, OrganizationPolicyType.Monitoring, PolicyRuleKeys.RealTimeMonitoring, true),
             new(CompliancePolicyName.ChangeManagement, OrganizationPolicyType.Security, PolicyRuleKeys.ChangeApproval, true),
             new(CompliancePolicyName.IncidentResponse, OrganizationPolicyType.Security, PolicyRuleKeys.IncidentResponse, true)
         },
-        
-        ComplianceReportType.ISO27001 => new List<CompliancePolicyRequirement>
+
+                ComplianceReportType.ISO27001 => new List<CompliancePolicyRequirement>
         {
             new(CompliancePolicyName.RiskAssessment, OrganizationPolicyType.Security, PolicyRuleKeys.RiskAssessment, true),
             new(CompliancePolicyName.SecurityTraining, OrganizationPolicyType.Security, PolicyRuleKeys.SecurityTraining, true),
             new(CompliancePolicyName.ContinuousMonitoring, OrganizationPolicyType.Monitoring, PolicyRuleKeys.ContinuousMonitoring, true)
         },
-        
-        ComplianceReportType.PCI_DSS => new List<CompliancePolicyRequirement>
+
+                ComplianceReportType.PCI_DSS => new List<CompliancePolicyRequirement>
         {
             new(CompliancePolicyName.CardDataEncryption, OrganizationPolicyType.Security, PolicyRuleKeys.CardDataEncryption, true),
             new(CompliancePolicyName.NetworkSegmentation, OrganizationPolicyType.Security, PolicyRuleKeys.NetworkSegmentation, true),
             new(CompliancePolicyName.VulnerabilityScanning, OrganizationPolicyType.Security, PolicyRuleKeys.VulnerabilityScanning, true)
         },
-        
-        _ => new List<CompliancePolicyRequirement>()
-    };
-}
+
+                _ => new List<CompliancePolicyRequirement>()
+            };
+        }
         #region 추가 유틸리티 메서드
 
         /// <summary>
