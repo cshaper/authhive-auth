@@ -31,6 +31,7 @@ namespace AuthHive.Auth.Services.Organization
         private readonly IOrganizationRepository _orgRepository;
         private readonly AuthDbContext _context;
         private readonly IOrganizationHierarchyService _hierarchyService;
+        private readonly IOrganizationHierarchyRepository _hierarchyRepository;
         private readonly IMapper _mapper;
         private readonly IMemoryCache _cache;
         private readonly ILogger<OrganizationPolicyService> _logger;
@@ -44,6 +45,7 @@ namespace AuthHive.Auth.Services.Organization
             IOrganizationPolicyRepository repository,
             IOrganizationRepository orgRepository,
             AuthDbContext context,
+             IOrganizationHierarchyRepository hierarchyRepository, // 추가
             IOrganizationHierarchyService hierarchyService,
             IMapper mapper,
             IMemoryCache cache,
@@ -53,6 +55,7 @@ namespace AuthHive.Auth.Services.Organization
             _orgRepository = orgRepository;
             _context = context;
             _hierarchyService = hierarchyService;
+            _hierarchyRepository = hierarchyRepository; // 추가
             _mapper = mapper;
             _cache = cache;
             _logger = logger;
@@ -604,9 +607,14 @@ namespace AuthHive.Auth.Services.Organization
                 return ServiceResult.Failure("Failed to set inheritable status");
             }
         }
-
         /// <summary>
         /// 하위 조직에 정책 전파
+        /// WHO: 시스템 관리자, 상위 조직 정책 관리자
+        /// WHEN: 정책 일괄 적용 필요 시
+        /// WHERE: 정책 관리 콘솔
+        /// WHAT: 상위 조직 정책을 하위 조직에 복사
+        /// WHY: 일관된 정책 적용 및 중앙 관리
+        /// HOW: 하위 조직 조회 → 정책 복사 → 결과 집계
         /// </summary>
         public async Task<ServiceResult<PolicyPropagationResult>> PropagatePolicyAsync(
             Guid policyId,
@@ -633,8 +641,8 @@ namespace AuthHive.Auth.Services.Organization
                     StartedAt = DateTime.UtcNow
                 };
 
-                // 하위 조직 조회
-                var children = await _orgRepository.GetChildOrganizationsAsync(
+                // 하위 조직 조회 - IOrganizationHierarchyRepository 사용
+                var children = await _hierarchyRepository.GetChildrenAsync(
                     policy.OrganizationId,
                     includeAllDescendants);
 
