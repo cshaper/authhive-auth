@@ -724,7 +724,7 @@ namespace AuthHive.Auth.Services.Authentication
                 else if (reason.Contains("disabled", StringComparison.OrdinalIgnoreCase))
                     result = AuthenticationResult.AccountDisabled;
                 else if (reason.Contains("mfa", StringComparison.OrdinalIgnoreCase))
-                    result = AuthenticationResult.TwoFactorRequired;
+                    result = AuthenticationResult.MfaRequired;
 
                 await _attemptService.LogFailedAuthenticationAsync(
                     request.Username ?? "unknown",

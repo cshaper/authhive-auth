@@ -9,7 +9,7 @@ using AuthHive.Core.Entities.User;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Auth.Data.Context;
 using System.Security.Cryptography;
-using AuthHive.Core.Entities.Organization; 
+using AuthHive.Core.Entities.Organization;
 using System.Text;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using AuthHive.Core.Models.Auth.ConnectedId.Requests;
@@ -379,7 +379,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // AccountSecurityService로 완전히 위임
                 var result = await _accountSecurityService.GetPasswordPolicyAsync(organizationId);
-                
+
                 if (result.IsSuccess)
                 {
                     _logger.LogDebug("Successfully retrieved password policy from AccountSecurityService");
@@ -463,7 +463,6 @@ namespace AuthHive.Auth.Services.Authentication
                 .Replace("/", "_")
                 .Replace("=", "");
         }
-
         private async Task<Guid> GetOrCreatePersonalOrganizationId(Guid userId)
         {
             var orgKey = $"personal_{userId}";
@@ -473,20 +472,29 @@ namespace AuthHive.Auth.Services.Authentication
             if (org == null)
             {
                 var user = await _context.Users.FindAsync(userId);
-                org = new Organization
+
+                // null 체크 추가
+                if (user == null)
+                {
+                    throw new InvalidOperationException($"User with ID {userId} not found");
+                    // 또는 기본값 사용
+                    // throw new NotFoundException($"User with ID {userId} not found");
+                }
+
+                org = new AuthHive.Core.Entities.Organization.Organization
                 {
                     OrganizationKey = orgKey,
-                    Name = $"{user!.DisplayName}'s Personal Space",
+                    Name = $"{user.DisplayName ?? user.Username}'s Personal Space",  // DisplayName이 null일 수도 있음
                     Type = OrganizationType.Personal,
                     Status = OrganizationStatus.Active
                 };
+
                 _context.Organizations.Add(org);
                 await _context.SaveChangesAsync();
             }
 
             return org.Id;
         }
-
         private async Task<Core.Entities.Auth.ConnectedId> GetOrCreateConnectedIdAsync(Guid userId, Guid organizationId)
         {
             var connectedId = await _context.ConnectedIds

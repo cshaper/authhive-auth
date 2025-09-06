@@ -13,6 +13,8 @@ using System.Linq;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Interfaces.Base;
 using Microsoft.Extensions.Caching.Memory;
+using AuthHive.Core.Models.Auth.Role;
+using AuthHive.Core.Models.Business.Platform.Common;
 
 namespace AuthHive.Auth.Repositories
 {

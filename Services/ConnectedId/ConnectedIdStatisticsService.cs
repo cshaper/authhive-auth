@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Models.Auth.ConnectedId;
+using AuthHive.Core.Models.Business.Platform.Common;
 using AuthHive.Core.Models.Common;
 using Microsoft.Extensions.Logging;
 
