@@ -5,25 +5,25 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using AuthHive.Core.Interfaces.Auth.Service;
-using AuthHive.Core.Interfaces.Core.PlatformApplication.Repository;
 using AuthHive.Core.Models.Auth.Permissions.Requests;
 using AuthHive.Core.Models.Auth.Permissions.Responses;
 using AuthHive.Core.Models.Common;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Entities.PlatformApplications; // UserPlatformApplicationAccess 엔티티 사용을 위해 추가
+using AuthHive.Core.Entities.PlatformApplications;
+using AuthHive.Core.Interfaces.User.Repository; // UserPlatformApplicationAccess 엔티티 사용을 위해 추가
 
 namespace AuthHive.Auth.Services.Authorization
 {
     public class PermissionValidationService : IPermissionValidationService
     {
-        private readonly IUserPlatformApplicationAccessRepository _accessRepository;
+        private readonly IUserApplicationAccessRepository _accessRepository;
         private readonly IRoleService _roleService;
         private readonly ILogger<PermissionValidationService> _logger;
 
         public PermissionValidationService(
-            IUserPlatformApplicationAccessRepository accessRepository,
+            IUserApplicationAccessRepository accessRepository,
             IRoleService roleService,
             ILogger<PermissionValidationService> logger)
         {
