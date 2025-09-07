@@ -82,11 +82,11 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 // Repository 접근 가능 여부 확인
                 await _attemptLogRepository.CountAsync();
-                
+
                 // 캐시 동작 확인
                 _cache.Set("health_check", true, TimeSpan.FromSeconds(1));
                 _cache.Remove("health_check");
-                
+
                 return true;
             }
             catch (Exception ex)
@@ -141,7 +141,7 @@ namespace AuthHive.Auth.Services.Authentication
                 };
 
                 await _attemptLogRepository.AddAsync(attemptLog);
-                
+
                 // 최근 시도 캐시 업데이트
                 UpdateRecentAttemptsCache(attemptLog);
 
@@ -193,7 +193,7 @@ namespace AuthHive.Auth.Services.Authentication
                 };
 
                 await _attemptLogRepository.AddAsync(attemptLog);
-                
+
                 // 캐시 초기화
                 ClearUserFailureCaches(userId);
                 UpdateRecentAttemptsCache(attemptLog);
@@ -223,7 +223,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // 사용자 찾기
                 Guid? userId = await _userRepository.FindByUsernameOrEmailAsync(identifier);
                 UserEntity? user = null;
-                
+
                 if (userId.HasValue)
                 {
                     user = await _userRepository.GetByIdAsync(userId.Value);
@@ -255,7 +255,7 @@ namespace AuthHive.Auth.Services.Authentication
                 if (userId.HasValue && consecutiveFailures >= _maxFailedAttempts)
                 {
                     attemptLog.TriggeredAccountLock = true;
-                    await LockAccountAsync(userId.Value, TimeSpan.FromMinutes(_lockoutDurationMinutes), 
+                    await LockAccountAsync(userId.Value, TimeSpan.FromMinutes(_lockoutDurationMinutes),
                         $"Too many failed attempts ({consecutiveFailures})");
                 }
 
@@ -269,7 +269,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // IP 기반 무차별 대입 공격 감지
                 await CheckAndBlockSuspiciousIp(ipAddress);
 
-                _logger.LogWarning("Failed authentication attempt for {Identifier} from {IpAddress}", 
+                _logger.LogWarning("Failed authentication attempt for {Identifier} from {IpAddress}",
                     identifier, ipAddress);
 
                 return ServiceResult.Success();
@@ -307,9 +307,9 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // MFA 시도 횟수 관리 (캐시 활용)
                 var mfaCacheKey = $"{MFA_ATTEMPTS_PREFIX}{userId}";
-                var mfaAttempts = _cache.Get<MfaAttemptInfo>(mfaCacheKey) ?? new MfaAttemptInfo 
-                { 
-                    UserId = userId, 
+                var mfaAttempts = _cache.Get<MfaAttemptInfo>(mfaCacheKey) ?? new MfaAttemptInfo
+                {
+                    UserId = userId,
                     FailedAttempts = 0,
                     FirstAttemptTime = DateTime.UtcNow
                 };
@@ -318,7 +318,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     mfaAttempts.FailedAttempts++;
                     mfaAttempts.LastAttemptTime = DateTime.UtcNow;
-                    
+
                     // 30분 동안 캐시 유지
                     _cache.Set(mfaCacheKey, mfaAttempts, TimeSpan.FromMinutes(30));
                 }
@@ -350,7 +350,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // 최대 시도 횟수 초과 시 계정 잠금
                 if (mfaAttempts.FailedAttempts >= _maxFailedAttempts)
                 {
-                    await LockAccountAsync(userId, TimeSpan.FromMinutes(_lockoutDurationMinutes), 
+                    await LockAccountAsync(userId, TimeSpan.FromMinutes(_lockoutDurationMinutes),
                         "Too many failed MFA attempts");
                 }
 
@@ -479,7 +479,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // 캐시에서 잠금 정보 제거
                 var lockCacheKey = $"{USER_LOCK_PREFIX}{userId}";
                 _cache.Remove(lockCacheKey);
-                
+
                 // 실패 횟수 초기화
                 ClearUserFailureCaches(userId);
 
@@ -513,7 +513,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (failureCount >= _maxFailedAttempts)
                 {
-                    await LockAccountAsync(userId, TimeSpan.FromMinutes(_lockoutDurationMinutes), 
+                    await LockAccountAsync(userId, TimeSpan.FromMinutes(_lockoutDurationMinutes),
                         "Auto-lock policy triggered");
                     return ServiceResult<bool>.Success(true);
                 }
@@ -543,7 +543,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // IP별 시도 횟수 확인 (캐시 활용)
                 var ipAttemptsCacheKey = $"ip_attempts:{ipAddress}";
                 var ipAttempts = _cache.Get<int>(ipAttemptsCacheKey);
-                
+
                 if (ipAttempts >= _bruteForceThreshold)
                 {
                     _logger.LogWarning("Brute force attack detected from IP {IpAddress} for {Identifier}",
@@ -604,7 +604,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // 캐시에서 IP 시도 횟수 확인
                 var ipAttemptsCacheKey = $"ip_attempts:{ipAddress}";
                 var ipAttempts = _cache.Get<int>(ipAttemptsCacheKey);
-                
+
                 if (ipAttempts > 5)
                 {
                     assessment.RiskFactors.Add(new RiskFactor
@@ -662,10 +662,10 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 // 캐시에서 최근 시도 패턴 확인
                 var recentAttempts = GetRecentAttemptsFromCache(userId);
-                
+
                 // 새로운 IP나 디바이스에서의 접근인지 확인
                 var isNewIp = !recentAttempts.Any(a => a.IpAddress == ipAddress);
-                var isNewDevice = !string.IsNullOrEmpty(deviceFingerprint) && 
+                var isNewDevice = !string.IsNullOrEmpty(deviceFingerprint) &&
                                  !recentAttempts.Any(a => a.DeviceId == deviceFingerprint);
 
                 var isAnomalous = isNewIp || isNewDevice;
@@ -830,77 +830,53 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // 캐시에서 먼저 확인
-                var recentAttempts = GetRecentAttemptsFromCache(userId);
-                
-                if (startDate.HasValue)
-                    recentAttempts = recentAttempts.Where(x => x.AttemptedAt >= startDate.Value).ToList();
+                // 1. 조회 기간을 명확하게 설정합니다.
+                // 종료일이 없으면 현재 시간, 시작일이 없으면 종료일로부터 30일 전으로 기본 설정합니다.
+                var effectiveEndDate = endDate ?? DateTime.UtcNow;
+                var effectiveStartDate = startDate ?? effectiveEndDate.AddDays(-30);
 
-                if (endDate.HasValue)
-                    recentAttempts = recentAttempts.Where(x => x.AttemptedAt <= endDate.Value).ToList();
+                // 2. 새로운 리포지토리 메서드를 사용하여 기간 내 사용자의 전체 기록을 가져옵니다.
+                var userHistory = await _attemptLogRepository.GetHistoryForUserAsync(
+                    userId,
+                    effectiveStartDate,
+                    effectiveEndDate);
 
-                var successfulAttempt = recentAttempts.FirstOrDefault(x => x.IsSuccess);
-                
-                if (successfulAttempt != null)
+                // 3. 가져온 기록 중에서 가장 최근의 '성공'한 기록을 찾습니다.
+                // (GetHistoryForUserAsync가 최신순으로 정렬된 데이터를 반환한다고 가정)
+                var lastSuccessfulAttempt = userHistory.FirstOrDefault(log => log.IsSuccess);
+
+                // 4. 성공한 기록을 찾지 못했다면 '결과 없음'을 반환합니다.
+                if (lastSuccessfulAttempt == null)
                 {
-                    var history = new AuthenticationHistory
-                    {
-                        Id = successfulAttempt.Id,
-                        UserId = userId,
-                        ConnectedId = successfulAttempt.ConnectedId,
-                        Method = successfulAttempt.Method.ToString(),
-                        Success = true,
-                        AuthenticatedAt = successfulAttempt.AttemptedAt,
-                        IpAddress = successfulAttempt.IpAddress,
-                        Location = successfulAttempt.Location,
-                        DeviceName = successfulAttempt.DeviceId ?? "Unknown",
-                        DeviceType = successfulAttempt.DeviceType ?? "Unknown",
-                        SessionId = successfulAttempt.SessionId
-                    };
-
-                    return ServiceResult<AuthenticationHistory>.Success(history);
+                    _logger.LogWarning("No successful authentication history found for user {UserId} in the specified period.", userId);
+                    return ServiceResult<AuthenticationHistory>.Failure("No successful authentication history found.");
                 }
 
-                // 캐시에 없으면 DB에서 조회
-                var attempts = await _attemptLogRepository.GetRecentAttemptsAsync(userId, 100);
-                
-                if (startDate.HasValue)
-                    attempts = attempts.Where(x => x.AttemptedAt >= startDate.Value);
-
-                if (endDate.HasValue)
-                    attempts = attempts.Where(x => x.AttemptedAt <= endDate.Value);
-
-                successfulAttempt = attempts.FirstOrDefault(x => x.IsSuccess);
-                
-                if (successfulAttempt != null)
+                // 5. 찾은 성공 기록을 AuthenticationHistory DTO 객체로 변환(매핑)합니다.
+                var historyDto = new AuthenticationHistory
                 {
-                    var history = new AuthenticationHistory
-                    {
-                        Id = successfulAttempt.Id,
-                        UserId = userId,
-                        ConnectedId = successfulAttempt.ConnectedId,
-                        Method = successfulAttempt.Method.ToString(),
-                        Success = true,
-                        AuthenticatedAt = successfulAttempt.AttemptedAt,
-                        IpAddress = successfulAttempt.IpAddress,
-                        Location = successfulAttempt.Location,
-                        DeviceName = successfulAttempt.DeviceId ?? "Unknown",
-                        DeviceType = successfulAttempt.DeviceType ?? "Unknown",
-                        SessionId = successfulAttempt.SessionId
-                    };
+                    Id = lastSuccessfulAttempt.Id,
+                    UserId = userId,
+                    ConnectedId = lastSuccessfulAttempt.ConnectedId,
+                    Method = lastSuccessfulAttempt.Method.ToString(),
+                    Success = true,
+                    AuthenticatedAt = lastSuccessfulAttempt.AttemptedAt,
+                    IpAddress = lastSuccessfulAttempt.IpAddress,
+                    Location = lastSuccessfulAttempt.Location,
+                    DeviceName = lastSuccessfulAttempt.DeviceId ?? "Unknown",
+                    DeviceType = lastSuccessfulAttempt.DeviceType ?? "Unknown",
+                    SessionId = lastSuccessfulAttempt.SessionId
+                };
 
-                    return ServiceResult<AuthenticationHistory>.Success(history);
-                }
-
-                return ServiceResult<AuthenticationHistory>.Failure("No authentication history found");
+                // 6. 최종 결과를 성공으로 반환합니다.
+                return ServiceResult<AuthenticationHistory>.Success(historyDto);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting authentication history");
-                return ServiceResult<AuthenticationHistory>.Failure("Failed to get authentication history");
+                _logger.LogError(ex, "Error getting authentication history for user {UserId}", userId);
+                return ServiceResult<AuthenticationHistory>.Failure("An error occurred while fetching authentication history.");
             }
         }
-
         /// <summary>
         /// 최근 인증 시도 조회
         /// </summary>
@@ -910,40 +886,57 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // 캐시에서 먼저 확인
-                var recentAttempts = GetRecentAttemptsFromCache(userId)
-                    .Take(count)
-                    .ToList();
+                IEnumerable<AuthenticationAttemptLog> finalLogs;
 
-                if (recentAttempts.Count < count)
+                // 1. 캐시에서 먼저 확인
+                var cachedAttempts = GetRecentAttemptsFromCache(userId);
+
+                if (cachedAttempts != null && cachedAttempts.Count() >= count)
                 {
-                    // 캐시에 충분한 데이터가 없으면 DB에서 추가 조회
-                    var dbAttempts = await _attemptLogRepository.GetRecentAttemptsAsync(userId, count);
-                    recentAttempts = dbAttempts.Take(count).ToList();
+                    // 캐시에 충분한 데이터가 있으면 캐시 데이터를 최종 소스로 사용
+                    finalLogs = cachedAttempts;
+                }
+                else
+                {
+                    // 캐시가 비어있거나 데이터가 부족하면 DB에서 새로 조회
+                    // GetRecentAttemptsAsync 대신 GetHistoryForUserAsync를 사용합니다.
+                    var dbHistory = await _attemptLogRepository.GetHistoryForUserAsync(
+                        userId,
+                        DateTime.UtcNow.AddDays(-30), // 최근 30일처럼 충분한 기간을 설정
+                        DateTime.UtcNow);
+
+                    // (선택적이지만 권장) 여기서 가져온 최신 DB 데이터로 캐시를 업데이트하는 로직을 추가할 수 있습니다.
+                    // UpdateRecentAttemptsCache(userId, dbHistory);
+
+                    finalLogs = dbHistory;
                 }
 
-                var result = recentAttempts.Select(x => new AuthenticationAttempts
-                {
-                    UserId = x.UserId,
-                    ConnectedId = x.ConnectedId,
-                    Method = x.Method.ToString(),
-                    Success = x.IsSuccess,
-                    FailureReason = x.FailureReason?.ToString(),
-                    IpAddress = x.IpAddress,
-                    UserAgent = x.UserAgent ?? string.Empty,
-                    AttemptedAt = x.AttemptedAt,
-                    OrganizationId = x.OrganizationId,
-                    ApplicationId = x.ApplicationId
-                });
+                // 2. 최종 데이터 소스(캐시 또는 DB)에서 필요한 개수만큼만 가져와 DTO로 변환합니다.
+                var resultDto = finalLogs
+                    .Take(count)
+                    .Select(x => new AuthenticationAttempts
+                    {
+                        UserId = x.UserId,
+                        ConnectedId = x.ConnectedId,
+                        Method = x.Method.ToString(),
+                        Success = x.IsSuccess,
+                        FailureReason = x.FailureReason?.ToString(),
+                        IpAddress = x.IpAddress,
+                        UserAgent = x.UserAgent ?? string.Empty,
+                        AttemptedAt = x.AttemptedAt,
+                        OrganizationId = x.OrganizationId,
+                        ApplicationId = x.ApplicationId
+                    });
 
-                return ServiceResult<IEnumerable<AuthenticationAttempts>>.Success(result);
+                return ServiceResult<IEnumerable<AuthenticationAttempts>>.Success(resultDto);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting recent attempts");
+                _logger.LogError(ex, "Error getting recent attempts for user {UserId}", userId);
                 return ServiceResult<IEnumerable<AuthenticationAttempts>>.Failure("Failed to get recent attempts");
             }
         }
+
 
         /// <summary>
         /// 실패한 인증 시도 조회
@@ -1205,10 +1198,10 @@ namespace AuthHive.Auth.Services.Authentication
             var cacheKey = $"{FAILURE_COUNT_PREFIX}{userId}";
             var currentCount = _cache.Get<int>(cacheKey);
             currentCount++;
-            
+
             // 30분 동안 유지
             _cache.Set(cacheKey, currentCount, TimeSpan.FromMinutes(30));
-            
+
             return currentCount;
         }
 
@@ -1238,17 +1231,17 @@ namespace AuthHive.Auth.Services.Authentication
             if (attemptLog.UserId.HasValue)
             {
                 var cacheKey = $"{RECENT_ATTEMPTS_PREFIX}{attemptLog.UserId}";
-                var recentAttempts = _cache.Get<List<AuthenticationAttemptLog>>(cacheKey) 
+                var recentAttempts = _cache.Get<List<AuthenticationAttemptLog>>(cacheKey)
                                     ?? new List<AuthenticationAttemptLog>();
-                
+
                 recentAttempts.Insert(0, attemptLog);
-                
+
                 // 최근 100개만 유지
                 if (recentAttempts.Count > 100)
                 {
                     recentAttempts = recentAttempts.Take(100).ToList();
                 }
-                
+
                 // 1시간 동안 캐시
                 _cache.Set(cacheKey, recentAttempts, TimeSpan.FromHours(1));
             }
@@ -1265,7 +1258,7 @@ namespace AuthHive.Auth.Services.Authentication
         private List<AuthenticationAttemptLog> GetRecentAttemptsFromCache(Guid userId)
         {
             var cacheKey = $"{RECENT_ATTEMPTS_PREFIX}{userId}";
-            return _cache.Get<List<AuthenticationAttemptLog>>(cacheKey) 
+            return _cache.Get<List<AuthenticationAttemptLog>>(cacheKey)
                    ?? new List<AuthenticationAttemptLog>();
         }
 
@@ -1276,10 +1269,10 @@ namespace AuthHive.Auth.Services.Authentication
         {
             var ipCacheKey = $"ip_attempts:{ipAddress}";
             var ipAttempts = _cache.Get<int>(ipCacheKey);
-            
+
             if (ipAttempts >= _bruteForceThreshold)
             {
-                await BlockIpAddressAsync(ipAddress, TimeSpan.FromHours(1), 
+                await BlockIpAddressAsync(ipAddress, TimeSpan.FromHours(1),
                     $"Exceeded threshold with {ipAttempts} attempts");
             }
         }

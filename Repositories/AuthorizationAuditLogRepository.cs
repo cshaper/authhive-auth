@@ -11,6 +11,9 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Services.Context;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
+using AuthHive.Core.Models.Audit.Common;
+using AuthHive.Core.Enums.Audit;
+using AuthHive.Core.Enums.Core;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -210,7 +213,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? since = null)
         {
             IQueryable<AuthorizationAuditLog> query = Query();
-            
+
             // 높은 위험도 점수와 거부된 요청
             query = query.Where(log => !log.IsAllowed && log.RiskScore >= 70);
 
@@ -527,42 +530,73 @@ namespace AuthHive.Auth.Repositories
             DateTime to,
             List<string> requiredResources)
         {
+            // 1. DB에서 기간에 맞는 로그를 먼저 가져옵니다.
             var logs = await Query()
                 .Where(log => log.Timestamp >= from && log.Timestamp <= to)
                 .ToListAsync();
 
-            var sensitiveAccesses = logs
-                .Where(l => requiredResources.Contains(l.Resource))
-                .Select(l => new SensitiveResourceAccess
+            // 2. 민감한 리소스 접근 목록을 생성합니다.
+            var sensitiveAccessesList = logs
+                .Where(l => l.ResourceType.HasValue && requiredResources.Contains(l.ResourceType.Value.ToString()))
+                .Select(l => new
                 {
-                    ConnectedId = l.ConnectedId,
-                    Resource = l.Resource,
+                    l.ConnectedId,
+                    Resource = l.ResourceType!.Value.ToString(),
                     AccessedAt = l.Timestamp,
                     WasAllowed = l.IsAllowed
                 })
                 .ToList();
 
-            var violations = logs
-                .Where(l => !l.IsAllowed && l.SecurityAlert)
+            // 3. 정책 위반 목록을 생성합니다. (아직은 PolicyViolation 타입)
+            var policyViolations = logs
+                .Where(l => !l.IsAllowed) // !l.IsAllowed만으로도 충분할 수 있습니다.
                 .Select(l => new PolicyViolation
                 {
+                    // 실제 엔티티의 속성명을 확인하고 맞춰주세요.
                     ConnectedId = l.ConnectedId,
                     PolicyName = l.DenialReason?.ToString() ?? "Unknown",
                     ViolationType = l.DenialCode ?? "UNAUTHORIZED",
-                    OccurredAt = l.Timestamp
+                    OccurredAt = l.Timestamp,
+                    // 매핑에 필요한 추가 속성들
+                    Rule = l.DenialReason?.ToString() ?? "Default Rule",
+                    Description = $"Access to {l.ResourceType}/{l.ResourceId} was denied.",
+                    Severity = AuditEventSeverity.Warning, // 심각도 설정
+                    ResourceId = l.ResourceId.ToString(),
+                    ResourceType = l.ResourceType.ToString()
                 })
                 .ToList();
 
-            return new ComplianceReport
+            // 4. 최종 ComplianceReport 객체를 새로운 구조에 맞게 생성합니다.
+            var report = new ComplianceReport
             {
+                ReportId = Guid.NewGuid(),
+                OrganizationId = _organizationContext.OrganizationId,
                 GeneratedAt = DateTime.UtcNow,
                 PeriodStart = from,
                 PeriodEnd = to,
-                TotalAccessRequests = logs.Count,
-                UnauthorizedAttempts = logs.Count(l => !l.IsAllowed),
-                SensitiveAccesses = sensitiveAccesses,
-                Violations = violations
+
+                // 통계 데이터를 'Data' 딕셔너리에 추가합니다.
+                Data = new Dictionary<string, object>
+        {
+            { "TotalAccessRequests", logs.Count },
+            { "UnauthorizedAttempts", logs.Count(l => !l.IsAllowed) },
+            { "SensitiveAccessCount", sensitiveAccessesList.Count },
+            { "SensitiveAccessDetails", sensitiveAccessesList } // 상세 목록도 추가 가능
+        },
+
+                // PolicyViolation 리스트를 ComplianceViolation 리스트로 변환하여 할당합니다.
+                Violations = policyViolations.Select(v => new ComplianceViolation
+                {
+                    Rule = v.Rule,
+                    Description = v.Description,
+                    Severity = v.Severity,
+                    OccurredAt = v.OccurredAt,
+                    ResourceId = v.ResourceId,
+                    ResourceType = v.ResourceType
+                }).ToList()
             };
+
+            return report;
         }
 
         /// <summary>

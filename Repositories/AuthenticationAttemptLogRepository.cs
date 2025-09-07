@@ -11,6 +11,7 @@ using AuthHive.Core.Interfaces.Base;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
+using AuthHive.Core.Models.Auth.Authentication.Common;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -52,16 +53,22 @@ namespace AuthHive.Auth.Repositories
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetHistoryForUserAsync(
             Guid userId,
-            DateTime? startDate,
-            DateTime? endDate)
+            DateTime? startDate = null,
+            DateTime? endDate = null)
         {
             var query = Query().Where(log => log.UserId == userId);
 
+            // startDate가 null이 아닐 때만 기간 필터링을 추가
             if (startDate.HasValue)
+            {
                 query = query.Where(log => log.AttemptedAt >= startDate.Value);
+            }
 
+            // endDate가 null이 아닐 때만 기간 필터링을 추가
             if (endDate.HasValue)
+            {
                 query = query.Where(log => log.AttemptedAt <= endDate.Value);
+            }
 
             return await query
                 .OrderByDescending(log => log.AttemptedAt)
@@ -83,8 +90,8 @@ namespace AuthHive.Auth.Repositories
             string? cacheKey = canCache ? $"Username_{username}_{since?.Ticks ?? 0}" : null;
 
             // Null 체크 개선
-            if (canCache && cacheKey != null && 
-                _cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+            if (canCache && cacheKey != null &&
+                _cache?.TryGetValue(cacheKey, out object? cachedObj) == true &&
                 cachedObj is IEnumerable<AuthenticationAttemptLog> cached)
             {
                 return cached;
@@ -167,8 +174,8 @@ namespace AuthHive.Auth.Repositories
             string? cacheKey = canCache ? $"IpAddress_{ipAddress}_{since?.Ticks ?? 0}" : null;
 
             // Null 체크 개선
-            if (canCache && cacheKey != null && 
-                _cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+            if (canCache && cacheKey != null &&
+                _cache?.TryGetValue(cacheKey, out object? cachedObj) == true &&
                 cachedObj is IEnumerable<AuthenticationAttemptLog> cached)
             {
                 return cached;
@@ -235,7 +242,7 @@ namespace AuthHive.Auth.Repositories
         {
             // 캐시 확인 (자주 호출되는 메서드)
             string cacheKey = $"ConsecutiveFailure_{userId}";
-            if (_cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+            if (_cache?.TryGetValue(cacheKey, out object? cachedObj) == true &&
                 cachedObj is int cachedCount)
             {
                 return cachedCount;
@@ -330,10 +337,14 @@ namespace AuthHive.Auth.Repositories
         /// 의심스러운 인증 시도 조회 - 캐시 적용
         /// </summary>
         public async Task<IEnumerable<AuthenticationAttemptLog>> GetSuspiciousAttemptsAsync(
+            Guid? organizationId = null,
             DateTime? since = null,
             int? minRiskScore = null)
         {
             var query = Query().Where(x => x.IsSuspicious);
+
+            if (organizationId.HasValue)
+                query = query.Where(x => x.OrganizationId == organizationId.Value);
 
             if (since.HasValue)
                 query = query.Where(x => x.AttemptedAt >= since.Value);
@@ -347,7 +358,6 @@ namespace AuthHive.Auth.Repositories
                 .Take(500) // 분석 데이터 제한
                 .ToListAsync();
         }
-
         /// <summary>
         /// 브루트포스 공격 패턴 감지 - 최적화된 그룹화 쿼리 (Null Safety 개선)
         /// </summary>
@@ -357,7 +367,7 @@ namespace AuthHive.Auth.Repositories
         {
             // 캐시 확인 (10분간 캐시)
             string cacheKey = $"BruteForce_{since.Ticks}_{threshold}";
-            if (_cache?.TryGetValue(cacheKey, out object? cachedObj) == true && 
+            if (_cache?.TryGetValue(cacheKey, out object? cachedObj) == true &&
                 cachedObj is IEnumerable<BruteForcePattern> cached)
             {
                 return cached;
@@ -526,7 +536,7 @@ namespace AuthHive.Auth.Repositories
                     Success = g.Count(x => x.IsSuccess)
                 })
                 .ToDictionaryAsync(
-                    x => x.Method, 
+                    x => x.Method,
                     x => x.Total > 0 ? (double)x.Success / x.Total : 0);
         }
 
@@ -637,7 +647,7 @@ namespace AuthHive.Auth.Repositories
                 await _context.SaveChangesAsync();
                 totalDeleted += batch.Count;
 
-                _logger.LogInformation("Cleaned up batch of {Count} logs, total: {Total}", 
+                _logger.LogInformation("Cleaned up batch of {Count} logs, total: {Total}",
                     batch.Count, totalDeleted);
 
                 // 배치 간 약간의 지연으로 시스템 부하 방지
@@ -681,7 +691,7 @@ namespace AuthHive.Auth.Repositories
 
                 totalArchived += batch.Count;
 
-                _logger.LogInformation("Archived batch of {Count} logs, total: {Total}", 
+                _logger.LogInformation("Archived batch of {Count} logs, total: {Total}",
                     batch.Count, totalArchived);
 
                 await Task.Delay(100);
@@ -782,5 +792,44 @@ namespace AuthHive.Auth.Repositories
         }
 
         #endregion
+
+        #region 추가 구현 (인터페이스 동기화)
+
+        public async Task<IEnumerable<AuthenticationAttemptLog>> GetFailedAttemptsFromIpAsync(string ipAddress, DateTime since)
+        {
+            return await Query()
+                .Where(x => !x.IsSuccess && x.IpAddress == ipAddress && x.AttemptedAt >= since)
+                .OrderByDescending(x => x.AttemptedAt)
+                .ToListAsync();
+        }
+
+        public async Task<IEnumerable<AuthenticationAttemptLog>> GetFailedAttemptsForUsernameAsync(string username, DateTime since)
+        {
+            return await Query()
+                .Where(x => !x.IsSuccess && x.Username == username && x.AttemptedAt >= since)
+                .OrderByDescending(x => x.AttemptedAt)
+                .ToListAsync();
+        }
+
+        public Task ResetConsecutiveFailuresAsync(Guid userId)
+        {
+            // 연속 실패 횟수는 캐시를 기반으로 계산되므로, 관련 캐시를 지우는 것이 가장 효과적인 초기화 방법입니다.
+            string cacheKey = $"ConsecutiveFailure_{userId}";
+            _cache?.Remove(cacheKey);
+
+            _logger.LogInformation("Consecutive failure cache cleared for UserId: {UserId}", userId);
+
+            return Task.CompletedTask;
+        }
+
+        public async Task<int> MarkAsArchivedAsync(DateTime from, DateTime to)
+        {
+            return await Query()
+                .Where(l => l.AttemptedAt >= from && l.AttemptedAt <= to && !l.IsArchived)
+                .ExecuteUpdateAsync(updates => updates.SetProperty(l => l.IsArchived, true));
+        }
+
+        #endregion
+
     }
 }
