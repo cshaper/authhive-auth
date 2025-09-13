@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="AutoMapper.Extensions.Microsoft.DependencyInjection" Version="12.0.1" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
+    <PackageReference Include="DnsClient" Version="1.8.0" />
     <PackageReference Include="Google.Apis.Auth" Version="1.70.0" />
     <PackageReference Include="GoogleAuthenticator" Version="3.2.0" />
     <PackageReference Include="Isopoh.Cryptography.Argon2" Version="2.0.0" />

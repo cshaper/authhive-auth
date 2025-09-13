@@ -12,6 +12,9 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Services.Context;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Entities.Infra.Monitoring;
+using AuthHive.Core.Models.Infra.Monitoring;
+using AuthHive.Core.Enums.Infra.Monitoring;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -44,11 +47,11 @@ namespace AuthHive.Auth.Repositories
             Guid? organizationId = null,
             CancellationToken cancellationToken = default)
         {
-            var orgId = organizationId ?? _organizationContext.CurrentOrganizationId 
+            var orgId = organizationId ?? _organizationContext.CurrentOrganizationId
                 ?? throw new InvalidOperationException("Organization ID is required");
 
             var cacheKey = $"{CACHE_KEY_PREFIX}stats_{orgId}";
-            
+
             if (_cache != null && _cache.TryGetValue<OrganizationStatistics>(cacheKey, out var cached))
             {
                 return cached!;
@@ -205,7 +208,7 @@ namespace AuthHive.Auth.Repositories
             stats.Growth = await GetGrowthMetricsAsync(organizationId, cancellationToken);
 
             // 사용량 메트릭
-          
+
             // 사용량 메트릭
             stats.Usage = await GetUsageMetricsAsync(organizationId, startDate, endDate, cancellationToken);
 
@@ -218,7 +221,7 @@ namespace AuthHive.Auth.Repositories
 
         #region Private Helper Methods
 
-        private async Task<(int TotalMembers, int ActiveMembers, int ActiveConnectedIds, double TwoFactorPercentage)> 
+        private async Task<(int TotalMembers, int ActiveMembers, int ActiveConnectedIds, double TwoFactorPercentage)>
             GetMemberStatisticsAsync(Guid organizationId, CancellationToken cancellationToken)
         {
             var memberships = await _context.Set<Core.Entities.Organization.OrganizationMembership>()
@@ -227,7 +230,7 @@ namespace AuthHive.Auth.Repositories
 
             var totalMembers = memberships.Count;
             var activeMembers = memberships.Count(m => m.Status == OrganizationMembershipStatus.Active);
-            
+
             // ConnectedId 통계는 실제 구현 필요
             var activeConnectedIds = activeMembers; // 임시 값
             var twoFactorPercentage = 60.0; // 임시 값
@@ -235,7 +238,7 @@ namespace AuthHive.Auth.Repositories
             return (totalMembers, activeMembers, activeConnectedIds, twoFactorPercentage);
         }
 
-        private async Task<(int TotalApplications, int ActiveApplications)> 
+        private async Task<(int TotalApplications, int ActiveApplications)>
             GetApplicationStatisticsAsync(Guid organizationId, CancellationToken cancellationToken)
         {
             var applications = await _context.Set<Core.Entities.PlatformApplications.PlatformApplication>()
@@ -245,7 +248,7 @@ namespace AuthHive.Auth.Repositories
             return (applications.Count, applications.Count(a => a.IsActive));
         }
 
-        private async Task<(int ChildCount, int Depth)> 
+        private async Task<(int ChildCount, int Depth)>
             GetHierarchyStatisticsAsync(Guid organizationId, CancellationToken cancellationToken)
         {
             var childCount = await _context.Set<OrganizationEntity>()
@@ -277,14 +280,14 @@ namespace AuthHive.Auth.Repositories
             return maxDepth + 1;
         }
 
-        private async Task<(OrganizationCapabilityEnum Primary, int ActiveCount)> 
+        private async Task<(OrganizationCapabilityEnum Primary, int ActiveCount)>
             GetCapabilityStatisticsAsync(Guid organizationId, CancellationToken cancellationToken)
         {
             // 실제 구현 필요 - 임시 값 반환
             return await Task.FromResult((OrganizationCapabilityEnum.Customer, 1));
         }
 
-        private async Task<(int Last30Days, int Last7Days, int Today, DateTime? LastActivityAt)> 
+        private async Task<(int Last30Days, int Last7Days, int Today, DateTime? LastActivityAt)>
             GetActivityStatisticsAsync(Guid organizationId, CancellationToken cancellationToken)
         {
             var now = DateTime.UtcNow;
@@ -341,9 +344,9 @@ namespace AuthHive.Auth.Repositories
         }
 
         private async Task<ActivityMetrics> GetActivityMetricsAsync(
-            Guid organizationId, 
-            DateTime? startDate, 
-            DateTime? endDate, 
+            Guid organizationId,
+            DateTime? startDate,
+            DateTime? endDate,
             CancellationToken cancellationToken)
         {
             var now = DateTime.UtcNow;
@@ -404,7 +407,7 @@ namespace AuthHive.Auth.Repositories
         {
             var trends = new List<GrowthTrend>();
             var now = DateTime.UtcNow;
-            
+
             for (int i = days - 1; i >= 0; i--)
             {
                 trends.Add(new GrowthTrend
@@ -416,7 +419,7 @@ namespace AuthHive.Auth.Repositories
                     ApiCalls = 10000 + Random.Shared.Next(-1000, 1000)
                 });
             }
-            
+
             return trends;
         }
 
@@ -448,7 +451,7 @@ namespace AuthHive.Auth.Repositories
         {
             var trends = new List<ApiUsageTrend>();
             var now = DateTime.UtcNow;
-            
+
             for (int i = 6; i >= 0; i--)
             {
                 var total = Random.Shared.Next(8000, 12000);
@@ -461,7 +464,7 @@ namespace AuthHive.Auth.Repositories
                     AverageResponseTime = 100 + Random.Shared.Next(0, 50)
                 });
             }
-            
+
             return trends;
         }
 
@@ -488,27 +491,29 @@ namespace AuthHive.Auth.Repositories
             return await Task.FromResult(metrics);
         }
 
-        private List<SecurityEvent> GenerateSecurityEvents()
+        private List<SecurityEventDto> GenerateSecurityEvents()
         {
-            return new List<SecurityEvent>
-            {
-                new SecurityEvent
-                {
-                    OccurredAt = DateTime.UtcNow.AddHours(-2),
-                    EventType = "Failed Login",
-                    Description = "Multiple failed login attempts",
-                    IpAddress = "192.168.1.100",
-                    Severity = "Medium"
-                },
-                new SecurityEvent
-                {
-                    OccurredAt = DateTime.UtcNow.AddHours(-5),
-                    EventType = "Password Reset",
-                    Description = "User requested password reset",
-                    UserId = Guid.NewGuid().ToString(),
-                    Severity = "Low"
-                }
-            };
+            return new List<SecurityEventDto>
+    {
+        new SecurityEventDto
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTime.UtcNow.AddHours(-2),
+            EventType = SecurityEventType.LoginFailed,  // enum 사용
+            Severity = SecuritySeverityLevel.Medium,     // enum 사용
+            EventDescription = "Multiple failed login attempts",
+            IPAddress = "192.168.1.100"
+        },
+        new SecurityEventDto
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTime.UtcNow.AddHours(-5),
+            EventType = SecurityEventType.PasswordChanged,
+            Severity = SecuritySeverityLevel.Low,
+            EventDescription = "User requested password reset",
+            TriggeringConnectedId = Guid.NewGuid()
+        }
+    };
         }
 
         #endregion

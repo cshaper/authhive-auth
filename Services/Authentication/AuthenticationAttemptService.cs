@@ -19,6 +19,7 @@ using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Interfaces.User.Repository;
 using UserEntity = AuthHive.Core.Entities.User.User;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
+using AuthHive.Core.Models.Infra.Security;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -587,16 +588,18 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 // 차단된 IP인지 확인
+                // 차단된 IP인지 확인
                 if (IsIpBlocked(ipAddress))
                 {
                     assessment.RiskScore = 1.0;
                     assessment.RiskLevel = "Critical";
                     assessment.RiskFactors.Add(new RiskFactor
                     {
-                        FactorType = "BlockedIP",
+                        Name = "BlockedIP",                    // FactorType 대신 Name 사용
                         Description = "IP is currently blocked",
                         Weight = 1.0,
-                        Severity = "Critical"
+                        Impact = 100,                          // Impact 추가 (Critical이므로 100)
+                        Category = "Network"                   // Severity 대신 Category 사용
                     });
                     return ServiceResult<RiskAssessment>.Success(assessment);
                 }
@@ -604,15 +607,15 @@ namespace AuthHive.Auth.Services.Authentication
                 // 캐시에서 IP 시도 횟수 확인
                 var ipAttemptsCacheKey = $"ip_attempts:{ipAddress}";
                 var ipAttempts = _cache.Get<int>(ipAttemptsCacheKey);
-
                 if (ipAttempts > 5)
                 {
                     assessment.RiskFactors.Add(new RiskFactor
                     {
-                        FactorType = "HighFailureRate",
+                        Name = "HighFailureRate",                                              // FactorType → Name
                         Description = $"High failure rate: {ipAttempts} attempts in recent period",
                         Weight = 0.3,
-                        Severity = "High"
+                        Impact = 80,                                                           // Severity "High" → Impact 80
+                        Category = "Authentication"                                            // 카테고리 추가
                     });
                 }
 

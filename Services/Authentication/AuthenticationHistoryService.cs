@@ -21,6 +21,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Enums.Audit;
 using Microsoft.EntityFrameworkCore;
+using AuthHive.Core.Models.Infra.Security;
+using AuthHive.Core.Models.Infra.Security.Common;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -551,15 +553,15 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         public async Task<ServiceResult<AnomalyDetectionResult>> DetectAnomalyAsync(
-            Guid userId,
-            AuthenticationContext context)
+                    Guid userId,
+                    AuthenticationContext context)
         {
             try
             {
                 var result = new AnomalyDetectionResult
                 {
                     DetectedAt = DateTime.UtcNow,
-                    DetectedAnomalies = new List<Anomaly>()
+                    DetectedAnomalies = new List<SecurityAnomaly>()
                 };
 
                 // 이상 패턴 감지
@@ -570,7 +572,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (isAnomalous.IsSuccess && isAnomalous.Data)
                 {
-                    result.DetectedAnomalies.Add(new Anomaly
+                    result.DetectedAnomalies.Add(new SecurityAnomaly
                     {
                         Type = "NewDevice",
                         Description = "Login from new device or IP address",
@@ -592,7 +594,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                     if (geoAnomaly.IsSuccess && geoAnomaly.Data)
                     {
-                        result.DetectedAnomalies.Add(new Anomaly
+                        result.DetectedAnomalies.Add(new SecurityAnomaly  // Anomaly를 SecurityAnomaly로 변경
                         {
                             Type = "GeographicalAnomaly",
                             Description = $"Unusual location: {context.Location}",
@@ -1121,14 +1123,16 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 assessment.RiskFactors.Add(new RiskFactor
                 {
-                    FactorType = "MultipleFailures",
+                    Name = "MultipleFailures",                                    // FactorType → Name
                     Description = $"{recentFailures.Count()} failed attempts in last hour",
                     Weight = 0.4,
-                    Severity = "High"
+                    Impact = 80,                                                  // Severity "High" → Impact 80
+                    Category = "Authentication"                                   // 카테고리 추가
                 });
             }
 
-            assessment.RiskScore = Math.Min(assessment.RiskFactors.Sum(f => f.Weight), 1.0);
+            // RiskScore 계산도 수정 (Weight 대신 WeightedScore 사용)
+            assessment.RiskScore = Math.Min(assessment.RiskFactors.Sum(f => f.WeightedScore) / 100, 1.0);
             return ServiceResult<RiskAssessment>.Success(assessment);
         }
 

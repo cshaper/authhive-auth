@@ -221,66 +221,49 @@ namespace AuthHive.Auth.Services.Authentication
             throw new NotImplementedException("Trend analysis logic is required.");
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.UserAuthenticationMethods>> IAuthenticationMethodService.GetUserMethodsAsync(Guid userId)
+        Task<ServiceResult<UserAuthenticationMethods>> IAuthenticationMethodService.GetUserMethodsAsync(Guid userId)
         {
             throw new NotImplementedException();
         }
 
-        public Task<ServiceResult> ConfigureOAuthProviderAsync(SSOProvider provider, Core.Models.Auth.Authentication.Common.OAuthProviderConfiguration configuration, Guid? organizationId = null)
+
+        Task<ServiceResult<OAuthProviderConfiguration>> IAuthenticationMethodService.GetOAuthProviderConfigurationAsync(SSOProvider provider, Guid? organizationId)
         {
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.OAuthProviderConfiguration>> IAuthenticationMethodService.GetOAuthProviderConfigurationAsync(SSOProvider provider, Guid? organizationId)
-        {
-            throw new NotImplementedException();
-        }
-
-        public Task<ServiceResult> ConfigureSSOAsync(SSOProtocol protocol, Core.Models.Auth.Authentication.Common.SSOConfiguration configuration, Guid organizationId)
+        public Task<ServiceResult> ConfigureSSOAsync(SSOProtocol protocol, SSOConfiguration configuration, Guid organizationId)
         {
             _logger.LogWarning("ConfigureSSOAsync is not implemented.");
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.SSOConfiguration>> IAuthenticationMethodService.GetSSOConfigurationAsync(Guid organizationId)
+        Task<ServiceResult<SSOConfiguration>> IAuthenticationMethodService.GetSSOConfigurationAsync(Guid organizationId)
         {
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.MethodPolicyValidation>> IAuthenticationMethodService.ValidateMethodPolicyAsync(AuthenticationMethod method, Guid? organizationId)
+        Task<ServiceResult<MethodPolicyValidation>> IAuthenticationMethodService.ValidateMethodPolicyAsync(AuthenticationMethod method, Guid? organizationId)
         {
              _logger.LogWarning("ValidateMethodPolicyAsync is not implemented.");
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.MethodRequirements>> IAuthenticationMethodService.GetMethodRequirementsAsync(AuthenticationMethod method)
+        Task<ServiceResult<MethodRequirements>> IAuthenticationMethodService.GetMethodRequirementsAsync(AuthenticationMethod method)
         {
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.MethodUsageStatistics>> IAuthenticationMethodService.GetMethodUsageStatisticsAsync(Guid? organizationId, DateTime? from, DateTime? to)
+        Task<ServiceResult<MethodUsageStatistics>> IAuthenticationMethodService.GetMethodUsageStatisticsAsync(Guid? organizationId, DateTime? from, DateTime? to)
         {
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult<Core.Models.Auth.Authentication.Common.MethodTrendAnalysis>> IAuthenticationMethodService.AnalyzeMethodTrendsAsync(Guid? organizationId)
+        Task<ServiceResult<MethodTrendAnalysis>> IAuthenticationMethodService.AnalyzeMethodTrendsAsync(Guid? organizationId)
         {
             throw new NotImplementedException();
         }
         #endregion
     }
 
-    #region DTO Placeholder
-    public class UserAuthenticationMethods { }
-    public class OAuthProviderConfiguration { }
-    public class SSOConfiguration { }
-    public class MethodPolicyValidation { }
-    public class MethodRequirements { }
-    public class MethodUsageStatistics 
-    {
-        public int TotalAttempts { get; set; }
-        public Dictionary<string, int> UsageByMethod { get; set; } = new();
-    }
-    public class MethodTrendAnalysis { }
-    #endregion
 }

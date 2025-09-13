@@ -13,6 +13,8 @@ using AuthHive.Core.Models.Auth.Authentication.Events;
 using AuthHive.Core.Constants.Auth;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Caching.Memory;
+using AuthHive.Core.Entities.Infra.Monitoring;
+using AuthHive.Core.Models.Infra.Monitoring;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -954,7 +956,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 보안 이벤트 조회
         /// </summary>
-        public async Task<ServiceResult<IEnumerable<SecurityEvent>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null)
+        public async Task<ServiceResult<IEnumerable<SecurityEventDto>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null)
         {
             try
             {
@@ -963,18 +965,18 @@ namespace AuthHive.Auth.Services.Authentication
                 var userExists = await _userRepository.ExistsAsync(userId);
                 if (!userExists)
                 {
-                    return ServiceResult<IEnumerable<SecurityEvent>>.Failure("사용자를 찾을 수 없습니다.");
+                    return ServiceResult<IEnumerable<SecurityEventDto>>.Failure("사용자를 찾을 수 없습니다.");
                 }
 
                 // TODO: 실제 보안 이벤트 조회 로직
-                var events = new List<SecurityEvent>();
+                var events = new List<SecurityEventDto>();
 
-                return ServiceResult<IEnumerable<SecurityEvent>>.Success(events);
+                return ServiceResult<IEnumerable<SecurityEventDto>>.Success(events);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get security events for user {UserId}", userId);
-                return ServiceResult<IEnumerable<SecurityEvent>>.Failure("보안 이벤트 조회에 실패했습니다.");
+                return ServiceResult<IEnumerable<SecurityEventDto>>.Failure("보안 이벤트 조회에 실패했습니다.");
             }
         }
 
