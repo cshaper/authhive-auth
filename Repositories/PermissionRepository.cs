@@ -87,6 +87,67 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
+        #region 추가 조회 메서드
+
+        /// <summary>
+        /// 모든 활성 권한 조회
+        /// </summary>
+        public async Task<IEnumerable<Permission>> GetActivePermissionsAsync()
+        {
+            return await _dbSet
+                .Where(p => p.IsActive && !p.IsDeleted)
+                .OrderBy(p => p.Category)
+                .ThenBy(p => p.Name)
+                .ToListAsync();
+        }
+
+        /// <summary>
+        /// 스코프 패턴으로 권한 조회 (와일드카드 지원)
+        /// SQL LIKE 패턴을 사용하여 권한을 조회합니다.
+        /// </summary>
+        public async Task<IEnumerable<Permission>> GetByScopePatternAsync(string pattern)
+        {
+            // SQL LIKE 패턴을 EF Core에서 사용
+            // 예: "organization:%" -> organization으로 시작하는 모든 스코프
+            return await _dbSet
+                .Where(p => EF.Functions.Like(p.Scope, pattern) && p.IsActive && !p.IsDeleted)
+                .OrderBy(p => p.Scope)
+                .ToListAsync();
+        }
+
+        /// <summary>
+        /// 애플리케이션에서 사용 가능한 권한 조회
+        /// 애플리케이션에 할당된 역할들이 가진 권한을 조회합니다.
+        /// </summary>
+        public async Task<IEnumerable<Permission>> GetByApplicationAsync(Guid applicationId)
+        {
+            // Application -> Role -> RolePermission -> Permission 관계를 통해 조회
+            var query = from p in _dbSet
+                        join rp in _context.Set<RolePermission>() on p.Id equals rp.PermissionId
+                        join r in _context.Set<Role>() on rp.RoleId equals r.Id
+                        where r.ApplicationId == applicationId && 
+                              p.IsActive && 
+                              !p.IsDeleted && 
+                              rp.IsActive && 
+                              r.IsActive
+                        select p;
+
+            return await query.Distinct().ToListAsync();
+        }
+
+        /// <summary>
+        /// 여러 ID로 권한 일괄 조회
+        /// </summary>
+        public async Task<IEnumerable<Permission>> GetByIdsAsync(IEnumerable<Guid> ids)
+        {
+            return await _dbSet
+                .Where(p => ids.Contains(p.Id) && !p.IsDeleted)
+                .OrderBy(p => p.Name)
+                .ToListAsync();
+        }
+
+        #endregion
+
         #region 카테고리별 조회 메서드
         
         public async Task<IEnumerable<Permission>> GetByCategoryAsync(
@@ -196,7 +257,7 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region 역할 및 ConnectedId 관련 메서드
+        #region 역할 관련 메서드
 
         public async Task<IEnumerable<Permission>> GetByRoleIdAsync(
             Guid roleId,
@@ -226,31 +287,6 @@ namespace AuthHive.Auth.Repositories
                 query = query.Where(p => p.IsActive);
 
             return await query.Distinct().ToListAsync();
-        }
-        
-        /// <summary>
-        /// 특정 ConnectedId가 보유한 모든 권한을 조회합니다. (역할을 통해 상속된 권한 포함)
-        /// 1. ConnectedId에 할당된 모든 활성 Role의 ID를 찾습니다.
-        /// 2. 해당 Role ID들에 연결된 모든 활성 Permission을 조회합니다.
-        /// </summary>
-        public async Task<IEnumerable<Permission>> GetPermissionsForConnectedIdAsync(Guid connectedId)
-        {
-            // 1. 이 ConnectedId에 직접 할당된 모든 활성 역할(Role)의 ID를 조회합니다.
-            var activeRoleIds = await _context.Set<ConnectedIdRole>()
-                .Where(cr => cr.ConnectedId == connectedId && cr.IsActive &&
-                              (!cr.ExpiresAt.HasValue || cr.ExpiresAt > DateTime.UtcNow))
-                .Select(cr => cr.RoleId)
-                .Distinct()
-                .ToListAsync();
-
-            if (!activeRoleIds.Any())
-            {
-                // 할당된 역할이 없으면 빈 권한 목록을 반환합니다.
-                return Enumerable.Empty<Permission>();
-            }
-
-            // 2. 이미 구현된 GetByRoleIdsAsync 메서드를 재사용하여 효율적으로 권한을 조회합니다.
-            return await GetByRoleIdsAsync(activeRoleIds, includeInactive: false);
         }
 
         #endregion

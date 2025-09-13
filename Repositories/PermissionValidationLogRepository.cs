@@ -130,6 +130,96 @@ namespace AuthHive.Auth.Repositories
                 .ToListAsync();
         }
 
+        /// <summary>
+        /// 특정 권한에 대한 최근 검증 로그 조회
+        /// </summary>
+        public async Task<IEnumerable<PermissionValidationLog>> GetRecentByPermissionIdAsync(
+            Guid permissionId,
+            int days)
+        {
+            var startDate = DateTime.UtcNow.AddDays(-days);
+            
+            // Permission ID로 해당 권한의 Scope를 먼저 조회
+            var permission = await _context.Set<Permission>()
+                .FirstOrDefaultAsync(p => p.Id == permissionId);
+            
+            if (permission == null)
+            {
+                return Enumerable.Empty<PermissionValidationLog>();
+            }
+
+            // 해당 Scope로 검증된 로그들을 조회
+            return await Query()
+                .Where(log => log.RequestedScope == permission.Scope && 
+                             log.Timestamp >= startDate)
+                .OrderByDescending(log => log.Timestamp)
+                .Include(log => log.ConnectedIdEntity)
+                .ToListAsync();
+        }
+
+        /// <summary>
+        /// 특정 권한에 대한 마지막 검증 로그 조회
+        /// </summary>
+        public async Task<PermissionValidationLog?> GetLastValidationAsync(Guid permissionId)
+        {
+            // Permission ID로 해당 권한의 Scope를 먼저 조회
+            var permission = await _context.Set<Permission>()
+                .FirstOrDefaultAsync(p => p.Id == permissionId);
+            
+            if (permission == null)
+            {
+                return null;
+            }
+
+            // 해당 Scope로 검증된 가장 최근 로그 조회
+            return await Query()
+                .Where(log => log.RequestedScope == permission.Scope)
+                .OrderByDescending(log => log.Timestamp)
+                .Include(log => log.ConnectedIdEntity)
+                .FirstOrDefaultAsync();
+        }
+
+        /// <summary>
+        /// 조직 및 권한별 검증 로그 수 조회
+        /// </summary>
+        public async Task<int> CountByOrganizationAsync(Guid organizationId, Guid permissionId)
+        {
+            // Permission ID로 해당 권한의 Scope를 먼저 조회
+            var permission = await _context.Set<Permission>()
+                .FirstOrDefaultAsync(p => p.Id == permissionId);
+            
+            if (permission == null)
+            {
+                return 0;
+            }
+
+            // 해당 조직과 Scope로 검증된 로그 수 카운트
+            return await QueryForOrganization(organizationId)
+                .Where(log => log.RequestedScope == permission.Scope)
+                .CountAsync();
+        }
+
+        /// <summary>
+        /// 애플리케이션 및 권한별 검증 로그 수 조회
+        /// </summary>
+        public async Task<int> CountByApplicationAsync(Guid applicationId, Guid permissionId)
+        {
+            // Permission ID로 해당 권한의 Scope를 먼저 조회
+            var permission = await _context.Set<Permission>()
+                .FirstOrDefaultAsync(p => p.Id == permissionId);
+            
+            if (permission == null)
+            {
+                return 0;
+            }
+
+            // 해당 애플리케이션과 Scope로 검증된 로그 수 카운트
+            return await Query()
+                .Where(log => log.ApplicationId == applicationId && 
+                             log.RequestedScope == permission.Scope)
+                .CountAsync();
+        }
+
         #endregion
 
         #region 로그 기록

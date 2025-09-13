@@ -8,6 +8,8 @@ using AuthHive.Core.Enums.Auth;
 using System.Linq.Expressions;
 using AuthHive.Core.Interfaces.Base;
 using Microsoft.Extensions.Logging;
+using AuthHive.Core.Models.Auth.Role.Common;
+
 
 namespace AuthHive.Auth.Repositories;
 
@@ -430,12 +432,12 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
     /// <summary>
     /// 조직의 역할 통계 조회
     /// </summary>
-    public async Task<RoleStatistics> GetStatisticsAsync(Guid organizationId)
+    public async Task<RoleRepositoryStatistics> GetStatisticsAsync(Guid organizationId)
     {
         var roles = await QueryForOrganization(organizationId).ToListAsync();
 
         var now = DateTime.UtcNow;
-        var stats = new RoleStatistics
+        var stats = new RoleRepositoryStatistics
         {
             TotalCount = roles.Count,
             ActiveCount = roles.Count(r => r.IsActive),
@@ -771,6 +773,38 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
             result.Add(child);
             AddChildrenRecursively(child, lookup, result);
         }
+    }
+    /// <summary>
+    /// 애플리케이션별 역할 수 조회
+    /// </summary>
+    /// <param name="applicationId">애플리케이션 ID</param>
+    /// <returns>역할 수</returns>
+
+    public async Task<int> CountByApplicationAsync(Guid applicationId)
+    {
+        // 캐시 키 생성
+        var cacheKey = $"role:count:app:{applicationId}";
+
+        // 캐시에서 먼저 확인
+        if (_cache != null && _cache.TryGetValue(cacheKey, out int cachedCount))
+        {
+            return cachedCount;
+        }
+
+        // DB에서 카운트 조회
+        var count = await Query()
+            .Where(r => r.ApplicationId == applicationId)
+            .CountAsync();
+
+        // 캐시에 저장 (5분간)
+        if (_cache != null)
+        {
+            var cacheOptions = new MemoryCacheEntryOptions()
+                .SetSlidingExpiration(TimeSpan.FromMinutes(5));
+            _cache.Set(cacheKey, count, cacheOptions);
+        }
+
+        return count;
     }
 
     #endregion

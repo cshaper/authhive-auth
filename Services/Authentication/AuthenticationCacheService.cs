@@ -442,7 +442,6 @@ namespace AuthHive.Auth.Services
                     stats.HitRate = stats.TotalHits + stats.TotalMisses > 0
                         ? (double)stats.TotalHits / (stats.TotalHits + stats.TotalMisses)
                         : 0;
-                    stats.MissRate = 1 - stats.HitRate;
                 }
 
                 await Task.CompletedTask;
