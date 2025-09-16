@@ -23,6 +23,7 @@ using AuthHive.Core.Enums.Audit;
 using Microsoft.EntityFrameworkCore;
 using AuthHive.Core.Models.Infra.Security;
 using AuthHive.Core.Models.Infra.Security.Common;
+using AuthHive.Core.Interfaces.Audit.Repository;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -120,10 +121,7 @@ namespace AuthHive.Auth.Services.Authentication
                 };
 
                 await _attemptRepository.AddAsync(attemptLog);
-
-                // 감사 로그 생성
                 await CreateAuditLogForAttemptAsync(attemptLog);
-
                 return ServiceResult.Success();
             }
             catch (Exception ex)
@@ -275,41 +273,21 @@ namespace AuthHive.Auth.Services.Authentication
         private string AnalyzeSuspiciousPattern(List<AuthenticationAttemptLog> attempts)
         {
             var patterns = new List<string>();
-
-            // 시간 패턴 분석
             var timeSpan = attempts.Max(a => a.AttemptedAt) - attempts.Min(a => a.AttemptedAt);
-            if (timeSpan.TotalMinutes < 5)
-            {
-                patterns.Add("RapidFire");
-            }
-
-            // 실패 패턴 분석
+            if (timeSpan.TotalMinutes < 5) patterns.Add("RapidFire");
             var failureRate = attempts.Count(a => !a.IsSuccess) / (double)attempts.Count;
-            if (failureRate > 0.8)
-            {
-                patterns.Add("HighFailure");
-            }
-
-            // 연속 실패 패턴
+            if (failureRate > 0.8) patterns.Add("HighFailure");
             var maxConsecutiveFailures = attempts.Max(a => a.ConsecutiveFailures);
-            if (maxConsecutiveFailures > 5)
-            {
-                patterns.Add("ConsecutiveFailures");
-            }
-
-            // 다양한 인증 방법 시도
+            if (maxConsecutiveFailures > 5) patterns.Add("ConsecutiveFailures");
             var methods = attempts.Select(a => a.Method).Distinct().Count();
-            if (methods > 2)
-            {
-                patterns.Add("MultipleMethodAttempts");
-            }
-
+            if (methods > 2) patterns.Add("MultipleMethodAttempts");
             return patterns.Any() ? string.Join(",", patterns) : "Normal";
         }
 
         #endregion
 
         #region 통계 및 분석
+
         public async Task<ServiceResult<AuthenticationStatistics>> GetStatisticsAsync(
             Guid? organizationId = null,
             DateTime? from = null,
@@ -335,7 +313,6 @@ namespace AuthHive.Auth.Services.Authentication
                     AttemptsByMethod = stats.AttemptsByMethod ?? new Dictionary<AuthenticationMethod, int>(),
                     FailureReasons = stats.FailureReasons ?? new Dictionary<AuthenticationResult, int>(),
                     PeakHour = stats.PeakHour
-                    // AverageAttemptsPerUser는 계산된 속성이므로 설정 불필요
                 };
 
                 return ServiceResult<AuthenticationStatistics>.Success(result);
@@ -347,15 +324,14 @@ namespace AuthHive.Auth.Services.Authentication
                     "Failed to get authentication statistics");
             }
         }
-
-        // 메서드 추가
+        
         public async Task<ServiceResult<IEnumerable<SuspiciousActivity>>> GetSuspiciousAttemptsAsync(
             Guid? organizationId,
             DateTime since)
         {
-            // GetSuspiciousActivitiesAsync를 호출하거나 직접 구현
             return await GetSuspiciousActivitiesAsync(organizationId, since);
         }
+
         public async Task<ServiceResult<AuthenticationPatternAnalysis>> AnalyzeAuthenticationPatternsAsync(
             Guid userId)
         {
@@ -468,13 +444,9 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // 캐시 초기화
                 var cacheKey = $"failure_count:{userId}";
                 _cache.Remove(cacheKey);
-
-                // DB 업데이트
                 await _attemptRepository.ResetConsecutiveFailuresAsync(userId);
-
                 _logger.LogInformation("Reset failed attempts for user {UserId}", userId);
                 return ServiceResult.Success();
             }
@@ -502,7 +474,6 @@ namespace AuthHive.Auth.Services.Authentication
                     RecommendedActions = new List<string>()
                 };
 
-                // IP 위험도 평가
                 var ipRisk = await _attemptService.AssessIpRiskAsync(request.IpAddress ?? "unknown");
                 if (ipRisk.IsSuccess && ipRisk.Data != null)
                 {
@@ -510,7 +481,6 @@ namespace AuthHive.Auth.Services.Authentication
                     assessment.RiskFactors.AddRange(ipRisk.Data.RiskFactors);
                 }
 
-                // 사용자 이력 기반 위험도
                 if (!string.IsNullOrEmpty(request.Username))
                 {
                     var userRisk = await AssessUserRiskAsync(request.Username);
@@ -521,16 +491,11 @@ namespace AuthHive.Auth.Services.Authentication
                     }
                 }
 
-                // 위험 수준 결정
                 assessment.RiskLevel = assessment.RiskScore switch
                 {
-                    >= 0.8 => "Critical",
-                    >= 0.6 => "High",
-                    >= 0.4 => "Medium",
-                    _ => "Low"
+                    >= 0.8 => "Critical", >= 0.6 => "High", >= 0.4 => "Medium", _ => "Low"
                 };
 
-                // 권장 조치 결정
                 if (assessment.RiskScore >= 0.6)
                 {
                     assessment.RequiresMfa = true;
@@ -553,8 +518,8 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         public async Task<ServiceResult<AnomalyDetectionResult>> DetectAnomalyAsync(
-                    Guid userId,
-                    AuthenticationContext context)
+            Guid userId,
+            AuthenticationContext context)
         {
             try
             {
@@ -564,20 +529,14 @@ namespace AuthHive.Auth.Services.Authentication
                     DetectedAnomalies = new List<SecurityAnomaly>()
                 };
 
-                // 이상 패턴 감지
                 var isAnomalous = await _attemptService.DetectAnomalousPatternAsync(
-                    userId,
-                    context.IpAddress ?? "unknown",
-                    context.DeviceFingerprint);
+                    userId, context.IpAddress ?? "unknown", context.DeviceFingerprint);
 
                 if (isAnomalous.IsSuccess && isAnomalous.Data)
                 {
                     result.DetectedAnomalies.Add(new SecurityAnomaly
                     {
-                        Type = "NewDevice",
-                        Description = "Login from new device or IP address",
-                        Confidence = 0.8,
-                        DetectedAt = DateTime.UtcNow,
+                        Type = "NewDevice", Description = "Login from new device or IP address", Confidence = 0.8, DetectedAt = DateTime.UtcNow,
                         Evidence = new Dictionary<string, object>
                         {
                             ["IpAddress"] = context.IpAddress ?? "unknown",
@@ -586,35 +545,23 @@ namespace AuthHive.Auth.Services.Authentication
                     });
                 }
 
-                // 지리적 이상 감지
                 if (!string.IsNullOrEmpty(context.Location))
                 {
-                    var geoAnomaly = await _attemptService.DetectGeographicalAnomalyAsync(
-                        userId, context.Location);
-
+                    var geoAnomaly = await _attemptService.DetectGeographicalAnomalyAsync(userId, context.Location);
                     if (geoAnomaly.IsSuccess && geoAnomaly.Data)
                     {
-                        result.DetectedAnomalies.Add(new SecurityAnomaly  // Anomaly를 SecurityAnomaly로 변경
+                        result.DetectedAnomalies.Add(new SecurityAnomaly
                         {
-                            Type = "GeographicalAnomaly",
-                            Description = $"Unusual location: {context.Location}",
-                            Confidence = 0.9,
-                            DetectedAt = DateTime.UtcNow,
-                            Evidence = new Dictionary<string, object>
-                            {
-                                ["Location"] = context.Location
-                            }
+                            Type = "GeographicalAnomaly", Description = $"Unusual location: {context.Location}", Confidence = 0.9, DetectedAt = DateTime.UtcNow,
+                            Evidence = new Dictionary<string, object> { ["Location"] = context.Location }
                         });
                     }
                 }
 
                 result.AnomalyDetected = result.DetectedAnomalies.Any();
-                result.AnomalyScore = result.DetectedAnomalies.Any()
-                    ? result.DetectedAnomalies.Max(a => a.Confidence)
-                    : 0;
+                result.AnomalyScore = result.DetectedAnomalies.Any() ? result.DetectedAnomalies.Max(a => a.Confidence) : 0;
                 result.ConfidenceScore = result.AnomalyScore;
 
-                // 액션 결정
                 if (result.AnomalyScore >= 0.8)
                 {
                     result.BlockAccess = true;
@@ -645,13 +592,9 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 var result = new IpReputationResult
                 {
-                    IpAddress = ipAddress,
-                    CheckedAt = DateTime.UtcNow,
-                    ReputationScore = 1.0, // 기본값: 신뢰
-                    Categories = new List<string>()
+                    IpAddress = ipAddress, CheckedAt = DateTime.UtcNow, ReputationScore = 1.0, Categories = new List<string>()
                 };
 
-                // 내부 IP는 항상 신뢰
                 if (IsInternalIp(ipAddress))
                 {
                     result.IsTrusted = true;
@@ -659,10 +602,7 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult<IpReputationResult>.Success(result);
                 }
 
-                // 최근 실패 이력 확인
-                var recentFailures = await _attemptRepository.GetFailedAttemptsFromIpAsync(
-                    ipAddress, DateTime.UtcNow.AddHours(-1));
-
+                var recentFailures = await _attemptRepository.GetFailedAttemptsFromIpAsync(ipAddress, DateTime.UtcNow.AddHours(-1));
                 if (recentFailures.Count() > 10)
                 {
                     result.ReputationScore = 0.3;
@@ -676,10 +616,7 @@ namespace AuthHive.Auth.Services.Authentication
                     result.Categories.Add("Questionable");
                 }
 
-                // 무차별 대입 공격 감지
-                var bruteForceDetected = await _attemptService.DetectBruteForceAttackAsync(
-                    "check", ipAddress);
-
+                var bruteForceDetected = await _attemptService.DetectBruteForceAttackAsync("check", ipAddress);
                 if (bruteForceDetected.IsSuccess && bruteForceDetected.Data)
                 {
                     result.ReputationScore = Math.Min(result.ReputationScore, 0.2);
@@ -707,12 +644,8 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 log.Id = Guid.NewGuid();
                 log.CreatedAt = DateTime.UtcNow;
-
                 await _auditRepository.AddAsync(log);
-
-                _logger.LogInformation("Audit log created: {Action} for {ResourceType}:{ResourceId}",
-                    log.Action, log.ResourceType, log.ResourceId);
-
+                _logger.LogInformation("Audit log created: {Action} for {ResourceType}:{ResourceId}", log.Action, log.ResourceType, log.ResourceId);
                 return ServiceResult.Success();
             }
             catch (Exception ex)
@@ -730,13 +663,10 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                var startDate = from ?? DateTime.UtcNow.AddDays(-30);
-                var endDate = to ?? DateTime.UtcNow;
-
-                var logs = await _auditRepository.GetAuditLogsAsync(
-                    userId, organizationId, startDate, endDate);
-
-                return ServiceResult<IEnumerable<AuditLog>>.Success(logs);
+                var pagedResult = await _auditRepository.SearchAsync(
+                    organizationId: organizationId, userId: userId, action: null, connectedId: null, applicationId: null,
+                    startDate: from ?? DateTime.UtcNow.AddDays(-30), endDate: to ?? DateTime.UtcNow, pageNumber: 1, pageSize: 1000);
+                return ServiceResult<IEnumerable<AuditLog>>.Success(pagedResult.Items);
             }
             catch (Exception ex)
             {
@@ -754,48 +684,31 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 var report = new ComplianceReport
                 {
-                    ReportId = Guid.NewGuid(),
-                    Type = ComplianceReportType.Custom,
-                    OrganizationId = organizationId,
-                    PeriodStart = from,
-                    PeriodEnd = to,
-                    GeneratedAt = DateTime.UtcNow,
-                    Data = new Dictionary<string, object>(),
+                    ReportId = Guid.NewGuid(), Type = ComplianceReportType.Custom, OrganizationId = organizationId, PeriodStart = from,
+                    PeriodEnd = to, GeneratedAt = DateTime.UtcNow, Data = new Dictionary<string, object>(),
                     Violations = new List<ComplianceViolation>()
                 };
 
-                // 인증 통계 수집
                 var authStats = await GetStatisticsAsync(organizationId, from, to);
                 if (authStats.IsSuccess && authStats.Data != null)
                 {
                     report.Data["AuthenticationSummary"] = new
                     {
-                        TotalAttempts = authStats.Data.TotalAttempts,
-                        SuccessRate = authStats.Data.SuccessRate,
-                        UniqueUsers = authStats.Data.UniqueUsers,
-                        FailedAttempts = authStats.Data.FailedAttempts
+                        authStats.Data.TotalAttempts, authStats.Data.SuccessRate, authStats.Data.UniqueUsers, authStats.Data.FailedAttempts
                     };
                 }
 
-                // 의심스러운 활동 확인
                 var suspiciousActivities = await GetSuspiciousActivitiesAsync(organizationId, from);
                 if (suspiciousActivities.IsSuccess && suspiciousActivities.Data != null)
                 {
                     var activities = suspiciousActivities.Data.ToList();
-
-                    // 통계 데이터 저장
                     report.Data["SecurityEvents"] = new
                     {
                         TotalSuspiciousActivities = activities.Count,
                         UniqueUsersWithSuspiciousActivity = activities.Select(a => a.UserId).Distinct().Count(),
                         TotalSuspiciousAttempts = activities.Sum(a => a.Count),
-                        MostFrequentPattern = activities
-                            .GroupBy(a => a.Pattern)
-                            .OrderByDescending(g => g.Count())
-                            .FirstOrDefault()?.Key ?? "None"
+                        MostFrequentPattern = activities.GroupBy(a => a.Pattern).OrderByDescending(g => g.Count()).FirstOrDefault()?.Key ?? "None"
                     };
-
-                    // 심각한 의심 활동을 위반으로 기록
                     foreach (var activity in activities.Where(a => a.Count > 10))
                     {
                         report.Violations.Add(new ComplianceViolation
@@ -803,66 +716,46 @@ namespace AuthHive.Auth.Services.Authentication
                             Rule = $"Security.SuspiciousActivity.{activity.Type}",
                             Description = $"Suspicious activity detected: {activity.Count} occurrences from {activity.IpAddress} between {activity.FirstOccurrence:g} and {activity.LastOccurrence:g}. Pattern: {activity.Pattern}",
                             Severity = activity.Count > 20 ? AuditEventSeverity.Critical : AuditEventSeverity.Warning,
-                            OccurredAt = activity.LastOccurrence,
-                            ResourceType = "User",
-                            ResourceId = activity.UserId?.ToString(),
+                            OccurredAt = activity.LastOccurrence, ResourceType = "User", ResourceId = activity.UserId?.ToString(),
                             ConnectedId = null
                         });
                     }
                 }
 
-                // 계정 잠금 이벤트 확인
-                var lockEvents = await _auditRepository.GetAuditLogsAsync(
-                    null, organizationId, from, to);
-                var accountLocks = lockEvents.Where(l => l.Action == "account.lock").ToList();
-
-                report.Data["AccountSecurity"] = new
-                {
-                    AccountLocks = accountLocks.Count,
-                    AverageUnlockTime = CalculateAverageUnlockTime(accountLocks)
-                };
-
-                // 과도한 계정 잠금을 위반으로 기록
-                if (accountLocks.Count > 10) // 임계값 설정
+                var lockEventsResult = await _auditRepository.SearchAsync(
+                    organizationId: organizationId, userId: null, action: "account.lock", connectedId: null, applicationId: null,
+                    startDate: from, endDate: to, pageNumber: 1, pageSize: 1000);
+                
+                var accountLocks = lockEventsResult.Items.ToList();
+                report.Data["AccountSecurity"] = new { AccountLocks = accountLocks.Count, AverageUnlockTime = CalculateAverageUnlockTime(accountLocks) };
+                if (accountLocks.Count > 10)
                 {
                     report.Violations.Add(new ComplianceViolation
                     {
-                        Rule = "Security.ExcessiveAccountLocks",
-                        Description = $"Excessive account locks detected: {accountLocks.Count} locks in period",
-                        Severity = AuditEventSeverity.Info,
-                        OccurredAt = DateTime.UtcNow,
-                        ResourceType = "Organization",
-                        ResourceId = organizationId.ToString()
+                        Rule = "Security.ExcessiveAccountLocks", Description = $"Excessive account locks detected: {accountLocks.Count} locks in period",
+                        Severity = AuditEventSeverity.Info, OccurredAt = DateTime.UtcNow, ResourceType = "Organization", ResourceId = organizationId.ToString()
                     });
                 }
-
-                // 실패율이 높은 경우 위반 추가
+                
                 if (authStats.IsSuccess && authStats.Data != null)
                 {
                     var failureRate = 1.0 - authStats.Data.SuccessRate;
-                    if (failureRate > 0.3) // 30% 이상 실패율
+                    if (failureRate > 0.3)
                     {
                         report.Violations.Add(new ComplianceViolation
                         {
-                            Rule = "Authentication.HighFailureRate",
-                            Description = $"High authentication failure rate: {failureRate:P}",
-                            Severity = AuditEventSeverity.Warning,
-                            OccurredAt = DateTime.UtcNow,
-                            ResourceType = "Organization",
-                            ResourceId = organizationId.ToString()
+                            Rule = "Authentication.HighFailureRate", Description = $"High authentication failure rate: {failureRate:P}",
+                            Severity = AuditEventSeverity.Warning, OccurredAt = DateTime.UtcNow, ResourceType = "Organization", ResourceId = organizationId.ToString()
                         });
                     }
                 }
 
-                // 보고서 URL 생성 (선택적)
                 report.ReportUrl = $"/api/reports/compliance/{report.ReportId}";
-
                 return ServiceResult<ComplianceReport>.Success(report);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error generating compliance report for organization {OrganizationId}",
-                    organizationId);
+                _logger.LogError(ex, "Error generating compliance report for organization {OrganizationId}", organizationId);
                 return ServiceResult<ComplianceReport>.Failure("Failed to generate compliance report");
             }
         }
@@ -878,22 +771,18 @@ namespace AuthHive.Auth.Services.Authentication
             try
             {
                 int totalCleaned = 0;
-
                 if (archiveBeforeDelete)
                 {
-                    // 아카이브
-                    var archiveLocation = _configuration["Storage:ArchiveLocation"] ?? "archive";
-                    var archived = await _attemptRepository.ArchiveSuccessfulLogsAsync(
-                        olderThan, archiveLocation);
-
-                    _logger.LogInformation("Archived {Count} authentication logs", archived);
+                    // ✨ [오류 수정] CS7036 해결: IAuthenticationAttemptLogRepository.MarkAsArchivedAsync는 (DateTime, DateTime)을 요구합니다.
+                    // 'olderThan' 이전의 모든 기록을 의미하도록 시작 시간을 DateTime.MinValue로 지정하여 호출합니다.
+                    // 또한, 원래 코드의 ArchiveSuccessfulLogsAsync는 존재하지 않으므로 MarkAsArchivedAsync로 대체하고 반환값을 받습니다.
+                    var archivedCount = await _attemptRepository.MarkAsArchivedAsync(DateTime.MinValue, olderThan);
+                    _logger.LogInformation("Marked {Count} authentication logs as archived.", archivedCount);
                 }
 
-                // 오래된 로그 삭제
                 var deleted = await _attemptRepository.CleanupOldLogsAsync(olderThan);
                 totalCleaned += deleted;
 
-                // 감사 로그도 정리
                 var auditDeleted = await _auditRepository.CleanupOldLogsAsync(olderThan);
                 totalCleaned += auditDeleted;
 
@@ -908,54 +797,52 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         public async Task<ServiceResult> ArchiveHistoryAsync(
-    DateTime from,
-    DateTime to,
-    string archiveLocation)
+            DateTime from,
+            DateTime to,
+            string archiveLocation)
         {
             try
             {
                 _logger.LogInformation("Starting history archiving from {From} to {To}...", from, to);
-
-                // --- 인증 로그 아카이브 (배치 처리) ---
-                const int batchSize = 300; // 한 번에 처리할 로그 수
+                const int batchSize = 300;
+                
                 bool hasMoreAuthLogs = true;
-                // long lastId = 0; // 페이징 대신 ID 기반 커서 사용으로 성능 향상
-
+                int authPage = 1;
                 while (hasMoreAuthLogs)
                 {
-                    // ID 기반으로 다음 배치 조회
-                    var authLogsBatch = await _attemptRepository.Query()
-                        .Where(log => log.AttemptedAt >= from && log.AttemptedAt <= to)
-                        .OrderBy(log => log.Id) // ID 순으로 정렬해야 함
-                                                //.Where(log => log.Id > lastId) // DB가 GUID를 순차적으로 생성한다면 이 방법이 더 효율적
-                        .Take(batchSize)
-                        .ToListAsync();
-
+                    var pagedResult = await _attemptRepository.GetPagedAsync(authPage, batchSize, log => log.AttemptedAt >= from && log.AttemptedAt <= to);
+                    var authLogsBatch = pagedResult.Items;
                     if (authLogsBatch.Any())
                     {
                         await ArchiveToStorageAsync(authLogsBatch, archiveLocation, "auth_attempts");
-                        // lastId = authLogsBatch.Last().Id; // ID 기반 커서 사용 시
+                        await _attemptRepository.MarkAsArchivedAsync(from, to); // 이 부분도 범위를 사용해야 합니다.
+                        authPage++;
                     }
                     else
                     {
                         hasMoreAuthLogs = false;
                     }
-
-                    // 더 이상 처리할 로그가 없으면 루프 종료
-                    if (authLogsBatch.Count < batchSize) hasMoreAuthLogs = false;
                 }
 
-                // --- 감사 로그 아카이브 (이것도 배치 처리하는 것이 좋음) ---
-                var auditLogs = await _auditRepository.GetAuditLogsAsync(null, null, from, to);
-                await ArchiveToStorageAsync(auditLogs, archiveLocation, "audit_logs");
+                bool hasMoreAuditLogs = true;
+                int auditPage = 1;
+                while(hasMoreAuditLogs)
+                {
+                     var auditPagedResult = await _auditRepository.SearchAsync(null, null, null, null, null, from, to, auditPage, batchSize);
+                     var auditLogsBatch = auditPagedResult.Items;
+                     if(auditLogsBatch.Any())
+                     {
+                         await ArchiveToStorageAsync(auditLogsBatch, archiveLocation, "audit_logs");
+                         await _auditRepository.MarkAsArchivedAsync(auditLogsBatch.Select(l => l.Id), archiveLocation);
+                         auditPage++;
+                     }
+                     else
+                     {
+                         hasMoreAuditLogs = false;
+                     }
+                }
 
-                // 아카이브된 레코드에 '아카이브됨' 표시
-                await _attemptRepository.MarkAsArchivedAsync(from, to);
-                await _auditRepository.MarkAsArchivedAsync(from, to);
-
-                _logger.LogInformation("Successfully archived history from {From} to {To} to {Location}",
-                    from, to, archiveLocation);
-
+                _logger.LogInformation("Successfully archived history from {From} to {To} to {Location}", from, to, archiveLocation);
                 return ServiceResult.Success();
             }
             catch (Exception ex)
@@ -968,31 +855,20 @@ namespace AuthHive.Auth.Services.Authentication
         #endregion
 
         #region Private Helper Methods
-
+        
         private async Task CreateAuditLogForAttemptAsync(AuthenticationAttemptLog attempt)
         {
             var auditLog = new AuditLog
             {
-                Id = Guid.NewGuid(),
-                PerformedByConnectedId = attempt.ConnectedId,
-                ApplicationId = attempt.ApplicationId,
-                ActionType = AuditActionType.Login,
-                Action = attempt.IsSuccess ? "auth.success" : "auth.failure",
-                ResourceType = "User",
-                ResourceId = attempt.UserId?.ToString(),
-                IPAddress = attempt.IpAddress,
-                UserAgent = attempt.UserAgent,
-                Success = attempt.IsSuccess,
-                ErrorCode = attempt.ErrorCode,
-                ErrorMessage = attempt.FailureMessage,
-                Timestamp = attempt.AttemptedAt,
-                Severity = attempt.IsSuccess ? AuditEventSeverity.Info : AuditEventSeverity.Warning,
-                Metadata = $"{{\"method\":\"{attempt.Method}\"}}"
+                Id = Guid.NewGuid(), PerformedByConnectedId = attempt.ConnectedId, ApplicationId = attempt.ApplicationId, ActionType = AuditActionType.Login,
+                Action = attempt.IsSuccess ? "auth.success" : "auth.failure", ResourceType = "User", ResourceId = attempt.UserId?.ToString(),
+                IPAddress = attempt.IpAddress, UserAgent = attempt.UserAgent, Success = attempt.IsSuccess, ErrorCode = attempt.ErrorCode,
+                ErrorMessage = attempt.FailureMessage, Timestamp = attempt.AttemptedAt,
+                Severity = attempt.IsSuccess ? AuditEventSeverity.Info : AuditEventSeverity.Warning, Metadata = $"{{\"method\":\"{attempt.Method}\"}}"
             };
-
             await _auditRepository.AddAsync(auditLog);
         }
-
+        
         private string DetermineSuspiciousType(AuthenticationAttemptLog attempt)
         {
             if (attempt.ConsecutiveFailures > 5) return "BruteForce";
@@ -1000,194 +876,68 @@ namespace AuthHive.Auth.Services.Authentication
             if (attempt.IsSuspicious) return "Suspicious";
             return "Unknown";
         }
-
+        
         private string GenerateSuspiciousDescription(AuthenticationAttemptLog attempt)
         {
             var descriptions = new List<string>();
-
-            if (attempt.ConsecutiveFailures > 5)
-                descriptions.Add($"{attempt.ConsecutiveFailures} consecutive failures");
-
-            if (attempt.RiskScore > 80)
-                descriptions.Add($"High risk score: {attempt.RiskScore}");
-
-            if (attempt.IsSuspicious)
-                descriptions.Add("Flagged as suspicious");
-
+            if (attempt.ConsecutiveFailures > 5) descriptions.Add($"{attempt.ConsecutiveFailures} consecutive failures");
+            if (attempt.RiskScore > 80) descriptions.Add($"High risk score: {attempt.RiskScore}");
+            if (attempt.IsSuspicious) descriptions.Add("Flagged as suspicious");
             return string.Join(", ", descriptions);
         }
-
-        private List<TimePattern> AnalyzeTimePatterns(IEnumerable<AuthenticationAttemptLog> attempts)
-        {
-            return attempts
-                .Where(a => a.IsSuccess)
-                .GroupBy(a => new
-                {
-                    DayOfWeek = a.AttemptedAt.DayOfWeek.ToString(),
-                    Hour = a.AttemptedAt.Hour
-                })
-                .Select(g => new TimePattern
-                {
-                    DayOfWeek = g.Key.DayOfWeek,
-                    Hour = g.Key.Hour,
-                    Frequency = g.Count()
-                })
-                .OrderByDescending(p => p.Frequency)
-                .Take(10)
-                .ToList();
-        }
-
-        private List<LocationPattern> AnalyzeLocationPatterns(IEnumerable<AuthenticationAttemptLog> attempts)
-        {
-            return attempts
-                .Where(a => !string.IsNullOrEmpty(a.Location))
-                .GroupBy(a => a.Location)
-                .Select(g => new LocationPattern
-                {
-                    Country = ExtractCountry(g.Key ?? ""),
-                    City = ExtractCity(g.Key ?? ""),
-                    Frequency = g.Count()
-                })
-                .OrderByDescending(p => p.Frequency)
-                .Take(10)
-                .ToList();
-        }
-
-        private List<DevicePattern> AnalyzeDevicePatterns(IEnumerable<AuthenticationAttemptLog> attempts)
-        {
-            return attempts
-                .Where(a => !string.IsNullOrEmpty(a.DeviceType))
-                .GroupBy(a => new { a.DeviceType, Browser = ExtractBrowser(a.UserAgent) })
-                .Select(g => new DevicePattern
-                {
-                    DeviceType = g.Key.DeviceType ?? "Unknown",
-                    Browser = g.Key.Browser,
-                    Frequency = g.Count()
-                })
-                .OrderByDescending(p => p.Frequency)
-                .Take(10)
-                .ToList();
-        }
-
+        
+        private List<TimePattern> AnalyzeTimePatterns(IEnumerable<AuthenticationAttemptLog> attempts) => attempts.Where(a => a.IsSuccess).GroupBy(a => new { DayOfWeek = a.AttemptedAt.DayOfWeek.ToString(), Hour = a.AttemptedAt.Hour }).Select(g => new TimePattern { DayOfWeek = g.Key.DayOfWeek, Hour = g.Key.Hour, Frequency = g.Count() }).OrderByDescending(p => p.Frequency).Take(10).ToList();
+        private List<LocationPattern> AnalyzeLocationPatterns(IEnumerable<AuthenticationAttemptLog> attempts) => attempts.Where(a => !string.IsNullOrEmpty(a.Location)).GroupBy(a => a.Location).Select(g => new LocationPattern { Country = ExtractCountry(g.Key ?? ""), City = ExtractCity(g.Key ?? ""), Frequency = g.Count() }).OrderByDescending(p => p.Frequency).Take(10).ToList();
+        private List<DevicePattern> AnalyzeDevicePatterns(IEnumerable<AuthenticationAttemptLog> attempts) => attempts.Where(a => !string.IsNullOrEmpty(a.DeviceType)).GroupBy(a => new { a.DeviceType, Browser = ExtractBrowser(a.UserAgent) }).Select(g => new DevicePattern { DeviceType = g.Key.DeviceType ?? "Unknown", Browser = g.Key.Browser, Frequency = g.Count() }).OrderByDescending(p => p.Frequency).Take(10).ToList();
+        
         private int CalculateUserRiskScore(IEnumerable<AuthenticationAttemptLog> attempts)
         {
-            var score = 0;
+            int score = 0;
             var recentAttempts = attempts.Where(a => a.AttemptedAt > DateTime.UtcNow.AddDays(-7));
-
-            // 실패율
-            var failureRate = recentAttempts.Any()
-                ? recentAttempts.Count(a => !a.IsSuccess) / (double)recentAttempts.Count()
-                : 0;
+            double failureRate = recentAttempts.Any() ? recentAttempts.Count(a => !a.IsSuccess) / (double)recentAttempts.Count() : 0;
             score += (int)(failureRate * 30);
-
-            // 의심스러운 활동
-            var suspiciousCount = recentAttempts.Count(a => a.IsSuspicious);
-            score += suspiciousCount * 10;
-
-            // 계정 잠금 트리거
-            var lockTriggers = recentAttempts.Count(a => a.TriggeredAccountLock);
-            score += lockTriggers * 20;
-
+            score += recentAttempts.Count(a => a.IsSuspicious) * 10;
+            score += recentAttempts.Count(a => a.TriggeredAccountLock) * 20;
             return Math.Min(score, 100);
         }
-
-        private List<string> IdentifySuspiciousIPs(IEnumerable<AuthenticationAttemptLog> failures)
-        {
-            return failures
-                .GroupBy(f => f.IpAddress)
-                .Where(g => g.Count() > 10)
-                .Select(g => g.Key)
-                .ToList();
-        }
-
-        private int CountBruteForceAttempts(IEnumerable<AuthenticationAttemptLog> failures)
-        {
-            return failures
-                .GroupBy(f => new { f.Username, f.IpAddress })
-                .Count(g => g.Count() > 5);
-        }
-
+        
+        private List<string> IdentifySuspiciousIPs(IEnumerable<AuthenticationAttemptLog> failures) => failures.GroupBy(f => f.IpAddress).Where(g => g.Count() > 10).Select(g => g.Key).ToList();
+        private int CountBruteForceAttempts(IEnumerable<AuthenticationAttemptLog> failures) => failures.GroupBy(f => new { f.Username, f.IpAddress }).Count(g => g.Count() > 5);
+        
         private async Task<ServiceResult<RiskAssessment>> AssessUserRiskAsync(string username)
         {
-            var assessment = new RiskAssessment
-            {
-                AssessmentId = Guid.NewGuid(),
-                AssessedAt = DateTime.UtcNow,
-                RiskFactors = new List<RiskFactor>()
-            };
-
-            var recentFailures = await _attemptRepository.GetFailedAttemptsForUsernameAsync(
-                username, DateTime.UtcNow.AddHours(-1));
-
+            var assessment = new RiskAssessment { AssessmentId = Guid.NewGuid(), AssessedAt = DateTime.UtcNow, RiskFactors = new List<RiskFactor>() };
+            var recentFailures = await _attemptRepository.GetFailedAttemptsForUsernameAsync(username, DateTime.UtcNow.AddHours(-1));
             if (recentFailures.Count() > 3)
             {
-                assessment.RiskFactors.Add(new RiskFactor
-                {
-                    Name = "MultipleFailures",                                    // FactorType → Name
-                    Description = $"{recentFailures.Count()} failed attempts in last hour",
-                    Weight = 0.4,
-                    Impact = 80,                                                  // Severity "High" → Impact 80
-                    Category = "Authentication"                                   // 카테고리 추가
-                });
+                assessment.RiskFactors.Add(new RiskFactor { Name = "MultipleFailures", Description = $"{recentFailures.Count()} failed attempts in last hour", Weight = 0.4, Impact = 80, Category = "Authentication" });
             }
-
-            // RiskScore 계산도 수정 (Weight 대신 WeightedScore 사용)
             assessment.RiskScore = Math.Min(assessment.RiskFactors.Sum(f => f.WeightedScore) / 100, 1.0);
             return ServiceResult<RiskAssessment>.Success(assessment);
         }
-
-        private bool IsInternalIp(string ipAddress)
-        {
-            return ipAddress.StartsWith("192.168.") ||
-                   ipAddress.StartsWith("10.") ||
-                   ipAddress.StartsWith("172.") ||
-                   ipAddress == "127.0.0.1" ||
-                   ipAddress == "::1";
-        }
-
-        private string ExtractCountry(string location)
-        {
-            var parts = location.Split(',');
-            return parts.Length > 1 ? parts[^1].Trim() : "Unknown";
-        }
-
-        private string ExtractCity(string location)
-        {
-            var parts = location.Split(',');
-            return parts.Length > 0 ? parts[0].Trim() : "Unknown";
-        }
-
+        
+        private bool IsInternalIp(string ipAddress) => ipAddress.StartsWith("192.168.") || ipAddress.StartsWith("10.") || ipAddress.StartsWith("172.") || ipAddress == "127.0.0.1" || ipAddress == "::1";
+        private string ExtractCountry(string location) => location.Split(',').Length > 1 ? location.Split(',')[^1].Trim() : "Unknown";
+        private string ExtractCity(string location) => location.Split(',').Length > 0 ? location.Split(',')[0].Trim() : "Unknown";
         private string ExtractBrowser(string? userAgent)
         {
             if (string.IsNullOrEmpty(userAgent)) return "Unknown";
-
             if (userAgent.Contains("Chrome")) return "Chrome";
             if (userAgent.Contains("Firefox")) return "Firefox";
             if (userAgent.Contains("Safari")) return "Safari";
             if (userAgent.Contains("Edge")) return "Edge";
-
             return "Other";
         }
-
-        private double CalculateAverageUnlockTime(List<AuditLog> lockEvents)
-        {
-            return 30.0; // 기본값: 30분
-        }
-
-        private async Task ArchiveToStorageAsync<T>(
-            IEnumerable<T> data,
-            string location,
-            string prefix)
+        
+        private double CalculateAverageUnlockTime(List<AuditLog> lockEvents) => 30.0;
+        
+        private async Task ArchiveToStorageAsync<T>(IEnumerable<T> data, string location, string prefix)
         {
             await Task.CompletedTask;
-            _logger.LogInformation("Archived {Count} {Type} records to {Location}",
-                data.Count(), prefix, location);
+            _logger.LogInformation("Archived {Count} {Type} records to {Location}", data.Count(), prefix, location);
         }
-
-        public Task<IEnumerable<AuthenticationAttemptLog>> GetSuspiciousAttemptsAsync(Guid? organizationId, DateTime startDate, DateTime endDate)
-        {
-            throw new NotImplementedException();
-        }
+        
+        public Task<IEnumerable<AuthenticationAttemptLog>> GetSuspiciousAttemptsAsync(Guid? organizationId, DateTime startDate, DateTime endDate) => throw new NotImplementedException();
 
         #endregion
     }

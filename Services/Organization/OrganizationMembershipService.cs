@@ -109,9 +109,9 @@ namespace AuthHive.Auth.Services.Organization
 
                 var existingInvite = await _context.OrganizationMemberships
                     .FirstOrDefaultAsync(m => m.OrganizationId == organizationId &&
-                                              m.InvitationEmail == email &&
-                                              m.Status == OrganizationMembershipStatus.Invited &&
-                                              !m.IsDeleted);
+                                                m.InvitationEmail == email &&
+                                                m.Status == OrganizationMembershipStatus.Invited &&
+                                                !m.IsDeleted);
 
                 if (existingInvite != null)
                 {
@@ -120,8 +120,7 @@ namespace AuthHive.Auth.Services.Organization
                     existingInvite.UpdatedAt = DateTime.UtcNow;
                     existingInvite.UpdatedByConnectedId = invitedByConnectedId;
 
-                    await _context.SaveChangesAsync();
-
+                    await _unitOfWork.SaveChangesAsync();
                     var updatedDto = _mapper.Map<OrganizationMembershipDto>(existingInvite);
                     return ServiceResult<OrganizationMembershipDto>.Success(updatedDto, "Invitation has been resent");
                 }
@@ -142,6 +141,7 @@ namespace AuthHive.Auth.Services.Organization
                 Guid targetConnectedId;
                 if (existingConnected == null)
                 {
+                    // ✨ 참고: 신규 유저 생성 로직은 Auth Service의 역할일 수 있으나, 현재 컨텍스트를 유지합니다.
                     var newUser = new User
                     {
                         Email = email,
@@ -154,12 +154,13 @@ namespace AuthHive.Auth.Services.Organization
                     var newConnected = new ConnectedId
                     {
                         UserId = newUser.Id,
+                        User = newUser,
                         Status = ConnectedIdStatus.Pending,
                         Provider = "Local",
                         CreatedByConnectedId = invitedByConnectedId
                     };
                     _context.ConnectedIds.Add(newConnected);
-                    await _context.SaveChangesAsync();
+                    await _unitOfWork.SaveChangesAsync(); // 관련된 모든 변경사항을 한번에 저장
                     targetConnectedId = newConnected.Id;
                 }
                 else
@@ -172,7 +173,9 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     OrganizationId = organizationId,
                     ConnectedId = targetConnectedId,
-                    MemberRole = role.ToString(),
+                    // ✨ 1. [오류 수정] CS0029: 'string'을 'OrganizationMemberRole'으로 변환할 수 없음
+                    // role.ToString() 대신 Enum 값을 직접 할당합니다.
+                    MemberRole = role,
                     Status = OrganizationMembershipStatus.Invited,
                     MembershipType = OrganizationMembershipType.Direct,
                     InvitationToken = invitationToken,
@@ -185,7 +188,7 @@ namespace AuthHive.Auth.Services.Organization
                 };
 
                 var created = await _membershipRepository.AddAsync(membership);
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(); // IUnitOfWork를 통한 단일 트랜잭션 보장
 
                 InvalidateOrganizationMembersCache(organizationId);
 
@@ -277,8 +280,9 @@ namespace AuthHive.Auth.Services.Organization
 
                 if (role.HasValue)
                 {
-                    string roleString = role.Value.ToString();
-                    query = query.Where(m => m.MemberRole == roleString);
+                    // ✨ 2. [오류 수정] CS0019: '==' 연산자를 'OrganizationMemberRole' 및 'string'에 적용할 수 없음
+                    // role.Value.ToString()을 사용하지 않고 Enum 값을 직접 비교합니다.
+                    query = query.Where(m => m.MemberRole == role.Value);
                 }
 
                 var totalCount = await query.CountAsync();
@@ -316,8 +320,8 @@ namespace AuthHive.Auth.Services.Organization
                 var membership = await _context.OrganizationMemberships
                     .Include(m => m.Member)
                     .FirstOrDefaultAsync(m => m.OrganizationId == organizationId &&
-                                              m.ConnectedId == connectedId &&
-                                              !m.IsDeleted);
+                                                m.ConnectedId == connectedId &&
+                                                !m.IsDeleted);
 
                 if (membership == null)
                 {
@@ -326,7 +330,7 @@ namespace AuthHive.Auth.Services.Organization
 
                 var profile = await _context.OrganizationMemberProfiles
                     .FirstOrDefaultAsync(p => p.OrganizationId == organizationId &&
-                                              p.ConnectedId == connectedId);
+                                                p.ConnectedId == connectedId);
 
                 var dto = _mapper.Map<OrganizationMembershipDto>(membership);
 
@@ -376,12 +380,16 @@ namespace AuthHive.Auth.Services.Organization
                     return ServiceResult<bool>.Failure("Changer is not a member of the organization");
                 }
 
+                // ✨ 3. [오류 수정] CS1503: 'OrganizationMemberRole'을 'string'으로 변환할 수 없음
+                // CanChangeRole 헬퍼 메서드가 Enum 타입을 직접 받도록 수정되었으므로 .ToString() 없이 호출합니다.
                 if (!CanChangeRole(changerMembership.MemberRole, membership.MemberRole))
                 {
                     return ServiceResult<bool>.Failure("Insufficient permissions to change this member's role");
                 }
 
-                membership.MemberRole = newRole.ToString();
+                // ✨ 4. [오류 수정] CS0029: 'string'을 'OrganizationMemberRole'으로 변환할 수 없음
+                // newRole.ToString() 대신 Enum 값을 직접 할당합니다.
+                membership.MemberRole = newRole;
                 membership.UpdatedAt = DateTime.UtcNow;
                 membership.UpdatedByConnectedId = changedByConnectedId;
 
@@ -454,7 +462,7 @@ namespace AuthHive.Auth.Services.Organization
                     return ServiceResult<bool>.NotFound("Member not found");
                 }
 
-                membership.Status = OrganizationMembershipStatus.Suspended;
+                membership.Status = OrganizationMembershipStatus.Suspended; // 또는 Left, 정책에 따라 결정
                 membership.IsDeleted = true;
                 membership.DeletedAt = DateTime.UtcNow;
                 membership.DeletedByConnectedId = removedByConnectedId;
@@ -486,34 +494,8 @@ namespace AuthHive.Auth.Services.Organization
             OrganizationMembershipStatus newStatus,
             Guid updatedBy)
         {
-            try
-            {
-                var membership = await _membershipRepository.GetMembershipAsync(organizationId, connectedId);
-                if (membership == null)
-                {
-                    return false;
-                }
-
-                membership.Status = newStatus;
-                membership.UpdatedAt = DateTime.UtcNow;
-                membership.UpdatedByConnectedId = updatedBy;
-
-                await _membershipRepository.UpdateAsync(membership);
-                await _unitOfWork.SaveChangesAsync();
-
-                InvalidateMemberCache(organizationId, connectedId);
-
-                _logger.LogInformation(
-                    "Member status updated: OrganizationId: {OrganizationId}, ConnectedId: {ConnectedId}, NewStatus: {NewStatus}",
-                    organizationId, connectedId, newStatus);
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to update member status");
-                return false;
-            }
+            var result = await ChangeMemberStatusAsync(organizationId, connectedId, newStatus, "Status updated via simplified method.", updatedBy);
+            return result.IsSuccess && result.Data;
         }
         
         #endregion
@@ -617,12 +599,14 @@ namespace AuthHive.Auth.Services.Organization
                     return ServiceResult<MemberPermissionsDto>.NotFound("Member not found");
                 }
 
-                // TODO: 실제 권한 조회 로직 구현
+                // TODO: 실제 권한 조회 로직 구현 (Permission/RolePermission Repository 사용)
                 var permissions = new MemberPermissionsDto
                 {
                     OrganizationId = organizationId,
                     ConnectedId = connectedId,
-                    MemberRole = Enum.Parse<OrganizationMemberRole>(membership.MemberRole),
+                    // ✨ 5. [오류 수정] CS1503: 'string'을 'OrganizationMemberRole'으로 변환할 수 없음
+                    // Enum.Parse를 사용할 필요 없이 Enum 값을 직접 할당합니다.
+                    MemberRole = membership.MemberRole,
                     MembershipType = membership.MembershipType,
                     RolePermissions = new List<PermissionDto>(), // 실제 역할 권한 목록
                     AdditionalPermissions = new List<PermissionDto>(), // 추가 권한 목록
@@ -637,10 +621,12 @@ namespace AuthHive.Auth.Services.Organization
                         RestrictedPermissionCount = 0,
                         InheritedPermissionCount = 0,
                         KeyPermissions = new List<string>(),
-                        HasAdminPermissions = membership.MemberRole == OrganizationMemberRole.Admin.ToString() || 
-                                             membership.MemberRole == OrganizationMemberRole.Owner.ToString(),
-                        HasWritePermissions = membership.MemberRole != OrganizationMemberRole.Viewer.ToString() && 
-                                            membership.MemberRole != OrganizationMemberRole.Guest.ToString()
+                        // ✨ 6. [오류 수정] CS0019: '==' 및 '!=' 연산자를 'OrganizationMemberRole' 및 'string'에 적용할 수 없음
+                        // .ToString() 없이 Enum 값을 직접 비교합니다.
+                        HasAdminPermissions = membership.MemberRole == OrganizationMemberRole.Admin || 
+                                              membership.MemberRole == OrganizationMemberRole.Owner,
+                        HasWritePermissions = membership.MemberRole != OrganizationMemberRole.Viewer && 
+                                              membership.MemberRole != OrganizationMemberRole.Guest
                     }
                 };
 
@@ -665,15 +651,18 @@ namespace AuthHive.Auth.Services.Organization
                     return ServiceResult<bool>.NotFound("Member not found");
                 }
 
-                if (membership.MemberRole == OrganizationMemberRole.Owner.ToString())
+                // ✨ 7. [오류 수정] CS0019: '==' 연산자를 'OrganizationMemberRole' 및 'string'에 적용할 수 없음
+                // .ToString() 없이 Enum 값을 직접 비교합니다.
+                if (membership.MemberRole == OrganizationMemberRole.Owner)
                 {
-                    return ServiceResult<bool>.Failure("Owner cannot leave the organization");
+                    return ServiceResult<bool>.Failure("Owner cannot leave the organization. Transfer ownership first.");
                 }
 
                 membership.Status = OrganizationMembershipStatus.Left;
                 membership.IsDeleted = true;
                 membership.DeletedAt = DateTime.UtcNow;
                 membership.UpdatedAt = DateTime.UtcNow;
+                membership.UpdatedByConnectedId = connectedId; // 자기 자신이 떠나는 행위의 주체
 
                 await _membershipRepository.UpdateAsync(membership);
                 await _unitOfWork.SaveChangesAsync();
@@ -732,10 +721,15 @@ namespace AuthHive.Auth.Services.Organization
                 var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
                 var inactiveMembers = await _context.OrganizationMemberships
                     .Where(m => m.OrganizationId == organizationId &&
-                               m.Status == OrganizationMembershipStatus.Active &&
-                               m.LastActivityAt < cutoffDate &&
-                               !m.IsDeleted)
+                                m.Status == OrganizationMembershipStatus.Active &&
+                                (m.LastActivityAt == null || m.LastActivityAt < cutoffDate) &&
+                                !m.IsDeleted)
                     .ToListAsync();
+
+                if (!inactiveMembers.Any())
+                {
+                    return ServiceResult<int>.Success(0);
+                }
 
                 foreach (var member in inactiveMembers)
                 {
@@ -744,7 +738,7 @@ namespace AuthHive.Auth.Services.Organization
                     member.UpdatedByConnectedId = cleanedByConnectedId;
                 }
 
-                await _context.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync();
                 InvalidateOrganizationMembersCache(organizationId);
 
                 return ServiceResult<int>.Success(inactiveMembers.Count);
@@ -805,6 +799,21 @@ namespace AuthHive.Auth.Services.Organization
                 var allMembers = await _membershipRepository.GetMembersAsync(organizationId, true);
                 var activeMembers = allMembers.Where(m => m.Status == OrganizationMembershipStatus.Active).ToList();
                 
+                var thisMonthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1);
+                var lastMonthStart = thisMonthStart.AddMonths(-1);
+                
+                var lastMonthMemberCount = allMembers
+                    .Count(m => m.JoinedAt < thisMonthStart && m.JoinedAt >= lastMonthStart);
+                
+                var newMembersThisMonthCount = allMembers
+                    .Count(m => m.JoinedAt >= thisMonthStart);
+                
+                decimal growthRate = 0;
+                if (lastMonthMemberCount > 0)
+                {
+                    growthRate = ((decimal)newMembersThisMonthCount / lastMonthMemberCount) * 100;
+                }
+
                 var statistics = new OrganizationMemberStatistics
                 {
                     OrganizationId = organizationId,
@@ -814,29 +823,18 @@ namespace AuthHive.Auth.Services.Organization
                     InactiveMembers = allMembers.Count(m => m.Status == OrganizationMembershipStatus.Inactive),
                     SuspendedMembers = allMembers.Count(m => m.Status == OrganizationMembershipStatus.Suspended),
                     PendingInvitations = allMembers.Count(m => m.Status == OrganizationMembershipStatus.Invited),
+                    // ✨ 8. [오류 수정] CS0029: 'Dictionary<OrganizationMemberRole, int>'를 'Dictionary<string, int>'로 변환할 수 없음
+                    // DTO의 MembersByRole 속성 타입이 Dictionary<string, int>로 추정됩니다.
+                    // Enum 키를 string으로 변환하여 Dictionary를 생성합니다.
+                    MembersByRole = activeMembers
+                        .GroupBy(m => m.MemberRole)
+                        .ToDictionary(g => g.Key.ToString(), g => g.Count()),
+                    NewMembersThisMonth = newMembersThisMonthCount,
+                    MonthlyGrowthRate = growthRate,
                     GeneratedAt = DateTime.UtcNow,
-                    PeriodStart = DateTime.UtcNow.AddMonths(-1),
+                    PeriodStart = lastMonthStart,
                     PeriodEnd = DateTime.UtcNow
                 };
-
-                statistics.MembersByRole = allMembers
-                    .Where(m => m.Status == OrganizationMembershipStatus.Active)
-                    .GroupBy(m => m.MemberRole)
-                    .ToDictionary(g => g.Key, g => g.Count());
-
-                var thisMonthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1);
-                statistics.NewMembersThisMonth = allMembers
-                    .Count(m => m.JoinedAt >= thisMonthStart);
-
-                var lastMonthStart = thisMonthStart.AddMonths(-1);
-                var lastMonthMembers = allMembers
-                    .Count(m => m.JoinedAt < thisMonthStart && m.JoinedAt >= lastMonthStart);
-                
-                if (lastMonthMembers > 0)
-                {
-                    statistics.MonthlyGrowthRate = 
-                        ((decimal)statistics.NewMembersThisMonth / lastMonthMembers) * 100;
-                }
 
                 return ServiceResult<OrganizationMemberStatistics>.Success(statistics);
             }
@@ -856,19 +854,20 @@ namespace AuthHive.Auth.Services.Organization
             return Guid.NewGuid().ToString("N") + DateTime.UtcNow.Ticks.ToString("x");
         }
 
-        private bool CanChangeRole(string changerRole, string targetRole)
+        // ✨ 9. [오류 수정] 메서드 시그니처와 내부 로직을 string 대신 OrganizationMemberRole Enum을 사용하도록 변경
+        private bool CanChangeRole(OrganizationMemberRole changerRole, OrganizationMemberRole targetRole)
         {
-            if (changerRole == OrganizationMemberRole.Owner.ToString())
+            if (changerRole == OrganizationMemberRole.Owner)
                 return true;
 
-            if (changerRole == OrganizationMemberRole.Admin.ToString())
-                return targetRole != OrganizationMemberRole.Owner.ToString();
+            if (changerRole == OrganizationMemberRole.Admin)
+                return targetRole != OrganizationMemberRole.Owner;
 
-            if (changerRole == OrganizationMemberRole.Manager.ToString())
+            if (changerRole == OrganizationMemberRole.Manager)
             {
-                return targetRole == OrganizationMemberRole.Member.ToString() ||
-                       targetRole == OrganizationMemberRole.Viewer.ToString() ||
-                       targetRole == OrganizationMemberRole.Guest.ToString();
+                return targetRole == OrganizationMemberRole.Member ||
+                       targetRole == OrganizationMemberRole.Viewer ||
+                       targetRole == OrganizationMemberRole.Guest;
             }
 
             return false;

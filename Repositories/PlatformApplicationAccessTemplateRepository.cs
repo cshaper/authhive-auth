@@ -395,7 +395,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>템플릿 사용 횟수 조회</summary>
         public async Task<int> GetUsageCountAsync(Guid templateId)
         {
-            return await _context.UserApplicationAccesses
+            return await _context.UserPlatformApplicationAccess
                 .Where(a => a.AccessTemplateId == templateId && !a.IsDeleted)
                 .CountAsync();
         }
@@ -403,7 +403,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>템플릿을 사용하는 사용자 수</summary>
         public async Task<int> GetUserCountAsync(Guid templateId)
         {
-            return await _context.UserApplicationAccesses
+            return await _context.UserPlatformApplicationAccess
                 .Where(a => a.AccessTemplateId == templateId && !a.IsDeleted)
                 .Select(a => a.ConnectedId)
                 .Distinct()
@@ -415,7 +415,7 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId, int limit = 10)
         {
             // 사용 횟수를 먼저 집계
-            var usageCounts = await _context.UserApplicationAccesses
+            var usageCounts = await _context.UserPlatformApplicationAccess
                 .Where(a => !a.IsDeleted)
                 .GroupBy(a => a.AccessTemplateId)
                 .Where(g => g.Key.HasValue)  // null 값 필터링
@@ -437,7 +437,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>사용되지 않는 템플릿 조회</summary>
         public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetUnusedTemplatesAsync(Guid organizationId)
         {
-            var usedTemplateIds = await _context.UserApplicationAccesses
+            var usedTemplateIds = await _context.UserPlatformApplicationAccess
                 .Where(a => !a.IsDeleted)
                 .Select(a => a.AccessTemplateId)
                 .Distinct()
@@ -622,7 +622,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<Dictionary<ApplicationAccessLevel, (int TemplateCount, int UsageCount)>> GetTemplateStatisticsAsync(Guid organizationId)
         {
             // 템플릿별 사용 횟수 먼저 집계
-            var usageCounts = await _context.UserApplicationAccesses
+            var usageCounts = await _context.UserPlatformApplicationAccess
                 .Where(a => !a.IsDeleted && a.AccessTemplateId.HasValue)
                 .GroupBy(a => a.AccessTemplateId!.Value)
                 .Select(g => new { TemplateId = g.Key, Count = g.Count() })
