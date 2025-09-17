@@ -8,6 +8,7 @@ using Amazon.SimpleEmail.Model;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.UserExperience;
+using AuthHive.Core.Models.Base;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.External;
 using Microsoft.Extensions.Logging;

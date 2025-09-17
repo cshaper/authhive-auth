@@ -6,7 +6,8 @@ using System.Text;
 using AuthHive.Core.Interfaces.User.Repository; // IUserRepository 사용
 using AuthHive.Core.Interfaces.Base; // IUnitOfWork 사용
 using AuthHive.Core.Entities.User;
-using Microsoft.Extensions.Logging; // User 엔티티 사용
+using Microsoft.Extensions.Logging;
+using AuthHive.Core.Models.Infra.Security; // User 엔티티 사용
 
 namespace AuthHive.Auth.Providers
 {
@@ -48,10 +49,10 @@ namespace AuthHive.Auth.Providers
 
         #region Strength and Policy Validation
 
-        public Task<ServiceResult<PasswordStrength>> ValidatePasswordStrengthAsync(string password)
+        public Task<ServiceResult<PasswordStrengthResult>> ValidatePasswordStrengthAsync(string password)
         {
             var result = Zxcvbn.Core.EvaluatePassword(password);
-            var strength = new PasswordStrength
+            var strength = new PasswordStrengthResult
             {
                 Score = (result.Score + 1) * 25,
                 Suggestions = result.Feedback.Suggestions.ToList(),
@@ -63,7 +64,7 @@ namespace AuthHive.Auth.Providers
                 0 => "Weak", 1 => "Fair", 2 => "Good", _ => "Strong"
             };
 
-            return Task.FromResult(ServiceResult<PasswordStrength>.Success(strength));
+            return Task.FromResult(ServiceResult<PasswordStrengthResult>.Success(strength));
         }
 
         public Task<ServiceResult<bool>> ValidatePasswordPolicyAsync(string password, Guid? organizationId = null)

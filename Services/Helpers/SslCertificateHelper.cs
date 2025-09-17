@@ -8,6 +8,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Interfaces.Infra.Security;
 using AuthHive.Core.Models.Organization.Common;
+using AuthHive.Core.Models.Infra.Security;
 
 namespace AuthHive.Auth.Services.Helpers
 {

@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System;
 using System.Linq;
+using AuthHive.Core.Models.Auth.Permissions.Common;
 
 namespace AuthHive.Auth.Repositories
 {

@@ -16,6 +16,7 @@ using AuthHive.Core.Models.Auth.Permissions.Cache;
 using AuthHive.Core.Models.Auth.Permissions.Views;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using PermissionEntity = AuthHive.Core.Entities.Auth.Permission;
+using AuthHive.Core.Enums.Core;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -2132,7 +2133,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     Scope1 = scope1,
                     Scope2 = scope2,
-                    Type = ConflictType.DuplicateScope,
+                    Type = ScopeConflictType.Duplicate,
                     Description = "Duplicate scopes detected",
                     Severity = ConflictSeverity.Medium,
                     Resolution = "Remove one of the duplicate scopes"
@@ -2147,7 +2148,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     Scope1 = scope1,
                     Scope2 = scope2,
-                    Type = ConflictType.ResourceOverlap,
+                    Type = ScopeConflictType.Overlap,
                     Description = $"{scope1} contains {scope2}",
                     Severity = ConflictSeverity.Low,
                     Resolution = $"Consider removing {scope2} as it's covered by {scope1}"

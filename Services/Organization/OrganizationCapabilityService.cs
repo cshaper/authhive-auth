@@ -20,6 +20,7 @@ using System.ComponentModel.DataAnnotations;
 using OrganizationCapabilityEntity = AuthHive.Core.Entities.Organization.OrganizationCapability;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Entities.Organization;
+using AuthHive.Core.Models.Organization.Events;
 
 namespace AuthHive.Auth.Services.Organization
 {
@@ -143,7 +144,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get all capabilities for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to get all capabilities for organization {OrganizationId}",
                     organizationId);
                 return ServiceResult<OrganizationCapabilityAssignmentDetailResponse>.Failure(
                     "Failed to retrieve capabilities");
@@ -193,7 +194,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to check capability for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to check capability for organization {OrganizationId}",
                     organizationId);
                 return ServiceResult<bool>.Failure("Failed to check capability");
             }
@@ -220,7 +221,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get primary capability for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to get primary capability for organization {OrganizationId}",
                     organizationId);
                 return ServiceResult<OrganizationCapabilityEntity>.Failure(
                     "Failed to retrieve primary capability");
@@ -237,7 +238,7 @@ namespace AuthHive.Auth.Services.Organization
             Guid assignedByConnectedId)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
-            
+
             try
             {
                 var organization = await _organizationRepository.GetByIdAsync(organizationId);
@@ -297,7 +298,7 @@ namespace AuthHive.Auth.Services.Organization
                     {
                         OrganizationId = organizationId,
                         CapabilityAssignmentId = assignment.Id,
-                        Capability = capability,
+                        Capability = MapCodeToEnum(capability.Code),
                         Settings = request.Configuration,
                         IsActive = assignment.IsActive,
                         AssignedByConnectedId = assignedByConnectedId
@@ -314,7 +315,7 @@ namespace AuthHive.Auth.Services.Organization
                     ExpiresAt = assignment.ExpiresAt,
                     AssignmentReason = request.AssignmentReason,
                     Configuration = assignment.Settings,
-                    ApprovalStatus = capability.RequiresApproval ? 
+                    ApprovalStatus = capability.RequiresApproval ?
                         ApprovalStatus.Pending : ApprovalStatus.Approved,
                     CreatedAt = assignment.CreatedAt
                 };
@@ -324,7 +325,7 @@ namespace AuthHive.Auth.Services.Organization
             catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                _logger.LogError(ex, "Failed to assign capability to organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to assign capability to organization {OrganizationId}",
                     organizationId);
                 return ServiceResult<OrganizationCapabilityAssignmentResponse>.Failure(
                     "Failed to assign capability");
@@ -337,7 +338,7 @@ namespace AuthHive.Auth.Services.Organization
             Guid removedByConnectedId)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
-            
+
             try
             {
                 var assignment = await _context.OrganizationCapabilityAssignments
@@ -369,7 +370,9 @@ namespace AuthHive.Auth.Services.Organization
                     {
                         OrganizationId = organizationId,
                         CapabilityAssignmentId = assignment.Id,
-                        Capability = assignment.Capability,
+                        Capability = assignment.Capability != null
+            ? MapCodeToEnum(assignment.Capability.Code)
+            : (OrganizationCapabilityEnum?)null,
                         Reason = request.RemovalReason,
                         RemovedByConnectedId = removedByConnectedId
                     });
@@ -380,7 +383,7 @@ namespace AuthHive.Auth.Services.Organization
             catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                _logger.LogError(ex, "Failed to remove capability from organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to remove capability from organization {OrganizationId}",
                     organizationId);
                 return ServiceResult.Failure("Failed to remove capability");
             }
@@ -415,7 +418,7 @@ namespace AuthHive.Auth.Services.Organization
                 };
 
                 var assignResult = await AssignAsync(organizationId, assignRequest, assignedByConnectedId);
-                
+
                 if (assignResult.IsSuccess)
                 {
                     result.SuccessCount++;
@@ -436,7 +439,7 @@ namespace AuthHive.Auth.Services.Organization
                 await _eventHandler.HandleBulkCapabilitiesAssignedAsync(new BulkCapabilitiesAssignedEvent
                 {
                     OrganizationId = organizationId,
-                    Capabilities = capabilityEntities,
+                    Capabilities = capabilityEntities.Select(c => MapCodeToEnum(c.Code)).ToList(),
                     SuccessCount = result.SuccessCount,
                     FailureCount = result.FailureCount,
                     FailureReasons = result.Errors.Select(e => e.Reason).ToList(),
@@ -481,7 +484,9 @@ namespace AuthHive.Auth.Services.Organization
                     {
                         OrganizationId = assignment.OrganizationId,
                         CapabilityAssignmentId = assignment.Id,
-                        Capability = assignment.Capability,
+                        Capability = assignment.Capability != null
+            ? MapCodeToEnum(assignment.Capability.Code)
+            : (OrganizationCapabilityEnum?)null,
                         OldSettings = oldSettings,
                         NewSettings = request.Settings,
                         EffectiveFrom = request.EffectiveFrom,
@@ -538,7 +543,9 @@ namespace AuthHive.Auth.Services.Organization
                     {
                         OrganizationId = assignment.OrganizationId,
                         CapabilityAssignmentId = assignment.Id,
-                        Capability = assignment.Capability,
+                        Capability = assignment.Capability != null
+            ? MapCodeToEnum(assignment.Capability.Code)
+            : (OrganizationCapabilityEnum?)null,
                         OldIsActive = oldStatus,
                         NewIsActive = isActive,
                         ChangedByConnectedId = changedByConnectedId
@@ -583,7 +590,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get usage statistics for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to get usage statistics for organization {OrganizationId}",
                     organizationId);
                 return Task.FromResult(ServiceResult<CapabilityUsageStatistics>.Failure(
                     "Failed to retrieve usage statistics"));
@@ -602,7 +609,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get change history for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to get change history for organization {OrganizationId}",
                     organizationId);
                 return Task.FromResult(ServiceResult<IEnumerable<CapabilityChangeHistory>>.Failure(
                     "Failed to retrieve change history"));
@@ -652,7 +659,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to validate capability for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to validate capability for organization {OrganizationId}",
                     organizationId);
                 result.IsValid = false;
                 result.ValidationErrors.Add("Validation failed");
@@ -694,7 +701,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get capability limits for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to get capability limits for organization {OrganizationId}",
                     organizationId);
                 return ServiceResult<CapabilityLimitsDto>.Failure("Failed to retrieve capability limits");
             }
@@ -733,7 +740,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get inheritable capabilities for organization {OrganizationId}", 
+                _logger.LogError(ex, "Failed to get inheritable capabilities for organization {OrganizationId}",
                     organizationId);
                 return ServiceResult<IEnumerable<InheritableCapabilityDto>>.Failure(
                     "Failed to retrieve inheritable capabilities");
@@ -754,7 +761,9 @@ namespace AuthHive.Auth.Services.Organization
                     {
                         ParentOrganizationId = parentOrganizationId,
                         ChildOrganizationId = childOrganizationId,
-                        Capability = request.Capability,
+                        Capability = request.Capability != null
+            ? MapCodeToEnum(request.Capability.Code)
+            : (OrganizationCapabilityEnum?)null,
                         EnableInheritance = request.EnableInheritance,
                         AllowOverride = request.AllowOverride,
                         Reason = request.Reason,
@@ -766,7 +775,7 @@ namespace AuthHive.Auth.Services.Organization
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to set inheritance for organizations {Parent} -> {Child}", 
+                _logger.LogError(ex, "Failed to set inheritance for organizations {Parent} -> {Child}",
                     parentOrganizationId, childOrganizationId);
                 return ServiceResult.Failure("Failed to set inheritance");
             }

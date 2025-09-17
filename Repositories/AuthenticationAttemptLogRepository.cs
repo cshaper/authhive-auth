@@ -12,6 +12,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Models.Auth.Authentication.Common;
+using AuthHive.Core.Models.Auth.Security;
 
 namespace AuthHive.Auth.Repositories
 {
