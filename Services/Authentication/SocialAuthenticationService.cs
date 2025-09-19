@@ -9,6 +9,7 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Entities.User;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using System.Text.Json;
+using UserEntity = AuthHive.Core.Entities.User.User;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -62,7 +63,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (user == null)
                 {
-                    user = new User
+                    user = new UserEntity
                     {
                         Email = validationResult.email,
                         DisplayName = validationResult.name ?? validationResult.email,

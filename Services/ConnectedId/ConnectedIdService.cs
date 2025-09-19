@@ -1,14 +1,16 @@
-// using AuthHive.Core.Interfaces.Auth.Service;
-// using AuthHive.Core.Interfaces.Auth.Repository;
-// using AutoMapper; // AutoMapper 사용을 강력히 권장합니다.
-
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Models.Auth.ConnectedId.Requests;
 using AuthHive.Core.Models.Auth.ConnectedId.Responses;
 using AuthHive.Core.Models.Common;
 using AutoMapper;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 
 namespace AuthHive.Auth.Services
@@ -17,19 +19,24 @@ namespace AuthHive.Auth.Services
     {
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly ILogger<ConnectedIdService> _logger;
-        private readonly IMapper _mapper; // AutoMapper 주입
+        private readonly IMapper _mapper;
         private readonly AuthDbContext _context;
+        private readonly IDateTimeProvider _dateTimeProvider;
+
         public ConnectedIdService(
             IConnectedIdRepository connectedIdRepository,
             ILogger<ConnectedIdService> logger,
             IMapper mapper,
-            AuthDbContext context)
+            AuthDbContext context,
+            IDateTimeProvider dateTimeProvider)
         {
             _connectedIdRepository = connectedIdRepository;
             _logger = logger;
             _mapper = mapper;
-            _context = context; 
+            _context = context;
+            _dateTimeProvider = dateTimeProvider;
         }
+
         #region IService Implementation
 
         public async Task<bool> IsHealthyAsync()
@@ -53,87 +60,297 @@ namespace AuthHive.Auth.Services
         }
 
         #endregion
-        // --- CRUD 작업 ---
+
+        #region CRUD Operations
+
         public async Task<ServiceResult<ConnectedIdResponse>> CreateAsync(CreateConnectedIdRequest request)
         {
-            // ... 검증 및 생성 로직 ...
-            var existing = await _connectedIdRepository.GetByUserAndOrganizationAsync(request.UserId, request.OrganizationId);
-            if (existing != null) return ServiceResult<ConnectedIdResponse>.Failure("User is already a member.");
+            try
+            {
+                // 중복 확인
+                var existing = await _connectedIdRepository.GetByUserAndOrganizationAsync(
+                    request.UserId, 
+                    request.OrganizationId);
+                    
+                if (existing != null)
+                {
+                    return ServiceResult<ConnectedIdResponse>.Failure(
+                        "User is already a member of this organization.", 
+                        "ALREADY_MEMBER");
+                }
 
-            var newEntity = _mapper.Map<AuthHive.Core.Entities.Auth.ConnectedId>(request);
-            // ... 추가 로직 (상태 설정 등) ...
-
-            await _connectedIdRepository.AddAsync(newEntity);
-            var response = _mapper.Map<ConnectedIdResponse>(newEntity);
-            return ServiceResult<ConnectedIdResponse>.Success(response);
+                var newEntity = _mapper.Map<AuthHive.Core.Entities.Auth.ConnectedId>(request);
+                
+                // 기본값 설정
+                newEntity.Status = ConnectedIdStatus.Active;
+                newEntity.CreatedAt = _dateTimeProvider.UtcNow;
+                newEntity.JoinedAt = _dateTimeProvider.UtcNow;
+                // IsDefault 속성 제거 (엔티티에 없음)
+                
+                await _connectedIdRepository.AddAsync(newEntity);
+                
+                var response = _mapper.Map<ConnectedIdResponse>(newEntity);
+                return ServiceResult<ConnectedIdResponse>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating ConnectedId");
+                return ServiceResult<ConnectedIdResponse>.Failure(
+                    $"Failed to create ConnectedId: {ex.Message}", 
+                    "CREATE_ERROR");
+            }
         }
 
         public async Task<ServiceResult<ConnectedIdDetailResponse>> GetByIdAsync(Guid id)
         {
-            // GetWithRelatedDataAsync를 사용하여 관련 데이터 한번에 조회
-            var entity = await _connectedIdRepository.GetWithRelatedDataAsync(id, includeUser: true, includeOrganization: true);
-            if (entity == null) return ServiceResult<ConnectedIdDetailResponse>.Failure("ConnectedId not found.");
+            try
+            {
+                var entity = await _connectedIdRepository.GetWithRelatedDataAsync(
+                    id, 
+                    includeUser: true, 
+                    includeOrganization: true);
+                    
+                if (entity == null)
+                {
+                    return ServiceResult<ConnectedIdDetailResponse>.NotFound(
+                        "ConnectedId not found.");
+                }
 
-            var response = _mapper.Map<ConnectedIdDetailResponse>(entity);
-            return ServiceResult<ConnectedIdDetailResponse>.Success(response);
+                var response = _mapper.Map<ConnectedIdDetailResponse>(entity);
+                return ServiceResult<ConnectedIdDetailResponse>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting ConnectedId by ID: {Id}", id);
+                return ServiceResult<ConnectedIdDetailResponse>.Failure(
+                    $"Failed to get ConnectedId: {ex.Message}", 
+                    "GET_ERROR");
+            }
         }
 
         public async Task<ServiceResult<ConnectedIdResponse>> UpdateAsync(Guid id, UpdateConnectedIdRequest request)
         {
-            var entity = await _connectedIdRepository.GetByIdAsync(id);
-            if (entity == null) return ServiceResult<ConnectedIdResponse>.Failure("ConnectedId not found.");
+            try
+            {
+                var entity = await _connectedIdRepository.GetByIdAsync(id);
+                if (entity == null)
+                {
+                    return ServiceResult<ConnectedIdResponse>.NotFound(
+                        "ConnectedId not found.");
+                }
 
-            _mapper.Map(request, entity); // AutoMapper로 업데이트
-            await _connectedIdRepository.UpdateAsync(entity);
+                _mapper.Map(request, entity);
+                entity.UpdatedAt = _dateTimeProvider.UtcNow;
+                
+                await _connectedIdRepository.UpdateAsync(entity);
 
-            var response = _mapper.Map<ConnectedIdResponse>(entity);
-            return ServiceResult<ConnectedIdResponse>.Success(response);
+                var response = _mapper.Map<ConnectedIdResponse>(entity);
+                return ServiceResult<ConnectedIdResponse>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating ConnectedId: {Id}", id);
+                return ServiceResult<ConnectedIdResponse>.Failure(
+                    $"Failed to update ConnectedId: {ex.Message}", 
+                    "UPDATE_ERROR");
+            }
         }
 
         public async Task<ServiceResult> DeleteAsync(Guid id)
         {
-            var entity = await _connectedIdRepository.GetByIdAsync(id);
-            if (entity == null) return ServiceResult.Failure("ConnectedId not found.");
+            try
+            {
+                var entity = await _connectedIdRepository.GetByIdAsync(id);
+                if (entity == null)
+                {
+                    return ServiceResult.NotFound("ConnectedId not found.");
+                }
 
-            // 소프트 삭제 로직 (상태 변경 등)
-            await _connectedIdRepository.DeleteAsync(entity);
-            return ServiceResult.Success();
+                // Soft delete
+                entity.IsDeleted = true;
+                entity.DeletedAt = _dateTimeProvider.UtcNow;
+                entity.Status = ConnectedIdStatus.Inactive;
+                
+                await _connectedIdRepository.UpdateAsync(entity);
+                
+                return ServiceResult.Success("ConnectedId deleted successfully.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting ConnectedId: {Id}", id);
+                return ServiceResult.Failure(
+                    $"Failed to delete ConnectedId: {ex.Message}", 
+                    "DELETE_ERROR");
+            }
         }
 
-        // --- 조회 작업 ---
-        public Task<ServiceResult<ConnectedIdListResponse>> GetByOrganizationAsync(Guid organizationId, SearchConnectedIdsRequest request)
+        #endregion
+
+        #region Query Operations
+
+        public async Task<ServiceResult<ConnectedIdListResponse>> GetByOrganizationAsync(
+            Guid organizationId, 
+            SearchConnectedIdsRequest request)
         {
-            // Repository를 통해 페이징된 데이터 조회 로직 구현
-            // ...
-            return Task.FromResult(ServiceResult<ConnectedIdListResponse>.Success(new ConnectedIdListResponse()));
+            try
+            {
+                // 조직 내 ConnectedId 조회 - Status로 필터링
+                var entities = await _connectedIdRepository.GetByOrganizationAndStatusAsync(
+                    organizationId,
+                    ConnectedIdStatus.Active);
+
+                // 페이징 처리
+                var pageNumber = request?.PageNumber ?? 1;
+                var pageSize = request?.PageSize ?? 10;
+                
+                var paged = entities
+                    .Skip((pageNumber - 1) * pageSize)
+                    .Take(pageSize)
+                    .ToList();
+                
+                var response = new ConnectedIdListResponse
+                {
+                    Items = _mapper.Map<List<ConnectedIdResponse>>(paged),
+                    TotalCount = entities.Count(),
+                    PageNumber = pageNumber,
+                    PageSize = pageSize
+                };
+                
+                return ServiceResult<ConnectedIdListResponse>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting ConnectedIds by organization: {OrgId}", organizationId);
+                return ServiceResult<ConnectedIdListResponse>.Failure(
+                    $"Failed to get organization members: {ex.Message}", 
+                    "QUERY_ERROR");
+            }
         }
 
         public async Task<ServiceResult<IEnumerable<ConnectedIdResponse>>> GetByUserAsync(Guid userId)
         {
-            var entities = await _connectedIdRepository.GetByUserIdAsync(userId);
-            var response = _mapper.Map<IEnumerable<ConnectedIdResponse>>(entities);
-            return ServiceResult<IEnumerable<ConnectedIdResponse>>.Success(response);
+            try
+            {
+                var entities = await _connectedIdRepository.GetByUserIdAsync(userId);
+                var response = _mapper.Map<IEnumerable<ConnectedIdResponse>>(entities);
+                return ServiceResult<IEnumerable<ConnectedIdResponse>>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting ConnectedIds by user: {UserId}", userId);
+                return ServiceResult<IEnumerable<ConnectedIdResponse>>.Failure(
+                    $"Failed to get user connections: {ex.Message}", 
+                    "QUERY_ERROR");
+            }
         }
 
-        // --- 활동 추적 및 검증 ---
-        public Task<ServiceResult> UpdateLastActivityAsync(Guid id)
+        #endregion
+
+        #region Activity & Validation
+
+        public async Task<ServiceResult> UpdateLastActivityAsync(Guid id)
         {
-            // ExecuteUpdateAsync 사용 최적화 고려
-            // ...
-            return Task.FromResult(ServiceResult.Success());
+            try
+            {
+                var entity = await _connectedIdRepository.GetByIdAsync(id);
+                if (entity == null)
+                {
+                    return ServiceResult.NotFound("ConnectedId not found.");
+                }
+
+                // LastActiveAt 속성 사용 (LastActivityAt 대신)
+                entity.LastActiveAt = _dateTimeProvider.UtcNow;
+                await _connectedIdRepository.UpdateAsync(entity);
+                
+                return ServiceResult.Success("Last activity updated.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating last activity: {Id}", id);
+                return ServiceResult.Failure(
+                    $"Failed to update last activity: {ex.Message}", 
+                    "UPDATE_ERROR");
+            }
         }
 
         public async Task<ServiceResult<bool>> ValidateAsync(Guid id)
         {
-            var entity = await _connectedIdRepository.GetByIdAsync(id);
-            var isValid = entity != null && !entity.IsDeleted && entity.Status == ConnectedIdStatus.Active;
-            return ServiceResult<bool>.Success(isValid);
+            try
+            {
+                var entity = await _connectedIdRepository.GetByIdAsync(id);
+                var isValid = entity != null 
+                    && !entity.IsDeleted 
+                    && entity.Status == ConnectedIdStatus.Active;
+                    
+                return ServiceResult<bool>.Success(isValid);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating ConnectedId: {Id}", id);
+                return ServiceResult<bool>.Failure(
+                    $"Failed to validate: {ex.Message}", 
+                    "VALIDATION_ERROR");
+            }
         }
 
         public async Task<ServiceResult<bool>> IsMemberOfOrganizationAsync(Guid userId, Guid organizationId)
         {
-            var isMember = await _connectedIdRepository.IsMemberOfOrganizationAsync(userId, organizationId);
-            return ServiceResult<bool>.Success(isMember);
+            try
+            {
+                var isMember = await _connectedIdRepository.IsMemberOfOrganizationAsync(userId, organizationId);
+                return ServiceResult<bool>.Success(isMember);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking membership: User {UserId}, Org {OrgId}", 
+                    userId, organizationId);
+                return ServiceResult<bool>.Failure(
+                    $"Failed to check membership: {ex.Message}", 
+                    "QUERY_ERROR");
+            }
         }
+
+        /// <summary>
+        /// ConnectedId 유효성 검증
+        /// </summary>
+        public async Task<ServiceResult> ValidateConnectedIdAsync(Guid connectedId)
+        {
+            try
+            {
+                // ConnectedId 존재 확인
+                var connected = await _connectedIdRepository.GetByIdAsync(connectedId);
+                if (connected == null)
+                {
+                    return ServiceResult.NotFound("ConnectedId not found");
+                }
+
+                // 상태 확인
+                if (connected.Status != ConnectedIdStatus.Active)
+                {
+                    return ServiceResult.Failure(
+                        $"ConnectedId is not active: {connected.Status}", 
+                        "CONNECTED_ID_INACTIVE");
+                }
+
+                // 삭제 여부 확인
+                if (connected.IsDeleted)
+                {
+                    return ServiceResult.Failure(
+                        "ConnectedId has been deleted", 
+                        "CONNECTED_ID_DELETED");
+                }
+
+                return ServiceResult.Success("ConnectedId is valid");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating ConnectedId: {ConnectedId}", connectedId);
+                return ServiceResult.Failure(
+                    $"Failed to validate ConnectedId: {ex.Message}", 
+                    "VALIDATION_ERROR");
+            }
+        }
+
+        #endregion
     }
 }

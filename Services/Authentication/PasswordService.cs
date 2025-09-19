@@ -17,6 +17,7 @@ using AuthHive.Core.Models.Auth.Session.Requests;
 using AuthHive.Core.Enums.Core;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Constants.Auth;
+using UserEntity = AuthHive.Core.Entities.User.User;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -83,7 +84,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 // 사용자 생성
-                var user = new User
+                var user = new UserEntity
                 {
                     Email = email,
                     DisplayName = displayName,

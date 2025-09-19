@@ -22,7 +22,7 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Enums.Auth;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
-
+using UserEntity = AuthHive.Core.Entities.User.User;
 namespace AuthHive.Auth.Services.Organization
 {
     /// <summary>
@@ -142,7 +142,7 @@ namespace AuthHive.Auth.Services.Organization
                 if (existingConnected == null)
                 {
                     // ✨ 참고: 신규 유저 생성 로직은 Auth Service의 역할일 수 있으나, 현재 컨텍스트를 유지합니다.
-                    var newUser = new User
+                    var newUser = new UserEntity
                     {
                         Email = email,
                         Username = email.Split('@')[0],
