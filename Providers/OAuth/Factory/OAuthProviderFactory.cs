@@ -1,8 +1,8 @@
 
 using AuthHive.Auth.Providers.OAuth.Factory;
-using AuthHive.Auth.Services.Providers.OAuth;
 using AuthHive.Core.Interfaces.Auth.Provider;
 
+namespace AuthHive.Auth.Providers.OAuth.Factory;
 public class OAuthProviderFactory : IOAuthProviderFactory
 {
     private readonly Dictionary<string, IOAuthProvider> _providers;
@@ -18,19 +18,19 @@ public class OAuthProviderFactory : IOAuthProviderFactory
 
         // 설정에서 활성화된 제공자만 등록
         var oauthConfig = configuration.GetSection("OAuth");
-        
+
         if (oauthConfig.GetSection("Google").Exists())
         {
             _providers["google"] = serviceProvider.GetRequiredService<GoogleOAuthProvider>();
         }
-        
+
         if (oauthConfig.GetSection("Kakao").Exists())
         {
-            _providers["kakao"] = serviceProvider.GetRequiredService<AuthHive.Auth.Services.Providers.OAuth.KakaoOAuthProvider>();
+            _providers["kakao"] = serviceProvider.GetRequiredService<AuthHive.Auth.Providers.OAuth.KakaoOAuthProvider>();
         }
-        
+
         // 필요한 다른 제공자들도 추가
-        
+
         _logger.LogInformation("Registered {Count} OAuth providers", _providers.Count);
     }
 
@@ -40,7 +40,7 @@ public class OAuthProviderFactory : IOAuthProviderFactory
         {
             return provider;
         }
-        
+
         throw new NotSupportedException($"OAuth provider '{providerName}' is not supported");
     }
 

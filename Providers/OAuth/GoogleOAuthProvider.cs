@@ -12,7 +12,7 @@ using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Enums.Auth;
 
-namespace AuthHive.Auth.Services.Providers.OAuth
+namespace AuthHive.Auth.Providers.OAuth
 {
     /// <summary>
     /// Google OAuth 2.0 제공자 구현 - AuthHive v15

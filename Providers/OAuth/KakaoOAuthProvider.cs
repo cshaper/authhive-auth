@@ -11,7 +11,7 @@ using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Common;
 
-namespace AuthHive.Auth.Services.Providers.OAuth
+namespace AuthHive.Auth.Providers.OAuth
 {
     /// <summary>
     /// Kakao OAuth 2.0 제공자 구현 - AuthHive v15
