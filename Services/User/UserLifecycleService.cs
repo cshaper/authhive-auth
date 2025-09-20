@@ -12,7 +12,6 @@ using AuthHive.Core.Interfaces.User.Service;
 using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Audit;
-using AuthHive.Core.Interfaces.Platform.Service;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Common.Requests;
 using AuthHive.Core.Models.User;
@@ -33,6 +32,7 @@ using static AuthHive.Core.Enums.Core.UserEnums;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Models.PlatformApplication.Requests;
 using UserEntity = AuthHive.Core.Entities.User.User;
+using AuthHive.Core.Interfaces.Infra.UserExperience;
 
 namespace AuthHive.Auth.Services.User
 {
