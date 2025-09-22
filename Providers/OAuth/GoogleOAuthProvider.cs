@@ -78,14 +78,14 @@ namespace AuthHive.Auth.Providers.OAuth
                     ["prompt"] = "consent" // Force consent screen to get refresh token
                 };
 
-                var queryString = string.Join("&", 
-                    queryParams.Select(kvp => 
+                var queryString = string.Join("&",
+                    queryParams.Select(kvp =>
                         $"{kvp.Key}={HttpUtility.UrlEncode(kvp.Value)}"));
 
                 var authorizationUrl = $"{AUTHORIZATION_ENDPOINT}?{queryString}";
 
                 _logger.LogInformation("Generated Google OAuth authorization URL for redirect URI: {RedirectUri}", redirectUri);
-                
+
                 return Task.FromResult(ServiceResult<string>.Success(authorizationUrl));
             }
             catch (Exception ex)
@@ -112,7 +112,7 @@ namespace AuthHive.Auth.Providers.OAuth
                 }
 
                 using var httpClient = _httpClientFactory.CreateClient();
-                
+
                 var tokenRequest = new FormUrlEncodedContent(new[]
                 {
                     new KeyValuePair<string, string>("code", code),
@@ -127,18 +127,18 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogError("Google token exchange failed: {StatusCode} - {Content}", 
+                    _logger.LogError("Google token exchange failed: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
                     return ServiceResult<OAuthTokenResponse>.Failure(
                         "Failed to exchange authorization code", "TOKEN_EXCHANGE_ERROR");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<JsonElement>(responseContent);
-                
+
                 var tokenResponse = new OAuthTokenResponse
                 {
                     AccessToken = tokenData.GetProperty("access_token").GetString() ?? string.Empty,
-                    RefreshToken = tokenData.TryGetProperty("refresh_token", out var refreshToken) 
+                    RefreshToken = tokenData.TryGetProperty("refresh_token", out var refreshToken)
                         ? refreshToken.GetString() : null,
                     TokenType = tokenData.GetProperty("token_type").GetString() ?? "Bearer",
                     ExpiresIn = tokenData.GetProperty("expires_in").GetInt32(),
@@ -148,7 +148,7 @@ namespace AuthHive.Auth.Providers.OAuth
                 };
 
                 _logger.LogInformation("Successfully exchanged Google OAuth code for tokens");
-                
+
                 return ServiceResult<OAuthTokenResponse>.Success(tokenResponse);
             }
             catch (Exception ex)
@@ -165,7 +165,7 @@ namespace AuthHive.Auth.Providers.OAuth
             try
             {
                 using var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Authorization = 
+                httpClient.DefaultRequestHeaders.Authorization =
                     new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
                 var response = await httpClient.GetAsync(USER_INFO_ENDPOINT);
@@ -173,31 +173,34 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogError("Failed to get Google user info: {StatusCode} - {Content}", 
+                    _logger.LogError("Failed to get Google user info: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
                     return ServiceResult<OAuthUserInfo>.Failure(
                         "Failed to get user information", "USER_INFO_ERROR");
                 }
 
                 var userData = JsonSerializer.Deserialize<JsonElement>(responseContent);
-                
+
                 var userInfo = new OAuthUserInfo
                 {
-                    Id = userData.GetProperty("id").GetString() ?? string.Empty,
-                    Email = userData.TryGetProperty("email", out var email) 
+                    Id = userData.GetProperty("sub").GetString() ?? string.Empty,
+                    Email = userData.TryGetProperty("email", out var email)
                         ? email.GetString() : null,
-                    Name = userData.TryGetProperty("name", out var name) 
-                        ? name.GetString() : null,
-                    Picture = userData.TryGetProperty("picture", out var picture) 
+                    // [FIX] 'Name' does not exist. Use 'FirstName' and 'LastName' instead.
+                    FirstName = userData.TryGetProperty("given_name", out var givenName)
+                        ? givenName.GetString() : null,
+                    LastName = userData.TryGetProperty("family_name", out var familyName)
+                        ? familyName.GetString() : null,
+                    Picture = userData.TryGetProperty("picture", out var picture)
                         ? picture.GetString() : null,
-                    EmailVerified = userData.TryGetProperty("verified_email", out var verified) 
+                    EmailVerified = userData.TryGetProperty("email_verified", out var verified)
                         && verified.GetBoolean(),
-                    RawData = JsonSerializer.Deserialize<Dictionary<string, object>>(responseContent) 
+                    RawData = JsonSerializer.Deserialize<Dictionary<string, object>>(responseContent)
                         ?? new Dictionary<string, object>()
                 };
 
                 _logger.LogInformation("Successfully retrieved Google user info for user ID: {UserId}", userInfo.Id);
-                
+
                 return ServiceResult<OAuthUserInfo>.Success(userInfo);
             }
             catch (Exception ex)
@@ -223,7 +226,7 @@ namespace AuthHive.Auth.Providers.OAuth
                 }
 
                 using var httpClient = _httpClientFactory.CreateClient();
-                
+
                 var refreshRequest = new FormUrlEncodedContent(new[]
                 {
                     new KeyValuePair<string, string>("refresh_token", refreshToken),
@@ -237,14 +240,14 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogError("Google token refresh failed: {StatusCode} - {Content}", 
+                    _logger.LogError("Google token refresh failed: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
                     return ServiceResult<OAuthTokenResponse>.Failure(
                         "Failed to refresh token", "TOKEN_REFRESH_ERROR");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<JsonElement>(responseContent);
-                
+
                 var tokenResponse = new OAuthTokenResponse
                 {
                     AccessToken = tokenData.GetProperty("access_token").GetString() ?? string.Empty,
@@ -257,7 +260,7 @@ namespace AuthHive.Auth.Providers.OAuth
                 };
 
                 _logger.LogInformation("Successfully refreshed Google OAuth token");
-                
+
                 return ServiceResult<OAuthTokenResponse>.Success(tokenResponse);
             }
             catch (Exception ex)
@@ -274,7 +277,7 @@ namespace AuthHive.Auth.Providers.OAuth
             try
             {
                 using var httpClient = _httpClientFactory.CreateClient();
-                
+
                 var revokeRequest = new FormUrlEncodedContent(new[]
                 {
                     new KeyValuePair<string, string>("token", token)
@@ -289,7 +292,7 @@ namespace AuthHive.Auth.Providers.OAuth
                 }
 
                 _logger.LogInformation("Successfully revoked Google OAuth token");
-                
+
                 return ServiceResult.Success("Token revoked successfully");
             }
             catch (Exception ex)

@@ -28,6 +28,8 @@ namespace AuthHive.Auth.Data.Context
         public DbSet<ConnectedId> ConnectedIds { get; set; }
         public DbSet<ConnectedIdContext> ConnectedIdContexts { get; set; }
         public DbSet<ConnectedIdRole> ConnectedIdRoles { get; set; }
+
+        public DbSet<ClientCertificate> ClientCertificates { get; set; }
         public DbSet<SessionEntity> Sessions { get; set; }
         public DbSet<SessionActivityLog> SessionActivityLogs { get; set; }
         public DbSet<AuthenticationAttemptLog> AuthenticationAttemptLogs { get; set; }

@@ -230,6 +230,8 @@ namespace AuthHive.Auth.Services.Providers
                     // ConnectedId 조회 (User의 ConnectedIds 컬렉션에서 첫 번째)
                     var userConnectedIds = await _connectedIdRepository.GetByUserIdAsync(userId);
                     connectedId = userConnectedIds.FirstOrDefault()?.Id ?? Guid.Empty;
+                    
+                    var fullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
 
                     // 소셜 계정 정보 저장
                     var newSocialAccount = new UserSocialAccount
@@ -239,7 +241,7 @@ namespace AuthHive.Auth.Services.Providers
                         Provider = GetSocialProvider(provider),
                         ProviderId = userInfo.Id,
                         Email = userInfo.Email,
-                        DisplayName = userInfo.Name,
+                        DisplayName = fullName,
                         ProfilePictureUrl = userInfo.Picture,
                         AccessToken = tokens.AccessToken,
                         RefreshToken = tokens.RefreshToken,
@@ -291,6 +293,8 @@ namespace AuthHive.Auth.Services.Providers
                     }
                     await _userRepository.UpdateAsync(user);
                 }
+                
+                var profileFullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
 
                 // 결과 생성
                 var authResult = new SocialAuthResult
@@ -305,8 +309,8 @@ namespace AuthHive.Auth.Services.Providers
                     {
                         Email = userInfo.Email,
                         EmailVerified = userInfo.EmailVerified,
-                        Name = userInfo.Name,
-                        DisplayName = userInfo.Name,
+                        Name = profileFullName,
+                        DisplayName = profileFullName,
                         ProfilePictureUrl = userInfo.Picture,
                         LastUpdated = DateTime.UtcNow
                     },
@@ -520,6 +524,8 @@ namespace AuthHive.Auth.Services.Providers
                     // 기존 사용자에 소셜 계정 연결
                     return ServiceResult<UserEntity>.Success(existingUser);
                 }
+                
+                var fullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
 
                 // 새 사용자 생성
                 var newUser = new UserEntity
@@ -527,7 +533,7 @@ namespace AuthHive.Auth.Services.Providers
                     Id = Guid.NewGuid(),
                     Email = userInfo.Email ?? $"{userInfo.Id}@{provider.ToLower()}.local",
                     Username = GenerateUsername(userInfo, provider),
-                    DisplayName = userInfo.Name,
+                    DisplayName = fullName,
                     IsEmailVerified = userInfo.EmailVerified,
                     EmailVerified = userInfo.EmailVerified,
                     EmailVerifiedAt = userInfo.EmailVerified ? DateTime.UtcNow : null,
@@ -607,9 +613,10 @@ namespace AuthHive.Auth.Services.Providers
                 return System.Text.RegularExpressions.Regex.Replace(emailPrefix, @"[^a-zA-Z0-9]", "").ToLower();
             }
 
-            if (!string.IsNullOrEmpty(userInfo.Name))
+            var fullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
+            if (!string.IsNullOrEmpty(fullName))
             {
-                return userInfo.Name.Replace(" ", ".").ToLower();
+                return fullName.Replace(" ", ".").ToLower();
             }
 
             return $"{provider.ToLower()}.{userInfo.Id}";
