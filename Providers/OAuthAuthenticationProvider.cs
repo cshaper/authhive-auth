@@ -1,4 +1,3 @@
-// Providers/Authentication/OAuthAuthenticationProvider.cs
 using System;
 using System.Collections.Generic;
 using System.Linq;
