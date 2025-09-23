@@ -10,6 +10,7 @@ using AuthHive.Core.Entities.User;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using System.Text.Json;
 using UserEntity = AuthHive.Core.Entities.User.User;
+using AuthHive.Core.Models.Auth.Authentication;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -95,6 +96,76 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+        public async Task<ServiceResult<AuthenticationOutcome>> HandleCallbackAsync(string provider, string code, string? state)
+        {
+            try
+            {
+                // 1. Authorization Code를 Access Token으로 교환합니다.
+                // redirectUri는 설정(appsettings.json)에서 가져와야 합니다.
+                var redirectUri = _configuration[$"Authentication:{provider}:RedirectUri"] ?? string.Empty;
+                var tokenResult = await ExchangeCodeForTokenAsync(provider, code, redirectUri);
+
+                if (!tokenResult.success || string.IsNullOrEmpty(tokenResult.token))
+                {
+                    return ServiceResult<AuthenticationOutcome>.Failure("Failed to exchange authorization code for an access token.", "TOKEN_EXCHANGE_FAILED");
+                }
+
+                // 2. Access Token을 사용하여 소셜 프로필 정보를 검증하고 가져옵니다.
+                var validationResult = await ValidateSocialTokenAsync(provider, tokenResult.token);
+                if (!validationResult.isValid || string.IsNullOrEmpty(validationResult.email))
+                {
+                    return ServiceResult<AuthenticationOutcome>.Failure("Invalid social token or failed to retrieve user profile.", "INVALID_SOCIAL_TOKEN");
+                }
+
+                // 3. 이메일을 기반으로 사용자를 찾거나 새로 생성합니다.
+                var user = await _context.Users
+                    .Include(u => u.ConnectedIds)
+                    .FirstOrDefaultAsync(u => u.Email == validationResult.email);
+
+                bool isNewUser = false;
+                if (user == null)
+                {
+                    user = new UserEntity
+                    {
+                        Email = validationResult.email,
+                        DisplayName = validationResult.name ?? validationResult.email,
+                        Status = UserStatus.Active,
+                        EmailVerified = true
+                    };
+                    _context.Users.Add(user);
+                    await _context.SaveChangesAsync();
+                    isNewUser = true;
+                }
+
+                // 4. ConnectedId를 찾거나 생성합니다 (이 예제에서는 첫 번째 ConnectedId를 사용).
+                var connectedId = user.ConnectedIds.FirstOrDefault();
+                if (connectedId == null)
+                {
+                    // 이 부분은 애플리케이션의 정책에 따라 달라집니다. 
+                    // 여기서는 ConnectedId가 없으면 생성하지 않고 null을 반환합니다.
+                    _logger.LogWarning("User {UserId} logged in via social provider but has no ConnectedId.", user.Id);
+                }
+
+                // 5. 최종 인증 결과를 반환합니다.
+                var outcome = new AuthenticationOutcome
+                {
+                    Success = true,
+                    UserId = user.Id,
+                    ConnectedId = connectedId?.Id,
+                    IsNewUser = isNewUser,
+                    Provider = provider,
+                    ProviderId = validationResult.providerUserId,
+                    AuthenticationMethod = "Social"
+                };
+
+                return ServiceResult<AuthenticationOutcome>.Success(outcome);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "An error occurred during social authentication callback for provider {Provider}.", provider);
+                return ServiceResult<AuthenticationOutcome>.Failure("An unexpected error occurred during social callback processing.", "CALLBACK_ERROR");
+            }
+        }
         /// <summary>
         /// OAuth 인증 구현
         /// </summary>

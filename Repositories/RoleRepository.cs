@@ -9,6 +9,7 @@ using System.Linq.Expressions;
 using AuthHive.Core.Interfaces.Base;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Models.Auth.Role.Common;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 
 namespace AuthHive.Auth.Repositories;
@@ -118,28 +119,6 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
     {
         var query = QueryForOrganization(organizationId)
             .Where(r => r.Scope == scope);
-
-        if (!includeInactive)
-        {
-            query = query.Where(r => r.IsActive);
-        }
-
-        return await query
-            .OrderBy(r => r.Priority)
-            .ThenBy(r => r.Name)
-            .ToListAsync();
-    }
-
-    /// <summary>
-    /// 카테고리별 역할 조회
-    /// </summary>
-    public async Task<IEnumerable<Role>> GetByCategoryAsync(
-        Guid organizationId,
-        RoleCategory category,
-        bool includeInactive = false)
-    {
-        var query = QueryForOrganization(organizationId)
-            .Where(r => r.Category == category);
 
         if (!includeInactive)
         {
@@ -445,12 +424,6 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
             ExpiredCount = roles.Count(r => r.ExpiresAt.HasValue && r.ExpiresAt <= now),
             LastCreatedAt = roles.Any() ? roles.Max(r => r.CreatedAt) : null
         };
-
-        // 카테고리별 분포
-        stats.CountByCategory = roles
-            .Where(r => r.Category.HasValue)
-            .GroupBy(r => r.Category!.Value)
-            .ToDictionary(g => g.Key, g => g.Count());
 
         // 스코프별 분포
         stats.CountByScope = roles

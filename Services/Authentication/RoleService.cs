@@ -91,7 +91,6 @@ namespace AuthHive.Auth.Services.Authentication
                     RoleKey = request.RoleKey,
                     Scope = request.Scope,
                     ApplicationId = request.ApplicationId,
-                    Category = request.Category,
                     Level = (PermissionLevel)request.Level,
                     ParentRoleId = request.ParentRoleId,
                     Priority = request.Priority,
@@ -233,14 +232,6 @@ namespace AuthHive.Auth.Services.Authentication
                     roles = await _roleRepository.GetByScopeAsync(
                         request.OrganizationId,
                         request.Scope.Value,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
-                }
-                else if (request.Category.HasValue)
-                {
-                    // 카테고리별 역할 조회
-                    roles = await _roleRepository.GetByCategoryAsync(
-                        request.OrganizationId,
-                        request.Category.Value,
                         includeInactive: request.IsActive == null || !request.IsActive.Value);
                 }
                 else if (request.Level.HasValue)
@@ -409,7 +400,6 @@ namespace AuthHive.Auth.Services.Authentication
             if (!string.IsNullOrEmpty(request.RoleKey)) count++;
             if (request.Scope.HasValue) count++;
             if (request.ApplicationId.HasValue) count++;
-            if (request.Category.HasValue) count++;
             if (request.Level.HasValue) count++;
             if (request.ParentRoleId.HasValue) count++;
             if (request.IsActive.HasValue) count++;
@@ -428,13 +418,6 @@ namespace AuthHive.Auth.Services.Authentication
             
             return new FilterOptions
             {
-                AvailableCategories = statistics.CountByCategory
-                    .Select(kvp => new FilterOption
-                    {
-                        Value = kvp.Key.ToString(),
-                        DisplayText = kvp.Key.ToString(),
-                        Count = kvp.Value
-                    }).ToList(),
                 
                 AvailableScopes = statistics.CountByScope
                     .Select(kvp => new FilterOption
@@ -492,9 +475,6 @@ namespace AuthHive.Auth.Services.Authentication
                 
                 if (request.Description != null)
                     role.Description = request.Description;
-                
-                if (request.Category.HasValue)
-                    role.Category = request.Category;
                 
                 if (request.Level.HasValue)
                     role.Level = (PermissionLevel)request.Level.Value;
@@ -1117,7 +1097,6 @@ namespace AuthHive.Auth.Services.Authentication
                 Scope = role.Scope,
                 ApplicationId = role.ApplicationId,
                 IsActive = role.IsActive,
-                Category = role.Category,
                 Level = (int)role.Level,
                 Priority = role.Priority,
                 ExpiresAt = role.ExpiresAt,
@@ -1138,7 +1117,6 @@ namespace AuthHive.Auth.Services.Authentication
                 Scope = role.Scope,
                 ApplicationId = role.ApplicationId,
                 IsActive = role.IsActive,
-                Category = role.Category,
                 Level = (int)role.Level,
                 Priority = role.Priority,
                 ParentRoleId = role.ParentRoleId,
@@ -1228,9 +1206,6 @@ namespace AuthHive.Auth.Services.Authentication
                 InactiveRoles = rolesList.Count(r => !r.IsActive),
                 ExpiredRoles = rolesList.Count(r => r.ExpiresAt.HasValue && r.ExpiresAt.Value < DateTime.UtcNow),
                 RolesByScope = rolesList.GroupBy(r => r.Scope.ToString())
-                    .ToDictionary(g => g.Key, g => g.Count()),
-                RolesByCategory = rolesList.Where(r => r.Category.HasValue)
-                    .GroupBy(r => r.Category!.Value.ToString())
                     .ToDictionary(g => g.Key, g => g.Count()),
                 RolesByLevel = rolesList.GroupBy(r => (int)r.Level)
                     .ToDictionary(g => g.Key, g => g.Count())

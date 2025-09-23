@@ -12,6 +12,7 @@ using Microsoft.Extensions.Caching.Memory;
 
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Interfaces.Organization.Repository.Settings;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

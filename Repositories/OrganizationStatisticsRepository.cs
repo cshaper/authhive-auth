@@ -15,6 +15,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Entities.Infra.Monitoring;
 using AuthHive.Core.Models.Infra.Monitoring;
 using AuthHive.Core.Enums.Infra.Monitoring;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

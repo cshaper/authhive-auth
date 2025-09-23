@@ -12,6 +12,7 @@ using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Base.Summaries;
 using AuthHive.Core.Models.Common;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

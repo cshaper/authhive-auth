@@ -127,8 +127,18 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult<AuthenticationResponse>.Failure("Failed to create session");
                 }
 
+                // SessionDto null 체크 추가
+                if (sessionResult.Data.SessionDto == null)
+                {
+                    _logger.LogError("SessionDto is null after session creation for user {Email}", email);
+                    return ServiceResult<AuthenticationResponse>.Failure("Session data is incomplete");
+                }
+
+                // SessionDto를 변수에 저장하여 안전하게 사용
+                var sessionDto = sessionResult.Data.SessionDto;
+
                 // 토큰 발급
-                var tokenResult = await _tokenService.IssueTokensAsync(sessionResult.Data.SessionDto);
+                var tokenResult = await _tokenService.IssueTokensAsync(sessionDto);
                 if (!tokenResult.IsSuccess || tokenResult.Data == null)
                 {
                     return ServiceResult<AuthenticationResponse>.Failure("Failed to issue tokens");
@@ -139,7 +149,7 @@ namespace AuthHive.Auth.Services.Authentication
                     Success = true,
                     UserId = user.Id,
                     ConnectedId = connectedIdResult.Data.Id,
-                    SessionId = sessionResult.Data.SessionDto.Id,
+                    SessionId = sessionDto.Id,  // 안전하게 접근
                     AccessToken = tokenResult.Data.AccessToken,
                     RefreshToken = tokenResult.Data.RefreshToken,
                     ExpiresAt = tokenResult.Data.ExpiresAt,
@@ -154,7 +164,7 @@ namespace AuthHive.Auth.Services.Authentication
                 return ServiceResult<AuthenticationResponse>.Failure("Registration failed");
             }
         }
-
+        // 패스워드로 인증
         // 패스워드로 인증
         public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithPasswordAsync(
             string username,
@@ -193,8 +203,18 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult<AuthenticationResponse>.Failure("Failed to create session");
                 }
 
+                // SessionDto null 체크 추가
+                if (sessionResult.Data.SessionDto == null)
+                {
+                    _logger.LogError("SessionDto is null after session creation for user {Username}", username);
+                    return ServiceResult<AuthenticationResponse>.Failure("Session data is incomplete");
+                }
+
+                // SessionDto를 변수에 저장
+                var sessionDto = sessionResult.Data.SessionDto;
+
                 // 토큰 발급
-                var tokenResult = await _tokenService.IssueTokensAsync(sessionResult.Data.SessionDto);
+                var tokenResult = await _tokenService.IssueTokensAsync(sessionDto);
                 if (!tokenResult.IsSuccess || tokenResult.Data == null)
                 {
                     return ServiceResult<AuthenticationResponse>.Failure("Failed to issue tokens");
@@ -205,7 +225,7 @@ namespace AuthHive.Auth.Services.Authentication
                     Success = true,
                     UserId = user.Id,
                     ConnectedId = connectedId.Id,
-                    SessionId = sessionResult.Data.SessionDto.Id,
+                    SessionId = sessionDto.Id,  // 안전하게 접근
                     AccessToken = tokenResult.Data.AccessToken,
                     RefreshToken = tokenResult.Data.RefreshToken,
                     ExpiresAt = tokenResult.Data.ExpiresAt,
@@ -219,7 +239,6 @@ namespace AuthHive.Auth.Services.Authentication
                 return ServiceResult<AuthenticationResponse>.Failure("Authentication failed");
             }
         }
-
         // IPasswordService 메서드들
         public async Task<ServiceResult<PasswordResetToken>> RequestPasswordResetAsync(
             string email,

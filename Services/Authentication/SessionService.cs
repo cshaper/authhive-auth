@@ -319,21 +319,26 @@ namespace AuthHive.Auth.Services.Session
         {
             try
             {
-                // 1. 요청 검증
-                if (request.ConnectedId == Guid.Empty)
+                // 1. 요청 검증 - ConnectedId는 nullable이므로 체크 수정
+                if (!request.ConnectedId.HasValue || request.ConnectedId.Value == Guid.Empty)
                 {
-                    return ServiceResult<CreateSessionResponse>.Failure("ConnectedId is required");
+                    // ConnectedId가 없으면 UserId 사용
+                    if (request.UserId == Guid.Empty)
+                    {
+                        return ServiceResult<CreateSessionResponse>.Failure("UserId is required");
+                    }
                 }
 
-                // 2. ConnectedId 존재 확인
-                var connectedId = await _connectedIdRepository.GetByIdAsync(request.ConnectedId);
+                // 2. ConnectedId 존재 확인 (ConnectedId가 있는 경우에만)
+                Guid effectiveConnectedId = request.ConnectedId ?? request.UserId;
+                var connectedId = await _connectedIdRepository.GetByIdAsync(effectiveConnectedId);
                 if (connectedId == null || connectedId.IsDeleted)
                 {
                     return ServiceResult<CreateSessionResponse>.Failure("Invalid ConnectedId");
                 }
 
                 // 3. 기존 활성 세션 수 확인
-                var activeSessions = await _sessionRepository.GetActiveSessionsAsync(request.ConnectedId);
+                var activeSessions = await _sessionRepository.GetActiveSessionsAsync(effectiveConnectedId);
                 var maxSessions = _configuration.GetValue<int>("Session:MaxPerUser", 5);
 
                 if (activeSessions.Count() >= maxSessions)
@@ -349,39 +354,28 @@ namespace AuthHive.Auth.Services.Session
                 {
                     Id = Guid.NewGuid(),
                     SessionToken = GenerateSecureToken(),
-                    UserId = connectedId.UserId,
-                    ConnectedId = request.ConnectedId,
+                    UserId = request.UserId,
+                    ConnectedId = effectiveConnectedId,
                     OrganizationId = request.OrganizationId,
-                    ParentSessionId = request.SessionId, // CreateSessionRequest의 SessionId는 부모 세션 ID
+                    ParentSessionId = null, // CreateSessionRequest에 SessionId 속성이 없음
                     SessionType = request.SessionType,
-                    Level = request.OrganizationId != Guid.Empty ? SessionLevel.Organization : SessionLevel.Global,
+                    Level = request.Level,
                     Status = request.InitialStatus,
                     IPAddress = request.IPAddress,
                     UserAgent = request.UserAgent,
                     ExpiresAt = request.ExpiresAt,
                     LastActivityAt = DateTime.UtcNow,
                     RiskScore = request.InitialRiskScore,
-                    GrpcEnabled = request.EnableGrpc,
-                    PubSubNotifications = request.EnablePubSubNotifications,
+                    GrpcEnabled = false, // CreateSessionRequest에 EnableGrpc가 없음, 기본값 사용
+                    PubSubNotifications = false, // CreateSessionRequest에 EnablePubSubNotifications가 없음, 기본값 사용
                     CreatedAt = DateTime.UtcNow,
-                    CreatedByConnectedId = request.ConnectedId
+                    CreatedByConnectedId = effectiveConnectedId
                 };
 
-                // 5. 부모 세션 처리
-                if (request.SessionId.HasValue)
-                {
-                    var parentSession = await _sessionRepository.GetByIdAsync(request.SessionId.Value);
-                    if (parentSession != null && parentSession.Status == SessionStatus.Active)
-                    {
-                        parentSession.ActiveChildSessionId = session.Id;
-                        await _sessionRepository.UpdateAsync(parentSession);
-                    }
-                }
-
-                // 6. 세션 저장
+                // 5. 세션 저장
                 await _sessionRepository.AddAsync(session);
 
-                // 7. 캐시에 저장
+                // 6. 캐시에 저장
                 var cacheKey = $"session:{session.Id}";
                 var cacheOptions = new MemoryCacheEntryOptions
                 {
@@ -390,7 +384,7 @@ namespace AuthHive.Auth.Services.Session
                 };
                 _cache.Set(cacheKey, session, cacheOptions);
 
-                // 8. 활동 로그 기록
+                // 7. 활동 로그 기록
                 var activityLog = new SessionActivityLog
                 {
                     Id = Guid.NewGuid(),
@@ -401,7 +395,7 @@ namespace AuthHive.Auth.Services.Session
                 };
                 await _activityLogRepository.AddAsync(activityLog);
 
-                // 9. SessionDto 매핑
+                // 8. SessionDto 매핑
                 var sessionDto = new SessionDto
                 {
                     Id = session.Id,
@@ -415,13 +409,13 @@ namespace AuthHive.Auth.Services.Session
                     Status = session.Status,
                     IPAddress = session.IPAddress,
                     UserAgent = session.UserAgent,
-                    DeviceInfo = request.DeviceInfo,
+                    DeviceInfo = request.DeviceInfo != null ? request.DeviceInfo.ToString() : null, // object를 string으로 변환
                     ExpiresAt = session.ExpiresAt,
                     LastActivityAt = session.LastActivityAt,
                     RiskScore = session.RiskScore,
                     GrpcEnabled = session.GrpcEnabled,
                     PubSubNotifications = session.PubSubNotifications,
-                    PermissionCacheEnabled = request.EnablePermissionCache,
+                    PermissionCacheEnabled = false, // CreateSessionRequest에 EnablePermissionCache가 없음, 기본값 사용
                     PageViews = 0,
                     ApiCalls = 0,
                     IsLocked = false,
@@ -431,7 +425,7 @@ namespace AuthHive.Auth.Services.Session
                     OrganizationName = connectedId.Organization?.Name
                 };
 
-                // 10. 응답 생성
+                // 9. 응답 생성
                 var response = new CreateSessionResponse
                 {
                     IsSuccess = true,
@@ -442,21 +436,20 @@ namespace AuthHive.Auth.Services.Session
                     SessionType = session.SessionType,
                     ExpiresAt = session.ExpiresAt,
                     RequiresTwoFactor = false,
-                    IsTrustedDevice = request.MarkAsTrustedDevice
+                    IsTrustedDevice = false // CreateSessionRequest에 MarkAsTrustedDevice가 없음, 기본값 사용
                 };
 
-                _logger.LogInformation("Session {SessionId} created for ConnectedId {ConnectedId}",
-                    session.Id, request.ConnectedId);
+                _logger.LogInformation("Session {SessionId} created for UserId {UserId}",
+                    session.Id, request.UserId);
 
                 return ServiceResult<CreateSessionResponse>.Success(response);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to create session for ConnectedId {ConnectedId}", request.ConnectedId);
+                _logger.LogError(ex, "Failed to create session for UserId {UserId}", request.UserId);
                 return ServiceResult<CreateSessionResponse>.Failure($"Failed to create session: {ex.Message}");
             }
         }
-
 
         #region 세션 조회
         public async Task<ServiceResult<SessionDetailResponse>> GetSessionAsync(Guid sessionId)
@@ -846,9 +839,9 @@ namespace AuthHive.Auth.Services.Session
                     RiskScore = s.RiskScore,
                     PageViews = s.PageViews,
                     ApiCalls = s.ApiCalls,
-                    GrpcEnabled = s.GrpcEnabled,
-                    PubSubNotifications = s.PubSubNotifications,
-                    PermissionCacheEnabled = s.PermissionCacheEnabled,
+                    EnableGrpc = s.GrpcEnabled,
+                    EnablePubSubNotifications = s.PubSubNotifications,
+                    EnablePermissionCache = s.PermissionCacheEnabled,
                     LockReason = s.LockReason,
                     CreatedAt = s.CreatedAt
                 }).ToList();
@@ -934,9 +927,9 @@ namespace AuthHive.Auth.Services.Session
                 RiskScore = session.RiskScore,
                 PageViews = session.PageViews,
                 ApiCalls = session.ApiCalls,
-                GrpcEnabled = session.GrpcEnabled,
-                PubSubNotifications = session.PubSubNotifications,
-                PermissionCacheEnabled = session.PermissionCacheEnabled,
+                EnableGrpc = session.GrpcEnabled,
+                EnablePubSubNotifications = session.PubSubNotifications,
+                EnablePermissionCache = session.PermissionCacheEnabled,
                 LockReason = session.LockReason,
                 CreatedAt = session.CreatedAt
             };
@@ -1465,6 +1458,63 @@ namespace AuthHive.Auth.Services.Session
             return await Task.FromResult(ServiceResult<ConnectionStatus>.Success(new ConnectionStatus()));
         }
         #endregion
+
+        public async Task<ServiceResult<IEnumerable<SessionResponse>>> GetUserActiveSessionsAsync(
+            Guid userId,
+            Guid? organizationId = null)
+        {
+            try
+            {
+                // Repository 패턴 사용 (context 직접 접근 대신)
+                var sessions = await _sessionRepository.GetByUserIdAsync(userId);
+
+                // 활성 세션만 필터링
+                sessions = sessions.Where(s => s.Status == SessionStatus.Active);
+
+                // organizationId가 지정된 경우 추가 필터링
+                if (organizationId.HasValue)
+                {
+                    sessions = sessions.Where(s => s.OrganizationId == organizationId);
+                }
+
+                // 최근 활동 순으로 정렬
+                sessions = sessions.OrderByDescending(s => s.LastActivityAt);
+
+                // Entity를 Response DTO로 매핑
+                var responses = sessions.Select(s => new SessionResponse
+                {
+                    Id = s.Id,
+                    UserId = s.UserId,
+                    ConnectedId = s.ConnectedId ?? Guid.Empty,
+                    OrganizationId = s.OrganizationId ?? Guid.Empty,
+                    OrganizationName = s.Organization?.Name ?? string.Empty,
+                    SessionType = s.SessionType,
+                    Status = s.Status,
+                    IPAddress = s.IPAddress,
+                    Browser = s.Browser,
+                    OperatingSystem = s.OperatingSystem,
+                    Location = s.Location,
+                    ExpiresAt = s.ExpiresAt,
+                    LastActivityAt = s.LastActivityAt,
+                    RiskScore = s.RiskScore,
+                    PageViews = s.PageViews,
+                    ApiCalls = s.ApiCalls,
+                    EnableGrpc = s.GrpcEnabled,
+                    EnablePubSubNotifications = s.PubSubNotifications,
+                    EnablePermissionCache = s.PermissionCacheEnabled,
+                    LockReason = s.LockReason,
+                    CreatedAt = s.CreatedAt
+                }).ToList();
+
+                return ServiceResult<IEnumerable<SessionResponse>>.Success(responses);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting user active sessions for UserId: {UserId}", userId);
+                return ServiceResult<IEnumerable<SessionResponse>>.Failure("Failed to get user active sessions");
+            }
+        }
+
 
         #region 세션 통계 및 분석
         public async Task<ServiceResult<SessionStatisticsData>> GetStatisticsAsync(Guid organizationId, DateTime? from = null, DateTime? to = null)

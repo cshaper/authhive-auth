@@ -6,6 +6,7 @@ using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Enums.Core;
 using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

@@ -14,6 +14,7 @@ using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using AuthHive.Core.Models.Audit.Common;
 using AuthHive.Core.Enums.Audit;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

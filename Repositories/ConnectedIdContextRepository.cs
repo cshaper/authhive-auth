@@ -8,6 +8,7 @@ using AuthHive.Auth.Data.Context;
 using System.Text.Json;
 using AuthHive.Core.Interfaces.Base;
 using Microsoft.Extensions.Caching.Memory;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories;
 

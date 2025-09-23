@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using PlatformApplicationEntity = AuthHive.Core.Entities.PlatformApplications.PlatformApplication;
 // 인터페이스 네임스페이스 (프로젝트에 맞게 확인)
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

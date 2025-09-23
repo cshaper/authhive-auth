@@ -38,7 +38,43 @@ namespace AuthHive.Auth.Services
         }
 
         #region IService Implementation
+        public async Task<ServiceResult<Core.Entities.Auth.ConnectedId>> GetOrCreateAsync(Guid userId, Guid organizationId)
+        {
+            try
+            {
+                // 1. 먼저 기존 ConnectedId가 있는지 찾아봅니다.
+                var existingEntity = await _connectedIdRepository.GetByUserAndOrganizationAsync(userId, organizationId);
+                if (existingEntity != null)
+                {
+                    // 이미 존재하면 찾은 엔티티를 반환합니다.
+                    return ServiceResult<Core.Entities.Auth.ConnectedId>.Success(existingEntity);
+                }
 
+                // 2. 존재하지 않으면 새로 생성합니다.
+                var newEntity = new Core.Entities.Auth.ConnectedId
+                {
+                    UserId = userId,
+                    OrganizationId = organizationId,
+                    Status = ConnectedIdStatus.Active,
+                    CreatedAt = _dateTimeProvider.UtcNow,
+                    JoinedAt = _dateTimeProvider.UtcNow
+                };
+
+                await _connectedIdRepository.AddAsync(newEntity);
+
+                _logger.LogInformation("Created new ConnectedId for User {UserId} in Organization {OrganizationId}", userId, organizationId);
+
+                // 새로 생성한 엔티티를 반환합니다.
+                return ServiceResult<Core.Entities.Auth.ConnectedId>.Success(newEntity);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in GetOrCreateAsync for User {UserId}, Organization {OrganizationId}", userId, organizationId);
+                return ServiceResult<Core.Entities.Auth.ConnectedId>.Failure(
+                    $"Failed to get or create ConnectedId: {ex.Message}",
+                    "GET_OR_CREATE_ERROR");
+            }
+        }
         public async Task<bool> IsHealthyAsync()
         {
             try
@@ -69,26 +105,26 @@ namespace AuthHive.Auth.Services
             {
                 // 중복 확인
                 var existing = await _connectedIdRepository.GetByUserAndOrganizationAsync(
-                    request.UserId, 
+                    request.UserId,
                     request.OrganizationId);
-                    
+
                 if (existing != null)
                 {
                     return ServiceResult<ConnectedIdResponse>.Failure(
-                        "User is already a member of this organization.", 
+                        "User is already a member of this organization.",
                         "ALREADY_MEMBER");
                 }
 
                 var newEntity = _mapper.Map<AuthHive.Core.Entities.Auth.ConnectedId>(request);
-                
+
                 // 기본값 설정
                 newEntity.Status = ConnectedIdStatus.Active;
                 newEntity.CreatedAt = _dateTimeProvider.UtcNow;
                 newEntity.JoinedAt = _dateTimeProvider.UtcNow;
                 // IsDefault 속성 제거 (엔티티에 없음)
-                
+
                 await _connectedIdRepository.AddAsync(newEntity);
-                
+
                 var response = _mapper.Map<ConnectedIdResponse>(newEntity);
                 return ServiceResult<ConnectedIdResponse>.Success(response);
             }
@@ -96,7 +132,7 @@ namespace AuthHive.Auth.Services
             {
                 _logger.LogError(ex, "Error creating ConnectedId");
                 return ServiceResult<ConnectedIdResponse>.Failure(
-                    $"Failed to create ConnectedId: {ex.Message}", 
+                    $"Failed to create ConnectedId: {ex.Message}",
                     "CREATE_ERROR");
             }
         }
@@ -106,10 +142,10 @@ namespace AuthHive.Auth.Services
             try
             {
                 var entity = await _connectedIdRepository.GetWithRelatedDataAsync(
-                    id, 
-                    includeUser: true, 
+                    id,
+                    includeUser: true,
                     includeOrganization: true);
-                    
+
                 if (entity == null)
                 {
                     return ServiceResult<ConnectedIdDetailResponse>.NotFound(
@@ -123,7 +159,7 @@ namespace AuthHive.Auth.Services
             {
                 _logger.LogError(ex, "Error getting ConnectedId by ID: {Id}", id);
                 return ServiceResult<ConnectedIdDetailResponse>.Failure(
-                    $"Failed to get ConnectedId: {ex.Message}", 
+                    $"Failed to get ConnectedId: {ex.Message}",
                     "GET_ERROR");
             }
         }
@@ -141,7 +177,7 @@ namespace AuthHive.Auth.Services
 
                 _mapper.Map(request, entity);
                 entity.UpdatedAt = _dateTimeProvider.UtcNow;
-                
+
                 await _connectedIdRepository.UpdateAsync(entity);
 
                 var response = _mapper.Map<ConnectedIdResponse>(entity);
@@ -151,7 +187,7 @@ namespace AuthHive.Auth.Services
             {
                 _logger.LogError(ex, "Error updating ConnectedId: {Id}", id);
                 return ServiceResult<ConnectedIdResponse>.Failure(
-                    $"Failed to update ConnectedId: {ex.Message}", 
+                    $"Failed to update ConnectedId: {ex.Message}",
                     "UPDATE_ERROR");
             }
         }
@@ -170,16 +206,16 @@ namespace AuthHive.Auth.Services
                 entity.IsDeleted = true;
                 entity.DeletedAt = _dateTimeProvider.UtcNow;
                 entity.Status = ConnectedIdStatus.Inactive;
-                
+
                 await _connectedIdRepository.UpdateAsync(entity);
-                
+
                 return ServiceResult.Success("ConnectedId deleted successfully.");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error deleting ConnectedId: {Id}", id);
                 return ServiceResult.Failure(
-                    $"Failed to delete ConnectedId: {ex.Message}", 
+                    $"Failed to delete ConnectedId: {ex.Message}",
                     "DELETE_ERROR");
             }
         }
@@ -189,7 +225,7 @@ namespace AuthHive.Auth.Services
         #region Query Operations
 
         public async Task<ServiceResult<ConnectedIdListResponse>> GetByOrganizationAsync(
-            Guid organizationId, 
+            Guid organizationId,
             SearchConnectedIdsRequest request)
         {
             try
@@ -202,12 +238,12 @@ namespace AuthHive.Auth.Services
                 // 페이징 처리
                 var pageNumber = request?.PageNumber ?? 1;
                 var pageSize = request?.PageSize ?? 10;
-                
+
                 var paged = entities
                     .Skip((pageNumber - 1) * pageSize)
                     .Take(pageSize)
                     .ToList();
-                
+
                 var response = new ConnectedIdListResponse
                 {
                     Items = _mapper.Map<List<ConnectedIdResponse>>(paged),
@@ -215,14 +251,14 @@ namespace AuthHive.Auth.Services
                     PageNumber = pageNumber,
                     PageSize = pageSize
                 };
-                
+
                 return ServiceResult<ConnectedIdListResponse>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting ConnectedIds by organization: {OrgId}", organizationId);
                 return ServiceResult<ConnectedIdListResponse>.Failure(
-                    $"Failed to get organization members: {ex.Message}", 
+                    $"Failed to get organization members: {ex.Message}",
                     "QUERY_ERROR");
             }
         }
@@ -239,7 +275,7 @@ namespace AuthHive.Auth.Services
             {
                 _logger.LogError(ex, "Error getting ConnectedIds by user: {UserId}", userId);
                 return ServiceResult<IEnumerable<ConnectedIdResponse>>.Failure(
-                    $"Failed to get user connections: {ex.Message}", 
+                    $"Failed to get user connections: {ex.Message}",
                     "QUERY_ERROR");
             }
         }
@@ -261,14 +297,14 @@ namespace AuthHive.Auth.Services
                 // LastActiveAt 속성 사용 (LastActivityAt 대신)
                 entity.LastActiveAt = _dateTimeProvider.UtcNow;
                 await _connectedIdRepository.UpdateAsync(entity);
-                
+
                 return ServiceResult.Success("Last activity updated.");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error updating last activity: {Id}", id);
                 return ServiceResult.Failure(
-                    $"Failed to update last activity: {ex.Message}", 
+                    $"Failed to update last activity: {ex.Message}",
                     "UPDATE_ERROR");
             }
         }
@@ -278,17 +314,17 @@ namespace AuthHive.Auth.Services
             try
             {
                 var entity = await _connectedIdRepository.GetByIdAsync(id);
-                var isValid = entity != null 
-                    && !entity.IsDeleted 
+                var isValid = entity != null
+                    && !entity.IsDeleted
                     && entity.Status == ConnectedIdStatus.Active;
-                    
+
                 return ServiceResult<bool>.Success(isValid);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error validating ConnectedId: {Id}", id);
                 return ServiceResult<bool>.Failure(
-                    $"Failed to validate: {ex.Message}", 
+                    $"Failed to validate: {ex.Message}",
                     "VALIDATION_ERROR");
             }
         }
@@ -302,10 +338,10 @@ namespace AuthHive.Auth.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error checking membership: User {UserId}, Org {OrgId}", 
+                _logger.LogError(ex, "Error checking membership: User {UserId}, Org {OrgId}",
                     userId, organizationId);
                 return ServiceResult<bool>.Failure(
-                    $"Failed to check membership: {ex.Message}", 
+                    $"Failed to check membership: {ex.Message}",
                     "QUERY_ERROR");
             }
         }
@@ -328,7 +364,7 @@ namespace AuthHive.Auth.Services
                 if (connected.Status != ConnectedIdStatus.Active)
                 {
                     return ServiceResult.Failure(
-                        $"ConnectedId is not active: {connected.Status}", 
+                        $"ConnectedId is not active: {connected.Status}",
                         "CONNECTED_ID_INACTIVE");
                 }
 
@@ -336,7 +372,7 @@ namespace AuthHive.Auth.Services
                 if (connected.IsDeleted)
                 {
                     return ServiceResult.Failure(
-                        "ConnectedId has been deleted", 
+                        "ConnectedId has been deleted",
                         "CONNECTED_ID_DELETED");
                 }
 
@@ -346,7 +382,7 @@ namespace AuthHive.Auth.Services
             {
                 _logger.LogError(ex, "Error validating ConnectedId: {ConnectedId}", connectedId);
                 return ServiceResult.Failure(
-                    $"Failed to validate ConnectedId: {ex.Message}", 
+                    $"Failed to validate ConnectedId: {ex.Message}",
                     "VALIDATION_ERROR");
             }
         }

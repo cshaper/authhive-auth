@@ -14,6 +14,7 @@ using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

@@ -13,6 +13,7 @@ using AuthHive.Auth.Services.Context;
 using System.Security.Cryptography;
 using System.Text;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

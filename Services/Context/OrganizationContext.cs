@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Security.Claims;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 

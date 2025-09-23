@@ -16,6 +16,7 @@ using AuthHive.Auth.Services.Context;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Entities.Audit;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

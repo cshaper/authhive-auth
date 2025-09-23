@@ -3,6 +3,9 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
+
+// using AuthHive.Core.Interfaces.Organization.Service; // 다른 곳에서 사용하지 않는다면, 이 줄을 삭제하거나 주석 처리하는 것이 좋습니다.
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -18,7 +21,8 @@ namespace AuthHive.Auth.Repositories
         private readonly ILogger<AccessTokenRepository> _logger;
 
         public AccessTokenRepository(
-            AuthDbContext context,
+           AuthDbContext context,
+            // --- FIX: BaseRepository가 필요로 하는 정확한 IOrganizationContext 타입을 명시 ---
             IOrganizationContext organizationContext,
             ILogger<AccessTokenRepository> logger,
             IMemoryCache? cache = null) : base(context, organizationContext, cache)
@@ -39,8 +43,8 @@ namespace AuthHive.Auth.Repositories
                 .Include(t => t.Session)
                 .Include(t => t.PlatformApplication)
                 .FirstOrDefaultAsync(t => t.TokenHash == tokenHash &&
-                                          t.IsActive &&
-                                          !t.IsRevoked);
+                                            t.IsActive &&
+                                            !t.IsRevoked);
         }
 
         public async Task<IEnumerable<AccessToken>> GetActiveAccessTokensAsync(Guid connectedId)
@@ -51,9 +55,9 @@ namespace AuthHive.Auth.Repositories
                 .Include(t => t.Client)
                 .Include(t => t.Session)
                 .Where(t => t.ConnectedId == connectedId &&
-                           t.IsActive &&
-                           !t.IsRevoked &&
-                           t.ExpiresAt > now)
+                              t.IsActive &&
+                              !t.IsRevoked &&
+                              t.ExpiresAt > now)
                 .OrderByDescending(t => t.IssuedAt)
                 .ToListAsync();
         }
@@ -75,8 +79,8 @@ namespace AuthHive.Auth.Repositories
 
             return await Query()
                 .Where(t => t.ExpiresAt < now &&
-                           t.ExpiresAt >= cutoffDate &&
-                           !t.IsRevoked)
+                              t.ExpiresAt >= cutoffDate &&
+                              !t.IsRevoked)
                 .OrderBy(t => t.ExpiresAt)
                 .ToListAsync();
         }
@@ -150,9 +154,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<int> RevokeAllAccessTokensForSessionAsync(Guid sessionId, string reason)
         {
             var now = DateTime.UtcNow;
-
-            // ExecuteUpdateAsync를 사용하여 DB에서 직접 일괄 업데이트를 실행합니다.
-            // 불필요한 데이터 조회가 없고, DB 왕복이 단 한 번만 발생합니다.
+            
             var affectedRows = await Query()
                 .Where(t => t.SessionId == sessionId && !t.IsRevoked)
                 .ExecuteUpdateAsync(updates => updates
@@ -175,8 +177,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<int> RevokeAllAccessTokensForClientAsync(Guid clientId, string reason)
         {
             var now = DateTime.UtcNow;
-
-            // 위와 동일한 패턴으로, 조건만 ClientId로 변경합니다.
+            
             var affectedRows = await Query()
                 .Where(t => t.ClientId == clientId && !t.IsRevoked)
                 .ExecuteUpdateAsync(updates => updates

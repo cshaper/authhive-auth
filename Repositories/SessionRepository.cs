@@ -7,6 +7,7 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -27,7 +28,7 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<SessionRepository> logger,
-            IMemoryCache? cache = null) 
+            IMemoryCache? cache = null)
             : base(context, organizationContext, cache)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -40,12 +41,18 @@ namespace AuthHive.Auth.Repositories
             // 전역 세션은 조직 필터링을 우회해야 하므로 _dbSet 직접 사용
             return await _dbSet
                 .Where(s => !s.IsDeleted &&
-                           s.UserId == userId && 
+                           s.UserId == userId &&
                            s.Level == SessionLevel.Global &&
                            s.Status == SessionStatus.Active)
                 .FirstOrDefaultAsync();
         }
-
+        public async Task<IEnumerable<SessionEntity>> GetByUserIdAsync(Guid userId)
+        {
+            return await _context.Sessions
+                .Include(s => s.Organization)
+                .Where(s => s.UserId == userId)
+                .ToListAsync();
+        }
         public async Task<IEnumerable<SessionEntity>> GetActiveGlobalSessionsAsync()
         {
             // 전역 세션 조회 - 조직 필터링 우회
@@ -161,13 +168,13 @@ namespace AuthHive.Auth.Repositories
             }
 
             await _context.SaveChangesAsync();
-            
+
             // 캐시 무효화
             foreach (var session in sessions)
             {
                 InvalidateCache(session.Id);
             }
-            
+
             return sessions.Count;
         }
 
@@ -357,7 +364,7 @@ namespace AuthHive.Auth.Repositories
             {
                 return _dbSet.AsQueryable();
             }
-            
+
             // 조직 컨텍스트가 없을 때는 전역 쿼리
             return _organizationContext.CurrentOrganizationId == null
                 ? _dbSet.Where(e => !e.IsDeleted)
@@ -373,7 +380,7 @@ namespace AuthHive.Auth.Repositories
             {
                 return _dbSet.Where(s => s.OrganizationId == organizationId);
             }
-            
+
             return QueryForOrganization(organizationId);
         }
 
@@ -421,9 +428,9 @@ namespace AuthHive.Auth.Repositories
         }
 
         #endregion
-        
+
         #region Override 메서드
-        
+
         /// <summary>
         /// SessionEntity는 조직 스코프이지만 전역 세션도 있어서 특별 처리 필요
         /// </summary>
@@ -433,7 +440,7 @@ namespace AuthHive.Auth.Repositories
             // 컨텍스트에 따라 다르게 처리
             return _organizationContext.CurrentOrganizationId.HasValue;
         }
-        
+
         #endregion
     }
 }

@@ -11,6 +11,7 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using System.Text.Json;
 using static AuthHive.Core.Enums.Core.UserEnums;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories.Organization
 {

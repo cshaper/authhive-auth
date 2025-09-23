@@ -9,6 +9,7 @@ using Microsoft.Extensions.Caching.Memory;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using System.Text.Json;
 using AuthHive.Core.Models.Organization.Responses;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories.Organization
 {

@@ -12,6 +12,7 @@ using Microsoft.Extensions.Caching.Memory;
 using System.Linq.Expressions;
 using System.Text.Json;
 using AuthHive.Core.Interfaces.Infra.Security;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

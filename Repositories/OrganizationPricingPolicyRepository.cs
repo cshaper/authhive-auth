@@ -12,6 +12,7 @@ using AuthHive.Core.Enums.Business;
 using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Core.Models.Business.Payment.Common;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

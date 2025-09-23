@@ -18,6 +18,12 @@ using AuthHive.Core.Enums.Auth;
 using System.Text.Json;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Models.Auth.Authentication.Common;
+using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Auth.Data.Context;
+using AuthHive.Core.Models.Auth.Authentication;
+using UserEntity = AuthHive.Core.Entities.User.User;
+using static AuthHive.Core.Enums.Core.UserEnums;
+using Microsoft.EntityFrameworkCore;
 
 namespace AuthHive.Auth.Services.Organization
 {
@@ -37,19 +43,24 @@ namespace AuthHive.Auth.Services.Organization
         private readonly IUnitOfWork _unitOfWork;
         private readonly IMemoryCache _cache;
         private readonly ILogger<OrganizationSSOService> _logger;
-
+        private readonly IConnectedIdService _connectedIdService;
+        private readonly AuthDbContext _context;
         public OrganizationSSOService(
             IOrganizationSSORepository ssoRepository,
             IOrganizationRepository organizationRepository,
             IUnitOfWork unitOfWork,
             IMemoryCache cache,
-            ILogger<OrganizationSSOService> logger)
+            ILogger<OrganizationSSOService> logger,
+            IConnectedIdService connectedIdService,
+            AuthDbContext context)
         {
             _ssoRepository = ssoRepository;
             _organizationRepository = organizationRepository;
             _unitOfWork = unitOfWork;
             _cache = cache;
             _logger = logger;
+            _connectedIdService = connectedIdService;
+            _context = context;
         }
 
         #region IService Implementation
@@ -146,7 +157,91 @@ namespace AuthHive.Auth.Services.Organization
                 return ServiceResult<OrganizationSSOResponse>.Failure($"Failed to configure SSO: {ex.Message}");
             }
         }
+        public async Task<ServiceResult<AuthenticationOutcome>> ProcessSsoResponseAsync(Guid organizationId, string samlResponse)
+        {
+            try
+            {
+                // 1. 조직의 SSO 설정을 가져옵니다.
+                var ssoConfigs = await _ssoRepository.GetActiveByOrganizationAsync(organizationId);
+                var ssoConfig = ssoConfigs.FirstOrDefault(s => s.IsDefault); // 기본 설정을 사용하거나, 적절한 설정을 찾습니다.
 
+                if (ssoConfig == null)
+                {
+                    return ServiceResult<AuthenticationOutcome>.Failure("No active SSO configuration found for the organization.", "SSO_NOT_CONFIGURED");
+                }
+
+                // --- ❗ 중요 ❗ ---
+                // TODO: 여기에 SAML 라이브러리(예: ITfoxtec.Identity.Saml2, Sustainsys.Saml2)를 사용하여
+                //       SAML 응답을 검증하고 사용자 속성(Attribute)을 추출하는 로직을 구현해야 합니다.
+                //       아래는 검증이 성공했다고 가정한 시뮬레이션 코드입니다.
+
+                // --- SAML 검증 및 속성 추출 (시뮬레이션) ---
+                var samlValidationResult = new
+                {
+                    IsValid = true, // SAML 응답이 유효한가?
+                    Email = "user.from.sso@example.com", // NameID 또는 Email 속성
+                    FirstName = "Sso",
+                    LastName = "User",
+                    ExternalId = "sso-user-12345" // 공급자 측의 사용자 고유 ID
+                };
+                // --- 시뮬레이션 끝 ---
+
+                if (!samlValidationResult.IsValid || string.IsNullOrEmpty(samlValidationResult.Email))
+                {
+                    return ServiceResult<AuthenticationOutcome>.Failure("Invalid SAML response or missing user identifier.", "INVALID_SAML_RESPONSE");
+                }
+
+                var userEmail = samlValidationResult.Email;
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == userEmail);
+                bool isNewUser = false;
+
+                // 3. 사용자가 없으면 자동 생성 옵션에 따라 새로 만듭니다.
+                if (user == null)
+                {
+                    if (!ssoConfig.AutoCreateUsers)
+                    {
+                        return ServiceResult<AuthenticationOutcome>.Failure($"User with email {userEmail} does not exist and auto-creation is disabled.", "USER_NOT_FOUND");
+                    }
+
+                    user = new UserEntity
+                    {
+                        Email = userEmail,
+                        DisplayName = $"{samlValidationResult.FirstName} {samlValidationResult.LastName}".Trim(),
+                        Status = UserStatus.Active,
+                        EmailVerified = true // SSO를 통해 왔으므로 이메일은 검증된 것으로 간주
+                    };
+                    _context.Users.Add(user);
+                    await _unitOfWork.SaveChangesAsync();
+                    isNewUser = true;
+                }
+
+                // 4. ConnectedId를 찾거나 생성합니다.
+                var connectedIdResult = await _connectedIdService.GetOrCreateAsync(user.Id, organizationId);
+                if (!connectedIdResult.IsSuccess || connectedIdResult.Data == null)
+                {
+                    return ServiceResult<AuthenticationOutcome>.Failure("Failed to get or create a connection for the user to the organization.", "CONNECTED_ID_ERROR");
+                }
+
+                // 5. 최종 인증 결과를 반환합니다.
+                var outcome = new AuthenticationOutcome
+                {
+                    Success = true,
+                    UserId = user.Id,
+                    ConnectedId = connectedIdResult.Data.Id,
+                    IsNewUser = isNewUser,
+                    Provider = ssoConfig.ProviderName.ToString(),
+                    ExternalId = samlValidationResult.ExternalId,
+                    AuthenticationMethod = "SSO"
+                };
+
+                return ServiceResult<AuthenticationOutcome>.Success(outcome);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "An error occurred while processing SSO response for organization {OrganizationId}", organizationId);
+                return ServiceResult<AuthenticationOutcome>.Failure("An unexpected error occurred during SSO processing.", "SSO_PROCESSING_ERROR");
+            }
+        }
         public async Task<ServiceResult<OrganizationSSOListResponse>> GetSSOConfigurationsAsync(
             Guid organizationId)
         {

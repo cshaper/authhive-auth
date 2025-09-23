@@ -14,6 +14,7 @@ using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.User.Requests;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

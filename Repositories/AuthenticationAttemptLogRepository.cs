@@ -13,6 +13,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Security;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -562,7 +563,7 @@ namespace AuthHive.Auth.Repositories
                     Username = g.Key.Username ?? string.Empty,
                     FailureCount = g.Count(),
                     LastFailure = g.Max(x => x.AttemptedAt),
-                    IsLocked = false // 별도 조회 필요
+                    IsAccountLocked = false // 별도 조회 필요
                 })
                 .OrderByDescending(x => x.FailureCount)
                 .Take(Math.Min(topCount, 50)) // 안전한 제한

@@ -27,6 +27,7 @@ using AuthHive.Core.Constants.Auth;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Auth.Services.Authentication;
+using AuthHive.Core.Models.Auth.Session.Common;
 
 namespace AuthHive.Auth.Services.Handlers
 {
@@ -155,10 +156,9 @@ namespace AuthHive.Auth.Services.Handlers
                     Method = ParseAuthenticationMethod(eventData.LoginMethod),
                     IpAddress = eventData.IpAddress,
                     UserAgent = eventData.UserAgent,
-                    DeviceInfo = new DeviceInfo
-                    {
-                        UserAgent = eventData.UserAgent
-                    }
+                    DeviceInfo = !string.IsNullOrEmpty(eventData.UserAgent)
+                        ? new DeviceInfo { UserAgent = eventData.UserAgent }
+                        : null
                 };
 
                 await _authAttemptService.LogAuthenticationAttemptAsync(authRequest);

@@ -17,6 +17,7 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Base;
 using AuthHive.Core.Models.User.Requests;
 using static AuthHive.Core.Enums.Core.UserEnums;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

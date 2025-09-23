@@ -9,6 +9,7 @@ using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories.Organization;
 

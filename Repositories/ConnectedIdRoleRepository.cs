@@ -15,6 +15,7 @@ using AuthHive.Core.Interfaces.Base;
 using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Models.Auth.Role;
 using AuthHive.Core.Models.Business.Platform.Common;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {

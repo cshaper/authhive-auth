@@ -224,7 +224,7 @@ namespace AuthHive.Auth.Providers.OAuth
                     {
                         if (profile.TryGetProperty("nickname", out var nickname))
                         {
-                            userInfo.Name = nickname.GetString();
+                            userInfo.Username = nickname.GetString();
                         }
 
                         if (profile.TryGetProperty("profile_image_url", out var profileImage))

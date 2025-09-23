@@ -8,6 +8,7 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Models.Organization.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;

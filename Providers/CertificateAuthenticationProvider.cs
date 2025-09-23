@@ -171,7 +171,7 @@ namespace AuthHive.Auth.Providers.Authentication
                     new Claim("auth_method", "certificate"),
                     new Claim("cert_thumbprint", certificate.Thumbprint),
                     new Claim("cert_subject", certificate.Subject),
-                    new Claim("session_id", sessionResult.Data?.SessionId.ToString() ?? "")
+                    new Claim("session_id", (sessionResult.Data?.SessionId.ToString()) ?? string.Empty)
                 };
 
                 var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
@@ -198,7 +198,7 @@ namespace AuthHive.Auth.Providers.Authentication
                     OrganizationId = organizationId,
                     ApplicationId = request.ApplicationId,
                     AuthenticationMethod = AuthenticationMethod.Certificate.ToString(),
-                    AuthenticationStrength = Core.Models.Auth.Authentication.AuthenticationStrength.VeryHigh
+                    AuthenticationStrength = AuthenticationStrength.VeryHigh
                 });
             }
             catch (Exception ex)

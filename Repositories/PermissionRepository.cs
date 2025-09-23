@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System;
 using System.Linq;
 using AuthHive.Core.Models.Auth.Permissions.Common;
+using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {
