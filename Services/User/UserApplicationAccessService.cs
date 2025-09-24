@@ -2,403 +2,202 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
-using AuthHive.Core.Entities.PlatformApplications;
-using AuthHive.Core.Entities.Auth;
-using AuthHive.Core.Entities.Audit;
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Interfaces.User.Service;
+using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.User.Repository;
-using AuthHive.Core.Interfaces.PlatformApplication.Repository;
-using AuthHive.Core.Interfaces.Audit.Repository;
-using AuthHive.Core.Interfaces.Infra;
-using AuthHive.Core.Interfaces.Infra.UserExperience;
+using AuthHive.Core.Interfaces.User.Service;
 using AuthHive.Core.Models.Common;
-using AuthHive.Core.Models.PlatformApplication;
 using AuthHive.Core.Models.PlatformApplication.Requests;
 using AuthHive.Core.Models.PlatformApplication.Responses;
+using AutoMapper; // AutoMapper를 사용하기 위해 필요
+using Microsoft.Extensions.Logging;
+using AuthHive.Core.Entities.PlatformApplications;
+using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Models.PlatformApplication.Views;
-using AuthHive.Core.Models.User;
+using AuthHive.Core.Interfaces.PlatformApplication.Repository;
+using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.Infra.UserExperience;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Entities.Audit;
 using AuthHive.Core.Models.User.Requests;
-using AuthHive.Auth.Data.Context;
-using System.Threading;
-using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Models.User;
 
 
 namespace AuthHive.Auth.Services.User
 {
-    /// <summary>
-    /// 사용자 애플리케이션 접근 권한 관리 서비스 구현 - AuthHive v15
-    /// ConnectedId가 Application에 접근할 수 있는 권한을 관리하는 핵심 서비스입니다.
-    /// 
-    /// ApplicationAccessService와 차이점:
-    /// - ApplicationAccessService: SaaS 팀 관리, 초대, 멀티테넌트 관점
-    /// - UserApplicationAccessService: 개별 사용자 권한, 템플릿, 권한 검증 관점
-    /// </summary>
     public class UserApplicationAccessService : IUserApplicationAccessService
     {
-        private readonly AuthDbContext _context;
-        private readonly IUserApplicationAccessRepository _accessRepository;
-        private readonly IPlatformApplicationAccessTemplateRepository _templateRepository;
-        private readonly IPlatformApplicationRepository _applicationRepository;
-        private readonly IAuditLogRepository _auditRepository;
-        private readonly ILogger<UserApplicationAccessService> _logger;
-        private readonly IDateTimeProvider _dateTimeProvider;
-        private readonly ICacheService _cacheService;
-        private readonly IEmailService _emailService;
-
         private const string CACHE_KEY_PREFIX = "user_app_access";
-        private const string CACHE_KEY_MATRIX = "access_matrix";
+        private const string CACHE_KEY_MATRIX = $"{CACHE_KEY_PREFIX}:matrix";
         private const int DEFAULT_CACHE_MINUTES = 15;
+        private readonly IUserApplicationAccessRepository _accessRepository;
+        private readonly IPlatformApplicationAccessTemplateRepository _templateRepository;        private readonly IPlatformApplicationRepository _applicationRepository;
+        private readonly IOrganizationRepository _organizationRepository;
+        private readonly IAuditService _auditService;
+        private readonly ICacheService _cacheService;
+        private readonly IDateTimeProvider _dateTimeProvider;
+        private readonly IEmailService _emailService;
+        private readonly IMapper _mapper; // 의존성 주입으로 받은 Mapper 인스턴스
+        private readonly ILogger<UserApplicationAccessService> _logger;
 
         public UserApplicationAccessService(
-            AuthDbContext context,
             IUserApplicationAccessRepository accessRepository,
-            IPlatformApplicationAccessTemplateRepository templateRepository,
             IPlatformApplicationRepository applicationRepository,
-            IAuditLogRepository auditRepository,
-            ILogger<UserApplicationAccessService> logger,
+            IPlatformApplicationAccessTemplateRepository templateRepository,
+            IOrganizationRepository organizationRepository,
+            IAuditService auditService,
             IDateTimeProvider dateTimeProvider,
+            IEmailService emailService,
             ICacheService cacheService,
-            IEmailService emailService)
+            IMapper mapper,
+            ILogger<UserApplicationAccessService> logger)
         {
-            _context = context;
             _accessRepository = accessRepository;
-            _templateRepository = templateRepository;
             _applicationRepository = applicationRepository;
-            _auditRepository = auditRepository;
-            _logger = logger;
+            _organizationRepository = organizationRepository;
+            _templateRepository = templateRepository;
+            _auditService = auditService;
             _dateTimeProvider = dateTimeProvider;
             _cacheService = cacheService;
             _emailService = emailService;
+            _mapper = mapper; // 주입받은 인스턴스를 필드에 할당
+            _logger = logger;
         }
 
-        #region 접근 권한 CRUD
+        #region IService Implementation
+        public Task InitializeAsync()
+        {
+            _logger.LogInformation("UserApplicationAccessService initialized.");
+            return Task.CompletedTask;
+        }
 
-        /// <inheritdoc />
-        public async Task<ServiceResult<UserApplicationAccessResponse>> GetAccessAsync(
-            Guid connectedId,
-            Guid applicationId)
+        public async Task<bool> IsHealthyAsync()
         {
             try
             {
-                // 캐시 확인
-                var cacheKey = GetCacheKey(connectedId, applicationId);
-                var cached = await _cacheService.GetAsync<UserApplicationAccessResponse>(cacheKey);
-                if (cached != null)
-                {
-                    return ServiceResult<UserApplicationAccessResponse>.Success(cached);
-                }
-
-                // Repository에서 조회
-                var access = await _accessRepository.GetByConnectedIdAndApplicationAsync(
-                    connectedId, applicationId);
-
-                if (access == null)
-                {
-                    return ServiceResult<UserApplicationAccessResponse>.NotFound(
-                        $"No access found for ConnectedId {connectedId} to Application {applicationId}");
-                }
-
-                var response = MapToResponse(access);
-
-                // 캐시 저장
-                await _cacheService.SetAsync(cacheKey, response,
-                    TimeSpan.FromMinutes(DEFAULT_CACHE_MINUTES));
-
-                return ServiceResult<UserApplicationAccessResponse>.Success(response);
+                await _accessRepository.ExistsAsync(Guid.Empty, Guid.Empty);
+                return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Failed to get access for ConnectedId {ConnectedId} to Application {ApplicationId}",
-                    connectedId, applicationId);
-                return ServiceResult<UserApplicationAccessResponse>.Failure(
-                    "Failed to retrieve access information", "GET_ACCESS_ERROR");
+                _logger.LogError(ex, "UserApplicationAccessService health check failed.");
+                return false;
             }
         }
+        #endregion
+        
+        #region 접근 권한 CRUD
 
-        /// <inheritdoc />
-        public async Task<ServiceResult<UserApplicationAccessResponse>> CreateAccessAsync(
-            CreateUserApplicationAccessRequest request,
-            Guid grantedByConnectedId)
+        public async Task<ServiceResult<UserApplicationAccessResponse>> GetAccessAsync(Guid connectedId, Guid applicationId)
+        {
+            var access = await _accessRepository.GetByConnectedIdAndApplicationAsync(connectedId, applicationId);
+            if (access == null)
+            {
+                return ServiceResult<UserApplicationAccessResponse>.NotFound("Access rights not found.");
+            }
+            // CS0120 오류 수정: 정적 Mapper.Map 대신 주입받은 _mapper 인스턴스 사용
+            var response = _mapper.Map<UserApplicationAccessResponse>(access);
+            return ServiceResult<UserApplicationAccessResponse>.Success(response);
+        }
+
+        public async Task<ServiceResult<UserApplicationAccessResponse>> CreateAccessAsync(CreateUserApplicationAccessRequest request, Guid grantedByConnectedId)
         {
             try
             {
-                // 1. 권한 부여자의 권한 확인
-                var granterAccess = await _accessRepository.GetByConnectedIdAndApplicationAsync(
-                    grantedByConnectedId, request.ApplicationId);
-
+                var granterAccess = await _accessRepository.GetByConnectedIdAndApplicationAsync(grantedByConnectedId, request.ApplicationId);
                 if (!CanGrantAccess(granterAccess, request.AccessLevel))
                 {
-                    return ServiceResult<UserApplicationAccessResponse>.Forbidden(
-                        "Insufficient permissions to grant this access level");
+                    return ServiceResult<UserApplicationAccessResponse>.Forbidden("Insufficient permissions.");
                 }
 
-                // 2. 중복 확인
-                var existingAccess = await _accessRepository.ExistsAsync(
-                    request.ConnectedId, request.ApplicationId);
-
-                if (existingAccess)
+                if (await _accessRepository.ExistsAsync(request.ConnectedId, request.ApplicationId))
                 {
-                    return ServiceResult<UserApplicationAccessResponse>.Failure(
-                        "Access already exists for this user and application", "DUPLICATE_ACCESS");
+                    return ServiceResult<UserApplicationAccessResponse>.Failure("Access already exists.", "DUPLICATE_ACCESS");
                 }
 
-                // 3. 애플리케이션 정보 조회
                 var application = await _applicationRepository.GetByIdAsync(request.ApplicationId);
                 if (application == null)
                 {
-                    return ServiceResult<UserApplicationAccessResponse>.NotFound(
-                        "Application not found");
+                    return ServiceResult<UserApplicationAccessResponse>.NotFound("Application not found.");
                 }
 
-                // 4. 템플릿 적용 (선택사항)
-                if (request.AccessTemplateId.HasValue)
-                {
-                    var template = await _templateRepository.GetByIdAsync(request.AccessTemplateId.Value);
-                    if (template != null)
-                    {
-                        request.AccessLevel = template.Level;
-                        request.AdditionalPermissions = ParsePermissions(template.PermissionPatterns);
-                    }
-                }
+                var access = _mapper.Map<UserPlatformApplicationAccess>(request);
+                access.Id = Guid.NewGuid();
+                access.OrganizationId = application.OrganizationId;
+                access.GrantedAt = _dateTimeProvider.UtcNow;
+                access.GrantedByConnectedId = grantedByConnectedId;
+                access.CreatedByConnectedId = grantedByConnectedId;
+                access.CreatedAt = _dateTimeProvider.UtcNow;
+                access.IsActive = true;
 
-                // 5. 엔티티 생성
-                var access = new UserPlatformApplicationAccess
-                {
-                    Id = Guid.NewGuid(),
-                    ConnectedId = request.ConnectedId,
-                    ApplicationId = request.ApplicationId,
-                    OrganizationId = application.OrganizationId,
-                    AccessLevel = request.AccessLevel,
-                    AccessTemplateId = request.AccessTemplateId,
-                    RoleId = request.RoleId,
-                    Scopes = SerializeList(request.Scopes ?? new List<string> { "read" }),
-                    AdditionalPermissions = SerializeList(request.AdditionalPermissions),
-                    ExcludedPermissions = SerializeList(request.ExcludedPermissions),
-                    GrantedAt = _dateTimeProvider.UtcNow,
-                    ExpiresAt = request.ExpiresAt,
-                    GrantReason = request.GrantReason,
-                    IsActive = true,
-                    IsInherited = false,
-                    CreatedAt = _dateTimeProvider.UtcNow,
-                    CreatedByConnectedId = grantedByConnectedId,
-                    GrantedByConnectedId = grantedByConnectedId
-                };
+                var newAccess = await _accessRepository.AddAsync(access);
 
-                await _accessRepository.AddAsync(access);
+                await _auditService.LogActionAsync(AuditActionType.Create, "ACCESS_GRANTED", grantedByConnectedId, resourceId: newAccess.Id.ToString());
 
-                // 6. 감사 로그
-                await LogAuditAsync(
-                    grantedByConnectedId,
-                    "ACCESS_GRANTED",
-                    $"Granted {request.AccessLevel} access to user {request.ConnectedId} for application {request.ApplicationId}",
-                    application.Id,
-                    application.OrganizationId,
-                    new Dictionary<string, object>
-                    {
-                        ["TargetConnectedId"] = request.ConnectedId,
-                        ["AccessLevel"] = request.AccessLevel.ToString(),
-                        ["TemplateId"] = request.AccessTemplateId?.ToString() ?? "none"
-                    });
-
-                // 7. 알림 발송
-                SendAccessGrantedNotification(request.ConnectedId, application.Id, application.Name);
-
-                var response = MapToResponse(access);
-                return ServiceResult<UserApplicationAccessResponse>.Success(response);
+                return ServiceResult<UserApplicationAccessResponse>.Success(_mapper.Map<UserApplicationAccessResponse>(newAccess));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to create access for {ConnectedId}", request.ConnectedId);
-                return ServiceResult<UserApplicationAccessResponse>.Failure(
-                    "Failed to create access", "CREATE_ACCESS_ERROR");
+                return ServiceResult<UserApplicationAccessResponse>.Failure("Failed to create access.", "CREATE_ACCESS_ERROR");
             }
         }
 
-        /// <inheritdoc />
-        public async Task<ServiceResult<UserApplicationAccessResponse>> UpdateAccessAsync(
-            Guid accessId,
-            UpdateUserApplicationAccessRequest request,
-            Guid updatedByConnectedId)
+        public async Task<ServiceResult<UserApplicationAccessResponse>> UpdateAccessAsync(Guid accessId, UpdateUserApplicationAccessRequest request, Guid updatedByConnectedId)
         {
-            try
+             try
             {
-                // 1. 기존 접근 권한 조회
                 var access = await _accessRepository.GetByIdAsync(accessId);
                 if (access == null)
                 {
-                    return ServiceResult<UserApplicationAccessResponse>.NotFound(
-                        "Access not found");
+                    return ServiceResult<UserApplicationAccessResponse>.NotFound("Access not found");
                 }
 
-                // 2. 수정 권한 확인
-                var updaterAccess = await _accessRepository.GetByConnectedIdAndApplicationAsync(
-                    updatedByConnectedId, access.ApplicationId);
-
+                var updaterAccess = await _accessRepository.GetByConnectedIdAndApplicationAsync(updatedByConnectedId, access.ApplicationId);
                 if (!CanModifyAccess(updaterAccess, access))
                 {
-                    return ServiceResult<UserApplicationAccessResponse>.Forbidden(
-                        "Insufficient permissions to modify this access");
+                    return ServiceResult<UserApplicationAccessResponse>.Forbidden("Insufficient permissions.");
                 }
-
-                // 3. 낙관적 동시성 제어
-                if (request.RowVersion != null && access.RowVersion != null && !access.RowVersion.SequenceEqual(request.RowVersion))
-                {
-                    return ServiceResult<UserApplicationAccessResponse>.Failure(
-                        "The access has been modified by another user", "CONCURRENCY_CONFLICT");
-                }
-
-                // 4. 변경사항 추적
-                var changes = new Dictionary<string, object>();
-
-                if (request.AccessLevel.HasValue && request.AccessLevel != access.AccessLevel)
-                {
-                    changes["AccessLevel"] = $"{access.AccessLevel} -> {request.AccessLevel}";
-                    access.AccessLevel = request.AccessLevel.Value;
-                }
-
-                if (request.AccessTemplateId != access.AccessTemplateId)
-                {
-                    changes["TemplateId"] = $"{access.AccessTemplateId} -> {request.AccessTemplateId}";
-                    access.AccessTemplateId = request.AccessTemplateId;
-                }
-
-                if (request.RoleId != access.RoleId)
-                {
-                    changes["RoleId"] = $"{access.RoleId} -> {request.RoleId}";
-                    access.RoleId = request.RoleId;
-                }
-
-                if (request.Scopes != null)
-                {
-                    var newScopes = SerializeList(request.Scopes);
-                    if (newScopes != access.Scopes)
-                    {
-                        changes["Scopes"] = $"{access.Scopes} -> {newScopes}";
-                        access.Scopes = newScopes;
-                    }
-                }
-
-                if (request.AdditionalPermissions != null)
-                {
-                    access.AdditionalPermissions = SerializeList(request.AdditionalPermissions);
-                }
-
-                if (request.ExcludedPermissions != null)
-                {
-                    access.ExcludedPermissions = SerializeList(request.ExcludedPermissions);
-                }
-
-                if (request.ExpiresAt != access.ExpiresAt)
-                {
-                    changes["ExpiresAt"] = $"{access.ExpiresAt} -> {request.ExpiresAt}";
-                    access.ExpiresAt = request.ExpiresAt;
-                }
-
-                if (request.IsActive.HasValue && request.IsActive != access.IsActive)
-                {
-                    changes["IsActive"] = $"{access.IsActive} -> {request.IsActive}";
-                    access.IsActive = request.IsActive.Value;
-                }
-
+                
+                _mapper.Map(request, access);
                 access.UpdatedAt = _dateTimeProvider.UtcNow;
                 access.UpdatedByConnectedId = updatedByConnectedId;
 
                 await _accessRepository.UpdateAsync(access);
-
-                // 5. 캐시 무효화
-                await InvalidateCacheAsync(access.ConnectedId, access.ApplicationId);
-
-                // 6. 감사 로그
-                await LogAuditAsync(
-                    updatedByConnectedId,
-                    "ACCESS_UPDATED",
-                    $"Updated access {accessId}",
-                    access.ApplicationId,
-                    access.OrganizationId,
-                    changes);
-
-                var response = MapToResponse(access);
-                return ServiceResult<UserApplicationAccessResponse>.Success(response);
+                return ServiceResult<UserApplicationAccessResponse>.Success(_mapper.Map<UserApplicationAccessResponse>(access));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to update access {AccessId}", accessId);
-                return ServiceResult<UserApplicationAccessResponse>.Failure(
-                    "Failed to update access", "UPDATE_ACCESS_ERROR");
+                return ServiceResult<UserApplicationAccessResponse>.Failure("Failed to update access.", "UPDATE_ACCESS_ERROR");
             }
         }
 
-        /// <inheritdoc />
-        public async Task<ServiceResult> RevokeAccessAsync(
-            Guid connectedId,
-            Guid applicationId,
-            Guid revokedByConnectedId,
-            string? reason = null)
+        public async Task<ServiceResult> RevokeAccessAsync(Guid connectedId, Guid applicationId, Guid revokedByConnectedId, string? reason = null)
         {
             try
             {
-                // 1. 접근 권한 조회
-                var access = await _accessRepository.GetByConnectedIdAndApplicationAsync(
-                    connectedId, applicationId);
-
+                var access = await _accessRepository.GetByConnectedIdAndApplicationAsync(connectedId, applicationId);
                 if (access == null)
                 {
                     return ServiceResult.NotFound("Access not found");
                 }
 
-                // 2. 권한 확인
-                var revokerAccess = await _accessRepository.GetByConnectedIdAndApplicationAsync(
-                    revokedByConnectedId, applicationId);
-
+                var revokerAccess = await _accessRepository.GetByConnectedIdAndApplicationAsync(revokedByConnectedId, applicationId);
                 if (!CanRevokeAccess(revokerAccess, access))
                 {
-                    return ServiceResult.Failure(
-                        "Insufficient permissions to revoke this access", "FORBIDDEN");
+                    return ServiceResult.Failure("Insufficient permissions.");
                 }
 
-                // 3. Soft Delete
-                access.IsDeleted = true;
-                access.DeletedAt = _dateTimeProvider.UtcNow;
-                access.DeletedByConnectedId = revokedByConnectedId;
-                access.IsActive = false;
-
-                await _accessRepository.UpdateAsync(access);
-
-                // 4. 캐시 무효화
-                await InvalidateCacheAsync(connectedId, applicationId);
-
-                // 5. 감사 로그
-                await LogAuditAsync(
-                    revokedByConnectedId,
-                    "ACCESS_REVOKED",
-                    $"Revoked access for user {connectedId} to application {applicationId}",
-                    applicationId,
-                    access.OrganizationId,
-                    new Dictionary<string, object>
-                    {
-                        ["TargetConnectedId"] = connectedId,
-                        ["Reason"] = reason ?? "No reason provided"
-                    });
-
-                // 6. 알림 발송
-                SendAccessRevokedNotification(connectedId, applicationId, reason);
-
-                return ServiceResult.Success("Access revoked successfully");
+                await _accessRepository.DeleteAsync(access.Id, revokedByConnectedId);
+                return ServiceResult.Success("Access revoked successfully.");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Failed to revoke access for {ConnectedId} to {ApplicationId}",
-                    connectedId, applicationId);
-                return ServiceResult.Failure("Failed to revoke access", "REVOKE_ERROR");
+                _logger.LogError(ex, "Failed to revoke access for {ConnectedId} to {ApplicationId}", connectedId, applicationId);
+                return ServiceResult.Failure("Failed to revoke access.", "REVOKE_ERROR");
             }
         }
-
         #endregion
 
         #region 템플릿 기반 권한 관리
@@ -1332,45 +1131,6 @@ namespace AuthHive.Auth.Services.User
 
         #endregion
 
-        #region IService Implementation
-
-        /// <inheritdoc />
-        public async Task<bool> IsHealthyAsync()
-        {
-            try
-            {
-                // Check database connection
-                await _context.Database.CanConnectAsync();
-
-                // Check cache service
-                await _cacheService.GetAsync<string>("health_check");
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <inheritdoc />
-        public async Task InitializeAsync()
-        {
-            try
-            {
-                // Initialize any required resources
-                _logger.LogInformation("UserApplicationAccessService initialized");
-                await Task.CompletedTask;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize UserApplicationAccessService");
-                throw;
-            }
-        }
-
-        #endregion
-
         #region Private Helper Methods
 
         private UserApplicationAccessResponse MapToResponse(
@@ -1597,7 +1357,7 @@ namespace AuthHive.Auth.Services.User
                     CreatedByConnectedId = performedByConnectedId
                 };
 
-                await _auditRepository.AddAsync(auditLog);
+                await _auditService.LogAsync(auditLog);
             }
             catch (Exception ex)
             {

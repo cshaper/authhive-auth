@@ -33,6 +33,7 @@ using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 using static AuthHive.Core.Constants.Event.EventTypeConstants;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.User
 {

@@ -25,6 +25,7 @@ using AuthHive.Core.Models.External;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Models;
 using AuthHive.Core.Interfaces.Audit.Repository;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.PlatformApplication
 {

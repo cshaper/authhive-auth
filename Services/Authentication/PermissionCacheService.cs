@@ -18,6 +18,7 @@ using AuthHive.Core.Constants.Auth;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 
 using PermissionEntity = AuthHive.Core.Entities.Auth.Permission;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.Permissions
 {
@@ -55,7 +56,21 @@ namespace AuthHive.Auth.Services.Permissions
         }
 
         #region Core Cache Operations
+        public Task InitializeAsync()
+        {
+            _logger.LogInformation("PermissionCacheService Initialized. Starting cache warm-up...");
+            return WarmupFrequentlyUsedPermissionsAsync();
+        }
 
+        /// <summary>
+        /// 서비스의 건강 상태를 확인합니다. 이 서비스는 캐시 서비스에 의존합니다.
+        /// </summary>
+        public async Task<bool> IsHealthyAsync()
+        {
+            return await _cacheService.IsHealthyAsync();
+        }
+
+        #endregion
         /// <summary>
         /// ID로 권한을 조회합니다.
         /// 
@@ -208,7 +223,7 @@ namespace AuthHive.Auth.Services.Permissions
                 );
             }
         }
-        #endregion
+
 
         #region Cache Invalidation
 

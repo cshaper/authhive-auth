@@ -7,7 +7,7 @@ using AuthHive.Core.Entities.Audit;
 using AuthHive.Core.Entities.System;
 using Microsoft.AspNetCore.Http;
 using System.Linq.Expressions;
-
+using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 namespace AuthHive.Auth.Data.Context
 {
     public class AuthDbContext : DbContext
@@ -50,7 +50,7 @@ namespace AuthHive.Auth.Data.Context
         #endregion
 
         #region Organization 도메인
-        public DbSet<Organization> Organizations { get; set; }
+        public DbSet<OrganizationEntity> Organizations { get; set; }
         public DbSet<OrganizationMembership> OrganizationMemberships { get; set; }
         public DbSet<OrganizationMemberProfile> OrganizationMemberProfiles { get; set; }
         public DbSet<OrganizationSettings> OrganizationSettings { get; set; }
@@ -354,7 +354,7 @@ namespace AuthHive.Auth.Data.Context
             #endregion
 
             #region Organization 설정
-            modelBuilder.Entity<Organization>(entity =>
+            modelBuilder.Entity<OrganizationEntity>(entity =>
             {
                 entity.ToTable("organizations");
                 entity.HasIndex(o => o.Name);

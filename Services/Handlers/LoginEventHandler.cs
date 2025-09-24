@@ -28,6 +28,7 @@ using static AuthHive.Core.Enums.Core.UserEnums;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Auth.Services.Authentication;
 using AuthHive.Core.Models.Auth.Session.Common;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.Handlers
 {

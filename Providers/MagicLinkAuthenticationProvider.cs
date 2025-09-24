@@ -13,6 +13,7 @@ using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Infra.UserExperience;
 using AuthHive.Core.Models.Auth.Authentication;
 using AuthHive.Core.Models.Auth.Authentication.Requests;

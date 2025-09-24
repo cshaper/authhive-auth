@@ -13,6 +13,7 @@ using AuthHive.Core.Interfaces.Base;
 using System.Collections.Generic;
 using System.Text.Json;
 using AuthHive.Core.Interfaces.Infra.Monitoring;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.Handlers
 {

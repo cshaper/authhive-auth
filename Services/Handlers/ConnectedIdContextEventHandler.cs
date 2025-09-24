@@ -16,6 +16,7 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Auth.ConnectedId.Events;
 using System.Text.Json;
 using System.Diagnostics;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.Handlers
 {

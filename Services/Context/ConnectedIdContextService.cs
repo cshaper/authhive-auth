@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using AuthHive.Core.Entities.Auth;
 using System.Text.Json;
 using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Services.Context
 {

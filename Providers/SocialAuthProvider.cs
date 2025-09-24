@@ -17,6 +17,7 @@ using AuthHive.Auth.Providers.OAuth.Factory;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
 using UserEntity = AuthHive.Core.Entities.User.User;
+using AuthHive.Core.Interfaces.Infra.Cache;
 namespace AuthHive.Auth.Services.Providers
 {
     /// <summary>
