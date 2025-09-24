@@ -16,7 +16,7 @@ using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
 using Microsoft.Extensions.Logging;
 
-namespace AuthHive.Organization.Handlers
+namespace AuthHive.Auth.Organization.Handlers
 {
     /// <summary>
     /// 조직 정책 이벤트 핸들러 - 정책 관련 도메인 이벤트를 처리하고 후속 작업을 수행합니다.

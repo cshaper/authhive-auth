@@ -422,7 +422,7 @@ namespace AuthHive.Auth.Services.Handlers
                 var primaryConnectedId = connectedIds.FirstOrDefault()?.Id ?? Guid.Empty;
                 await LogUserActivityAsync(
                     primaryConnectedId,
-                    UserActivityType.LogoutAllDevices,
+                    UserActivityType.Logout,
                     true,
                     new
                     {

@@ -281,12 +281,12 @@ namespace AuthHive.Auth.Handlers.User
                 UserActivityType.TwoFactorEnabled,
                 UserActivityType.TwoFactorDisabled,
                 UserActivityType.RoleAssigned,
-                UserActivityType.RoleRevoked,
+                UserActivityType.RoleRemoved,
                 UserActivityType.PermissionGranted,
                 UserActivityType.PermissionRevoked,
                 UserActivityType.AccountLocked,
                 UserActivityType.AccountUnlocked,
-                UserActivityType.FailedLoginAttempt
+                UserActivityType.LoginFailed
             };
 
             return importantTypes.Contains(activityType);
@@ -298,12 +298,12 @@ namespace AuthHive.Auth.Handlers.User
             {
                 UserActivityType.Login => AuditActionType.Login,
                 UserActivityType.Logout => AuditActionType.Logout,
-                UserActivityType.FailedLoginAttempt => AuditActionType.FailedLogin,
+                UserActivityType.LoginFailed => AuditActionType.FailedLogin,
                 UserActivityType.PasswordChanged => AuditActionType.PasswordChange,
-                UserActivityType.DataModification => AuditActionType.Update,
+                UserActivityType.SettingsChange => AuditActionType.Update,
                 UserActivityType.FileUpload or UserActivityType.FileDownload => AuditActionType.Read,
                 UserActivityType.RoleAssigned or UserActivityType.PermissionGranted => AuditActionType.Grant,
-                UserActivityType.RoleRevoked or UserActivityType.PermissionRevoked => AuditActionType.Revoke,
+                UserActivityType.RoleRemoved or UserActivityType.PermissionRevoked => AuditActionType.Revoke,
                 UserActivityType.AccountLocked => AuditActionType.Blocked,
                 _ => AuditActionType.Read
             };

@@ -17,7 +17,7 @@ namespace AuthHive.Auth.Handlers.User
     /// SaaS 최적화 사용자 프로필 이벤트 핸들러
     /// 동적 프로필 필드 및 멀티테넌트 지원
     /// </summary>
-    public class UserProfileEventHandler : IUserProfileEventHandler, IService
+    public class UserProfileEventHandler : IUserProfileEventHandler
     {
         private readonly ILogger<UserProfileEventHandler> _logger;
         private readonly IAuditService _auditService;
@@ -58,7 +58,9 @@ namespace AuthHive.Auth.Handlers.User
         }
         #endregion
 
-        public async Task OnUserProfileCreatedAsync(UserProfileCreatedEvent @event, CancellationToken cancellationToken = default)
+        #region IUserProfileEventHandler Implementation
+
+        public async Task HandleProfileCreatedAsync(UserProfileCreatedEvent @event, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -66,7 +68,8 @@ namespace AuthHive.Auth.Handlers.User
                 var profileData = new Dictionary<string, object>
                 {
                     ["profile_id"] = @event.ProfileId,
-                    ["created_at"] = _dateTimeProvider.UtcNow
+                    ["created_at"] = _dateTimeProvider.UtcNow,
+                    ["user_id"] = @event.UserId
                 };
                 
                 // 선택적 필드들 - SaaS 고객이 정의한 필드도 수용
@@ -77,9 +80,6 @@ namespace AuthHive.Auth.Handlers.User
                 if (!string.IsNullOrEmpty(@event.PreferredLanguage))
                     profileData["language"] = @event.PreferredLanguage;
                     
-                // 동적 메타데이터 병합
-                MergeDynamicMetadata(profileData, @event.Metadata);
-                
                 // 프로필 캐시 설정 (짧은 TTL)
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 await _cacheService.SetAsync(cacheKey, profileData, TimeSpan.FromMinutes(PROFILE_CACHE_MINUTES));
@@ -90,6 +90,8 @@ namespace AuthHive.Auth.Handlers.User
                     "PROFILE_CREATED",
                     @event.CreatedByConnectedId ?? @event.UserId,
                     resourceId: @event.ProfileId.ToString());
+                    
+                _logger.LogInformation("Profile created for UserId: {UserId}", @event.UserId);
             }
             catch (Exception ex)
             {
@@ -98,7 +100,42 @@ namespace AuthHive.Auth.Handlers.User
             }
         }
 
-        public async Task OnUserProfileUpdatedAsync(UserProfileUpdatedEvent @event, CancellationToken cancellationToken = default)
+        public async Task HandleProfileViewedAsync(UserProfileViewedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 프로필 조회 이력 기록
+                var viewData = new Dictionary<string, object>
+                {
+                    ["profile_id"] = @event.ProfileId,
+                    ["viewer_id"] = @event.ViewerConnectedId ?? Guid.Empty,
+                    ["viewed_at"] = @event.ViewedAt,
+                    ["view_context"] = @event.ViewContext ?? "Unknown",
+                    ["ip_address"] = @event.IpAddress ?? "N/A",
+                    ["user_agent"] = @event.UserAgent ?? "N/A"
+                };
+
+                // 자기 프로필 조회가 아닌 경우만 감사 로그
+                if (@event.ViewerConnectedId.HasValue && @event.ViewerConnectedId != @event.UserId)
+                {
+                    await _auditService.LogActionAsync(
+                        Core.Enums.Core.AuditActionType.Read,
+                        "PROFILE_VIEWED",
+                        @event.ViewerConnectedId.Value,
+                        resourceId: @event.ProfileId.ToString(),
+                        metadata: viewData);
+                }
+
+                _logger.LogDebug("Profile viewed - ProfileId: {ProfileId}, Viewer: {ViewerId}", 
+                    @event.ProfileId, @event.ViewerConnectedId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Profile view processing failed for ProfileId: {ProfileId}", @event.ProfileId);
+            }
+        }
+
+        public async Task HandleProfileUpdatedAsync(ProfileUpdatedEvent @event, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -106,90 +143,276 @@ namespace AuthHive.Auth.Handlers.User
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 await _cacheService.RemoveAsync(cacheKey);
                 
-                // 동적 변경 사항 처리
-                var changes = new Dictionary<string, object>
-                {
-                    ["updated_fields"] = @event.UpdatedFields,
-                    ["updated_at"] = _dateTimeProvider.UtcNow
-                };
-                
-                // 중요 필드 변경만 감사
-                if (ContainsCriticalFields(@event.UpdatedFields))
-                {
-                    await _auditService.LogActionAsync(
-                        Core.Enums.Core.AuditActionType.Update,
-                        "PROFILE_CRITICAL_UPDATE",
-                        @event.UpdatedByConnectedId ?? @event.UserId,
-                        resourceId: @event.ProfileId.ToString(),
-                        metadata: changes);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Profile update processing failed for UserId: {UserId}", @event.UserId);
-            }
-        }
-
-        public async Task OnPhoneVerifiedAsync(PhoneVerifiedEvent @event, CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                // 보안 레벨 캐시 업데이트
-                var securityKey = $"{CACHE_KEY_PREFIX}:security:{@event.UserId:N}";
-                var securityData = await _cacheService.GetAsync<Dictionary<string, object>>(securityKey) 
-                    ?? new Dictionary<string, object>();
-                    
-                securityData["phone_verified"] = true;
-                securityData["phone_verified_at"] = _dateTimeProvider.UtcNow;
-                
-                await _cacheService.SetAsync(securityKey, securityData, TimeSpan.FromHours(1));
+                // 변경 사항 처리
+                var changes = @event.Changes ?? new Dictionary<string, object>();
+                changes["updated_at"] = @event.UpdatedAt;
+                changes["updated_by"] = @event.UpdatedByConnectedId;
+                changes["new_completion"] = @event.NewCompletionPercentage;
                 
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Update,
-                    "PHONE_VERIFIED",
-                    @event.UserId,
-                    resourceId: @event.UserId.ToString());
+                    "PROFILE_UPDATED",
+                    @event.UpdatedByConnectedId,
+                    resourceId: @event.ProfileId.ToString(),
+                    metadata: changes);
+                    
+                _logger.LogInformation("Profile updated - ProfileId: {ProfileId}, CompletionPercentage: {Percentage}%", 
+                    @event.ProfileId, @event.NewCompletionPercentage);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Phone verification processing failed for UserId: {UserId}", @event.UserId);
+                _logger.LogError(ex, "Profile update processing failed for ProfileId: {ProfileId}", @event.ProfileId);
             }
         }
 
-        public async Task OnNotificationSettingsChangedAsync(NotificationSettingsChangedEvent @event, CancellationToken cancellationToken = default)
+        public async Task HandleProfileDeletedAsync(ProfileDeletedEvent @event, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 동적 알림 설정 처리
-                Dictionary<string, object> settings;
-                try
-                {
-                    settings = JsonSerializer.Deserialize<Dictionary<string, object>>(@event.NewSettings) 
-                        ?? new Dictionary<string, object>();
-                }
-                catch
-                {
-                    settings = new Dictionary<string, object> { ["raw"] = @event.NewSettings };
-                }
+                // 캐시 삭제
+                var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
+                await _cacheService.RemoveAsync(cacheKey);
                 
-                // 알림 설정 캐시
-                var cacheKey = $"{CACHE_KEY_PREFIX}:notifications:{@event.UserId:N}";
-                await _cacheService.SetAsync(cacheKey, settings, TimeSpan.FromHours(24));
-                
-                // 변경 카테고리가 중요한 경우만 로그
-                if (@event.ChangedCategories.Length > 0)
-                {
-                    _logger.LogInformation("Notification settings updated for UserId: {UserId}, Categories: {Count}", 
-                        @event.UserId, @event.ChangedCategories.Length);
-                }
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Delete,
+                    "PROFILE_DELETED",
+                    @event.DeletedByConnectedId,
+                    resourceId: @event.ProfileId.ToString());
+                    
+                _logger.LogWarning("Profile deleted - ProfileId: {ProfileId}, DeletedBy: {DeletedBy}", 
+                    @event.ProfileId, @event.DeletedByConnectedId);
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Notification settings update failed for UserId: {UserId}", @event.UserId);
-                // 알림 설정 실패는 무시
+                _logger.LogError(ex, "Profile deletion processing failed for ProfileId: {ProfileId}", @event.ProfileId);
             }
         }
+
+        public async Task HandleProfileErrorAsync(ProfileErrorEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 에러 로깅
+                _logger.LogError("Profile error occurred - UserId: {UserId}, ErrorType: {ErrorType}, Message: {Message}", 
+                    @event.UserId, @event.ErrorType, @event.ErrorMessage);
+                    
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Configuration,
+                    $"PROFILE_ERROR_{@event.ErrorType}",
+                    @event.UserId,
+                    resourceId: @event.UserId.ToString(),
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["error_type"] = @event.ErrorType,
+                        ["error_message"] = @event.ErrorMessage
+                    });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Profile error processing failed for UserId: {UserId}", @event.UserId);
+            }
+        }
+
+        public async Task HandleProfileImageUploadedAsync(ProfileImageUploadedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 이미지 업로드 정보 캐시
+                var cacheKey = $"{CACHE_KEY_PREFIX}:image:{@event.UserId:N}";
+                var imageData = new Dictionary<string, object>
+                {
+                    ["url"] = @event.NewImageUrl,
+                    ["size"] = @event.ImageSize,
+                    ["content_type"] = @event.ContentType,
+                    ["uploaded_at"] = @event.UploadedAt
+                };
+                
+                await _cacheService.SetAsync(cacheKey, imageData, TimeSpan.FromDays(7));
+                
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Update,
+                    "PROFILE_IMAGE_UPLOADED",
+                    @event.UploadedByConnectedId,
+                    resourceId: @event.UserId.ToString(),
+                    metadata: imageData);
+                    
+                _logger.LogInformation("Profile image uploaded - UserId: {UserId}, Size: {Size} bytes", 
+                    @event.UserId, @event.ImageSize);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Profile image upload processing failed for UserId: {UserId}", @event.UserId);
+            }
+        }
+
+        public async Task HandleProfileImageDeletedAsync(ProfileImageDeletedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 이미지 캐시 삭제
+                var cacheKey = $"{CACHE_KEY_PREFIX}:image:{@event.UserId:N}";
+                await _cacheService.RemoveAsync(cacheKey);
+                
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Delete,
+                    "PROFILE_IMAGE_DELETED",
+                    @event.DeletedByConnectedId,
+                    resourceId: @event.UserId.ToString());
+                    
+                _logger.LogInformation("Profile image deleted - UserId: {UserId}", @event.UserId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Profile image deletion processing failed for UserId: {UserId}", @event.UserId);
+            }
+        }
+
+        public async Task HandleMetadataModeChangedAsync(MetadataModeChangedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 메타데이터 모드 변경 처리
+                var changeData = new Dictionary<string, object>
+                {
+                    ["old_mode"] = @event.OldMode.ToString(),
+                    ["new_mode"] = @event.NewMode.ToString(),
+                    ["changed_at"] = @event.ChangedAt,
+                    ["changed_by"] = @event.ChangedByConnectedId
+                };
+                
+                // 캐시 무효화 (모드 변경은 중요한 변경)
+                var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
+                await _cacheService.RemoveAsync(cacheKey);
+                
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Update,
+                    "METADATA_MODE_CHANGED",
+                    @event.ChangedByConnectedId,
+                    resourceId: @event.UserId.ToString(),
+                    metadata: changeData);
+                    
+                _logger.LogWarning("Metadata mode changed - UserId: {UserId}, From: {OldMode} To: {NewMode}", 
+                    @event.UserId, @event.OldMode, @event.NewMode);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Metadata mode change processing failed for UserId: {UserId}", @event.UserId);
+            }
+        }
+
+        public async Task HandleBulkMetadataCleanedAsync(BulkMetadataCleanedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 대량 메타데이터 정리 처리
+                var cleanupData = new Dictionary<string, object>
+                {
+                    ["mode"] = @event.Mode.ToString(),
+                    ["cleaned_count"] = @event.CleanedCount,
+                    ["cutoff_date"] = @event.CutoffDate,
+                    ["cleaned_at"] = @event.CleanedAt,
+                    ["user_count"] = @event.CleanedUserIds.Count
+                };
+                
+                // 영향받은 사용자들의 캐시 무효화
+                foreach (var userId in @event.CleanedUserIds)
+                {
+                    var cacheKey = $"{CACHE_KEY_PREFIX}:{userId:N}";
+                    await _cacheService.RemoveAsync(cacheKey);
+                }
+                
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Delete,
+                    "BULK_METADATA_CLEANED",
+                    @event.UserId,
+                    resourceId: "BULK_OPERATION",
+                    metadata: cleanupData);
+                    
+                _logger.LogWarning("Bulk metadata cleaned - Mode: {Mode}, Count: {Count}, Users: {UserCount}", 
+                    @event.Mode, @event.CleanedCount, @event.CleanedUserIds.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Bulk metadata cleanup processing failed");
+            }
+        }
+
+        public async Task HandleDataExportedAsync(DataExportedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 데이터 내보내기 처리
+                var exportData = new Dictionary<string, object>
+                {
+                    ["format"] = @event.Format,
+                    ["exported_at"] = @event.ExportedAt,
+                    ["data_size"] = @event.DataSize
+                };
+                
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Export,
+                    "DATA_EXPORTED",
+                    @event.UserId,
+                    resourceId: @event.UserId.ToString(),
+                    metadata: exportData);
+                    
+                _logger.LogInformation("Data exported - UserId: {UserId}, Format: {Format}, Size: {Size} bytes", 
+                    @event.UserId, @event.Format, @event.DataSize);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Data export processing failed for UserId: {UserId}", @event.UserId);
+            }
+        }
+
+        public async Task HandleTimeZoneChangedAsync(TimeZoneChangedEvent @event, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 시간대 변경 처리
+                var changeData = new Dictionary<string, object>
+                {
+                    ["old_timezone"] = @event.OldTimeZone,
+                    ["new_timezone"] = @event.NewTimeZone,
+                    ["changed_at"] = @event.ChangedAt,
+                    ["changed_by"] = @event.ChangedByConnectedId
+                };
+                
+                // 캐시 업데이트
+                var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
+                var profileData = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey);
+                if (profileData != null)
+                {
+                    profileData["timezone"] = @event.NewTimeZone;
+                    await _cacheService.SetAsync(cacheKey, profileData, TimeSpan.FromMinutes(PROFILE_CACHE_MINUTES));
+                }
+                
+                // 감사 로그
+                await _auditService.LogActionAsync(
+                    Core.Enums.Core.AuditActionType.Update,
+                    "TIMEZONE_CHANGED",
+                    @event.ChangedByConnectedId,
+                    resourceId: @event.UserId.ToString(),
+                    metadata: changeData);
+                    
+                _logger.LogInformation("TimeZone changed - UserId: {UserId}, From: {OldTZ} To: {NewTZ}", 
+                    @event.UserId, @event.OldTimeZone, @event.NewTimeZone);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "TimeZone change processing failed for UserId: {UserId}", @event.UserId);
+            }
+        }
+
+        #endregion
 
         #region Helper Methods
         

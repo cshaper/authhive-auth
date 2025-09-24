@@ -19,7 +19,7 @@ namespace AuthHive.Auth.Handlers.User
     /// <summary>
     /// SaaS 최적화된 핵심 사용자 이벤트 핸들러
     /// </summary>
-    public class UserEventHandler : IUserEventHandler, IService
+    public class UserEventHandler : ICoreUserEventHandler, IService
     {
         private readonly ILogger<UserEventHandler> _logger;
         private readonly IAuditService _auditService;
@@ -76,6 +76,8 @@ namespace AuthHive.Auth.Handlers.User
         }
         #endregion
 
+        #region ICoreUserEventHandler Implementation
+
         public async Task OnUserCreatedAsync(UserCreatedEvent @event, CancellationToken cancellationToken = default)
         {
             try
@@ -92,20 +94,21 @@ namespace AuthHive.Auth.Handlers.User
                         To = @event.Email,
                         Subject = "Welcome",
                         Body = "Welcome to AuthHive",
-                        // TemplateKey와 DynamicData는 EmailMessageDto에 추가 필요
                         Tags = metadata.Count > 0 ? ConvertToStringDict(metadata) : null
                     }), cancellationToken);
                 }
 
                 await _auditService.LogActionAsync(
                     AuditActionType.Create,
-                    UserActivityType.FirstLogin.ToString(), // 문자열 대신 enum 사용
+                    UserActivityType.FirstLogin.ToString(),
                     @event.CreatedByConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: metadata);
 
                 await _unitOfWork.CommitTransactionAsync(cancellationToken);
                 await InvalidateUserCacheAsync(@event.UserId);
+                
+                _logger.LogInformation("User created successfully - UserId: {UserId}", @event.UserId);
             }
             catch (Exception ex)
             {
@@ -143,6 +146,9 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ChangedByConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: changeMetadata);
+                    
+                _logger.LogInformation("User status changed - UserId: {UserId}, From: {OldStatus} To: {NewStatus}", 
+                    @event.UserId, @event.OldStatus, @event.NewStatus);
             }
             catch (Exception ex)
             {
@@ -155,13 +161,14 @@ namespace AuthHive.Auth.Handlers.User
             try
             {
                 var statsKey = $"{CACHE_KEY_PREFIX}:login_stats:{@event.UserId:N}:{_dateTimeProvider.UtcNow:yyyy-MM-dd}";
-
-                // CS1503 오류 수정: IncrementAsync는 (string key, long increment = 1) 시그니처
-                // TimeSpan은 SetAsync 이후에 별도로 처리
+                
+                // Increment login count
                 var newCount = await _cacheService.IncrementAsync(statsKey);
-
-                // 또는 increment 값을 명시적으로 전달
-                // var newCount = await _cacheService.IncrementAsync(statsKey, 1);
+                
+                // Store the count as a dictionary to comply with SetAsync<T> reference type requirement
+                var statsData = new Dictionary<string, object> { ["count"] = newCount };
+                var endOfDay = _dateTimeProvider.UtcNow.Date.AddDays(1);
+                await _cacheService.SetAsync(statsKey, statsData, endOfDay - _dateTimeProvider.UtcNow);
 
                 if (@event.IsFirstLogin)
                 {
@@ -172,7 +179,9 @@ namespace AuthHive.Auth.Handlers.User
                 {
                     ["ip"] = @event.IPAddress ?? "unknown",
                     ["method"] = @event.AuthenticationMethod ?? "standard",
-                    ["2fa"] = @event.TwoFactorUsed
+                    ["2fa"] = @event.TwoFactorUsed,
+                    ["first_login"] = @event.IsFirstLogin,
+                    ["login_count"] = newCount
                 };
 
                 if (!string.IsNullOrEmpty(@event.Metadata))
@@ -192,6 +201,9 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: loginMetadata);
+                    
+                _logger.LogInformation("User logged in - UserId: {UserId}, Method: {Method}, FirstLogin: {FirstLogin}", 
+                    @event.UserId, @event.AuthenticationMethod, @event.IsFirstLogin);
             }
             catch (Exception ex)
             {
@@ -208,6 +220,8 @@ namespace AuthHive.Auth.Handlers.User
                 if (!@event.IsSoftDelete)
                 {
                     _logger.LogWarning("Hard delete requested for UserId: {UserId} - redirecting to cleanup service", @event.UserId);
+                    // In production, this would trigger a separate cleanup process
+                    await _unitOfWork.CommitTransactionAsync(cancellationToken);
                     return;
                 }
 
@@ -215,18 +229,22 @@ namespace AuthHive.Auth.Handlers.User
 
                 var deleteMetadata = new Dictionary<string, object>
                 {
-                    ["soft_delete"] = true,
-                    ["reason"] = @event.Reason ?? "user_requested"
+                    ["soft_delete"] = @event.IsSoftDelete,
+                    ["reason"] = @event.Reason ?? "user_requested",
+                    ["retention_days"] = 30  // Fixed default retention period
                 };
 
                 await _auditService.LogActionAsync(
                     AuditActionType.Delete,
-                    UserActivityType.AccountLocked.ToString(),
+                    UserActivityType.AccountDeleted.ToString(),
                     @event.DeletedByConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: deleteMetadata);
 
                 await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                
+                _logger.LogWarning("User deleted - UserId: {UserId}, SoftDelete: {SoftDelete}, Reason: {Reason}", 
+                    @event.UserId, @event.IsSoftDelete, @event.Reason);
             }
             catch (Exception ex)
             {
@@ -242,11 +260,22 @@ namespace AuthHive.Auth.Handlers.User
             {
                 await InvalidateUserCacheAsync(@event.UserId);
 
+                var verificationMetadata = new Dictionary<string, object>
+                {
+                    ["email"] = @event.Email,
+                    ["verified_at"] = @event.VerifiedAt,
+                    ["method"] = @event.VerificationMethod ?? "unknown"
+                };
+
                 await _auditService.LogActionAsync(
                     AuditActionType.Update,
                     UserActivityType.EmailVerified.ToString(),
                     @event.UserId,
-                    resourceId: @event.UserId.ToString());
+                    resourceId: @event.UserId.ToString(),
+                    metadata: verificationMetadata);
+                    
+                _logger.LogInformation("Email verified - UserId: {UserId}, Email: {Email}", 
+                    @event.UserId, @event.Email);
             }
             catch (Exception ex)
             {
@@ -262,18 +291,64 @@ namespace AuthHive.Auth.Handlers.User
                 await _cacheService.RemoveAsync(securityKey);
 
                 var activityType = @event.Enabled ? UserActivityType.TwoFactorEnabled : UserActivityType.TwoFactorDisabled;
+                
+                var twoFactorMetadata = new Dictionary<string, object>
+                {
+                    ["enabled"] = @event.Enabled,
+                    ["type"] = @event.TwoFactorType,
+                    ["changed_at"] = @event.ChangedAt,
+                    ["changed_by"] = @event.ChangedByConnectedId ?? @event.UserId
+                };
 
                 await _auditService.LogActionAsync(
                     AuditActionType.Update,
                     activityType.ToString(),
                     @event.ChangedByConnectedId ?? @event.UserId,
-                    resourceId: @event.UserId.ToString());
+                    resourceId: @event.UserId.ToString(),
+                    metadata: twoFactorMetadata);
+                    
+                _logger.LogInformation("2FA setting changed - UserId: {UserId}, Enabled: {Enabled}, Type: {Type}", 
+                    @event.UserId, @event.Enabled, @event.TwoFactorType);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "2FA setting change failed for UserId: {UserId}", @event.UserId);
             }
         }
+
+        #endregion
+
+        #region IDomainEventHandler Implementation
+        
+        public async Task HandleAsync(object domainEvent, CancellationToken cancellationToken = default)
+        {
+            switch (domainEvent)
+            {
+                case UserCreatedEvent userCreated:
+                    await OnUserCreatedAsync(userCreated, cancellationToken);
+                    break;
+                case UserStatusChangedEvent statusChanged:
+                    await OnUserStatusChangedAsync(statusChanged, cancellationToken);
+                    break;
+                case UserLoggedInEvent loggedIn:
+                    await OnUserLoggedInAsync(loggedIn, cancellationToken);
+                    break;
+                case UserDeletedEvent deleted:
+                    await OnUserDeletedAsync(deleted, cancellationToken);
+                    break;
+                case EmailVerifiedEvent emailVerified:
+                    await OnEmailVerifiedAsync(emailVerified, cancellationToken);
+                    break;
+                case TwoFactorSettingChangedEvent twoFactorChanged:
+                    await OnTwoFactorSettingChangedAsync(twoFactorChanged, cancellationToken);
+                    break;
+                default:
+                    _logger.LogWarning("Unknown event type: {EventType}", domainEvent?.GetType().Name);
+                    break;
+            }
+        }
+
+        #endregion
 
         #region Helper Methods
 
@@ -312,7 +387,10 @@ namespace AuthHive.Auth.Handlers.User
             if (cached != null)
                 return cached;
 
-            return new TenantSettings { SendWelcomeEmail = true };
+            // In production, this would fetch from database
+            var settings = new TenantSettings { SendWelcomeEmail = true };
+            await _cacheService.SetAsync(cacheKey, settings, TimeSpan.FromHours(1));
+            return settings;
         }
 
         private async Task InvalidateUserCacheAsync(Guid userId)
@@ -327,7 +405,8 @@ namespace AuthHive.Auth.Handlers.User
             {
                 $"user*{userId:N}*",
                 $"profile*{userId:N}*",
-                $"permission*{userId:N}*"
+                $"permission*{userId:N}*",
+                $"session*{userId:N}*"
             };
 
             foreach (var pattern in patterns)
@@ -338,6 +417,7 @@ namespace AuthHive.Auth.Handlers.User
 
         private async Task PublishOnboardingEventAsync(Guid userId)
         {
+            // In production, this would publish to event bus
             _logger.LogInformation("Onboarding event published for UserId: {UserId}", userId);
             await Task.CompletedTask;
         }
@@ -348,17 +428,24 @@ namespace AuthHive.Auth.Handlers.User
             {
                 ["max_retries"] = 3,
                 ["timeout_seconds"] = 30,
-                ["batch_size"] = 100
+                ["batch_size"] = 100,
+                ["enable_dead_letter"] = true
             };
         }
 
         #endregion
 
+        #region Private Classes
+        
         private class TenantSettings
         {
             public bool SendWelcomeEmail { get; set; }
             public bool EnableAudit { get; set; } = true;
             public int MaxLoginAttempts { get; set; } = 5;
+            public bool RequireEmailVerification { get; set; } = true;
+            public bool AllowMultipleSessions { get; set; } = true;
         }
+        
+        #endregion
     }
 }

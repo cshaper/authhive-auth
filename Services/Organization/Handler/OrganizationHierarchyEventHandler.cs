@@ -16,7 +16,7 @@ using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Models.Organization;
 using Microsoft.Extensions.Logging;
 
-namespace AuthHive.Organization.Handlers
+namespace AuthHive.Auth.Organization.Handlers
 {
     /// <summary>
     /// 조직 계층 구조 이벤트 핸들러 - 계층 구조 변경 관련 이벤트를 처리합니다.

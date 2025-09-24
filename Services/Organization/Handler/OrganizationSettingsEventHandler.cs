@@ -16,7 +16,7 @@ using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
 using Microsoft.Extensions.Logging;
 
-namespace AuthHive.Organization.Handlers
+namespace AuthHive.Auth.Organization.Handlers
 {
     /// <summary>
     /// 조직 설정 이벤트를 처리하고, 캐시 무효화 및 감사 로깅과 같은 후속 조치를 수행합니다.
