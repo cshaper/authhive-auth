@@ -21,6 +21,7 @@ using AuthHive.Auth.Middleware;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using Serilog;
+using AuthHive.Infrastructure.Events;
 
 Log.Logger = new LoggerConfiguration()
    .WriteTo.Console()
@@ -35,6 +36,7 @@ try
         .WriteTo.Console());
 
     // Core Services
+    builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
