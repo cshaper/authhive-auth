@@ -20,27 +20,22 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Auth.ConnectedId.Requests;
 using AuthHive.Core.Constants.Business;
-using AuthHive.Core.Constants.Auth;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 using static AuthHive.Core.Enums.Core.UserEnums;
-using Newtonsoft.Json.Linq;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Models.Common.Validation;
+using Microsoft.EntityFrameworkCore;
+using ValidationResult = AuthHive.Core.Interfaces.Base.ValidationResult;
+using ValidationError = AuthHive.Core.Interfaces.Base.ValidationError;
 
 namespace AuthHive.Auth.Validators
 {
     /// <summary>
     /// ConnectedId Validator Implementation - AuthHive v15 SaaS Edition
-    /// 
-    /// Core SaaS Philosophy:
-    /// 1. "We build SaaS" - Multi-tenancy is paramount
-    /// 2. "Embrace dynamic data" - CustomFields and JSON validation
-    /// 3. "Cache is money" - All repeated queries must be cached
-    /// 4. "Respect tenant isolation" - Strict OrganizationId separation
     /// </summary>
-    public class ConnectedIdValidator : IConnectedIdValidator, IValidator<ConnectedId>
+    public class ConnectedIdValidator : IConnectedIdValidator
     {
         private readonly ILogger<ConnectedIdValidator> _logger;
         private readonly IHttpContextAccessor _httpContextAccessor;
@@ -48,20 +43,17 @@ namespace AuthHive.Auth.Validators
         private readonly IUserRepository _userRepository;
         private readonly IOrganizationRepository _organizationRepository;
         private readonly IPlanService _planService;
-        private readonly IRoleRepository _roleRepository;
         private readonly ISessionRepository _sessionRepository;
-        private readonly IPermissionService _permissionService;
         private readonly ICacheService _cacheService;
         private readonly IAuditService _auditService;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IDateTimeProvider _dateTimeProvider;
         private readonly IInvitationRepository _invitationRepository;
+        private readonly IConnectedIdRoleRepository _connectedIdRoleRepository;
+        private readonly IRoleService _roleService;
 
-        // Cache key constants
+        // Cache constants
         private const string CACHE_KEY_ORG_MEMBER_COUNT = "org:members:count:{0}";
-        private const string CACHE_KEY_ORG_PLAN = "org:plan:{0}";
-        private const string CACHE_KEY_USER_ORG_COUNT = "user:orgs:count:{0}";
-        private const string CACHE_KEY_VALIDATION = "validation:connectedid:{0}:{1}";
         private const int CACHE_DURATION_SECONDS = 300;
 
         public ConnectedIdValidator(
@@ -71,14 +63,14 @@ namespace AuthHive.Auth.Validators
             IUserRepository userRepository,
             IOrganizationRepository organizationRepository,
             IPlanService planService,
-            IRoleRepository roleRepository,
             ISessionRepository sessionRepository,
-            IPermissionService permissionService,
             ICacheService cacheService,
             IAuditService auditService,
             IUnitOfWork unitOfWork,
             IDateTimeProvider dateTimeProvider,
-            IInvitationRepository invitationRepository)
+            IInvitationRepository invitationRepository,
+            IConnectedIdRoleRepository connectedIdRoleRepository,
+            IRoleService roleService)
         {
             _logger = logger;
             _httpContextAccessor = httpContextAccessor;
@@ -86,145 +78,125 @@ namespace AuthHive.Auth.Validators
             _userRepository = userRepository;
             _organizationRepository = organizationRepository;
             _planService = planService;
-            _roleRepository = roleRepository;
             _sessionRepository = sessionRepository;
-            _permissionService = permissionService;
             _cacheService = cacheService;
             _auditService = auditService;
             _unitOfWork = unitOfWork;
             _dateTimeProvider = dateTimeProvider;
             _invitationRepository = invitationRepository;
+            _connectedIdRoleRepository = connectedIdRoleRepository;
+            _roleService = roleService;
         }
 
         #region IValidator<ConnectedId> Implementation
 
-        /// <summary>
-        /// Entity creation validation
-        /// </summary>
         public async Task<ValidationResult> ValidateCreateAsync(ConnectedId entity)
         {
-            var result = new ValidationResult();
-            
+            var result = new ValidationResult { IsValid = true };
+
             try
             {
                 await _unitOfWork.BeginTransactionAsync();
 
-                // Multi-tenant isolation validation
-                if (!await ValidateOrganizationContextAsync(entity.OrganizationId))
-                {
-                    result.AddError("Unauthorized organization access", "UNAUTHORIZED_ORGANIZATION");
-                    await LogValidationAttemptAsync("CREATE", entity, result);
-                    return result;
-                }
-
                 // Required field validation
                 if (entity.UserId == Guid.Empty)
                 {
-                    result.AddError("UserId is required", "REQUIRED_USER_ID");
+                    result.AddError("UserId", "UserId is required", "REQUIRED_USER_ID");
                 }
 
                 if (entity.OrganizationId == Guid.Empty)
                 {
-                    result.AddError("OrganizationId is required", "REQUIRED_ORGANIZATION_ID");
+                    result.AddError("OrganizationId", "OrganizationId is required", "REQUIRED_ORGANIZATION_ID");
                 }
 
                 // User existence check
-                var user = await _userRepository.GetByIdAsync(entity.UserId);
+                var user = await SafeGetUserAsync(entity.UserId);
                 if (user == null || user.IsDeleted)
                 {
-                    result.AddError("Invalid user", "INVALID_USER");
+                    result.AddError("UserId", "Invalid user", "INVALID_USER");
                 }
 
                 // Organization existence check
-                var organization = await _organizationRepository.GetByIdAsync(entity.OrganizationId);
-                if (organization == null || organization.IsDeleted)
+                var organization = await SafeGetOrganizationAsync(entity.OrganizationId);
+                if (organization is null)
                 {
-                    result.AddError("Invalid organization", "INVALID_ORGANIZATION");
+                    result.AddError("OrganizationId", "Invalid organization", "INVALID_ORGANIZATION");
                 }
 
                 // Duplicate membership validation
-                var existing = await _connectedIdRepository.GetByUserAndOrganizationAsync(
-                    entity.UserId, entity.OrganizationId);
+                var existing = await SafeGetByUserAndOrganizationAsync(entity.UserId, entity.OrganizationId);
                 if (existing != null && !existing.IsDeleted)
                 {
-                    result.AddError("User is already a member of this organization", "DUPLICATE_MEMBERSHIP");
+                    result.AddError("UserId", "User is already a member of this organization", "DUPLICATE_MEMBERSHIP");
                 }
 
                 // Plan-based member limit validation
-                if (organization != null)
+                if (organization is not null)
                 {
                     var memberCount = await GetOrganizationMemberCountAsync(entity.OrganizationId);
                     var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(entity.OrganizationId);
-                    
+
                     if (subscription != null)
                     {
-                        var planKey = subscription.PlanKey;
-                        var memberLimit = GetMemberLimitFromPricingConstants(planKey);
-                        
+                        var memberLimit = GetMemberLimitFromPlan(subscription.PlanKey);
                         if (memberLimit > 0 && memberCount >= memberLimit)
                         {
-                            result.AddError($"Organization member limit ({memberLimit}) exceeded", "MEMBER_LIMIT_EXCEEDED");
+                            result.AddError("OrganizationId", $"Organization member limit ({memberLimit}) exceeded", "MEMBER_LIMIT_EXCEEDED");
                         }
                     }
                 }
 
                 await _unitOfWork.CommitTransactionAsync();
-                await LogValidationAttemptAsync("CREATE", entity, result);
+                await LogValidationAsync("CREATE", entity, result);
             }
             catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
-                _logger.LogError(ex, "Error during ConnectedId creation validation");
-                result.AddError("Validation error occurred", "VALIDATION_ERROR");
+                _logger.LogError(ex, "Error during ConnectedId entity creation validation");
+                result.AddError("Validation error occurred");
             }
 
             return result;
         }
 
-        /// <summary>
-        /// Entity update validation
-        /// </summary>
         public async Task<ValidationResult> ValidateUpdateAsync(ConnectedId entity, ConnectedId? existingEntity = null)
         {
-            var result = new ValidationResult();
+            var result = new ValidationResult { IsValid = true };
 
             try
             {
                 existingEntity ??= await _connectedIdRepository.GetByIdAsync(entity.Id);
                 if (existingEntity == null)
                 {
-                    result.AddError("ConnectedId not found for update", "NOT_FOUND");
+                    result.AddError("Id", "ConnectedId not found for update", "NOT_FOUND");
                     return result;
                 }
 
                 // Immutable field validation
                 if (entity.UserId != existingEntity.UserId)
                 {
-                    result.AddError("UserId cannot be changed", "IMMUTABLE_USER_ID");
+                    result.AddError("UserId", "UserId cannot be changed", "IMMUTABLE_USER_ID");
                 }
 
                 if (entity.OrganizationId != existingEntity.OrganizationId)
                 {
-                    result.AddError("OrganizationId cannot be changed", "IMMUTABLE_ORGANIZATION_ID");
+                    result.AddError("OrganizationId", "OrganizationId cannot be changed", "IMMUTABLE_ORGANIZATION_ID");
                 }
 
-                await LogValidationAttemptAsync("UPDATE", entity, result);
+                await LogValidationAsync("UPDATE", entity, result);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during ConnectedId update validation");
-                result.AddError("Validation error occurred", "VALIDATION_ERROR");
+                _logger.LogError(ex, "Error during ConnectedId entity update validation");
+                result.AddError("Validation error occurred");
             }
 
             return result;
         }
 
-        /// <summary>
-        /// Entity deletion validation
-        /// </summary>
         public async Task<ValidationResult> ValidateDeleteAsync(ConnectedId entity)
         {
-            var result = new ValidationResult();
+            var result = new ValidationResult { IsValid = true };
 
             try
             {
@@ -237,84 +209,75 @@ namespace AuthHive.Auth.Validators
                 // Last Owner protection
                 if (entity.MembershipType == MembershipType.Owner)
                 {
-                    var owners = await _connectedIdRepository.GetByOrganizationAsync(entity.OrganizationId);
+                    var owners = await SafeGetByOrganizationAsync(entity.OrganizationId);
                     var activeOwnerCount = owners.Count(o => !o.IsDeleted && o.MembershipType == MembershipType.Owner);
-                    
+
                     if (activeOwnerCount <= 1)
                     {
-                        result.AddError("Cannot delete last owner", "LAST_OWNER_PROTECTION");
+                        result.AddError("MembershipType", "Cannot delete last owner", "LAST_OWNER_PROTECTION");
                     }
                 }
 
-                await LogValidationAttemptAsync("DELETE", entity, result);
+                await LogValidationAsync("DELETE", entity, result);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during ConnectedId deletion validation");
-                result.AddError("Validation error occurred", "VALIDATION_ERROR");
+                _logger.LogError(ex, "Error during ConnectedId entity deletion validation");
+                result.AddError("Validation error occurred");
             }
 
             return result;
         }
-
-        /// <summary>
-        /// Business rules validation
-        /// </summary>
-        public async Task<ValidationResult> ValidateBusinessRulesAsync(ConnectedId entity)
+        public async Task<AuthHive.Core.Interfaces.Base.ValidationResult> ValidateBusinessRulesAsync(ConnectedId entity)
         {
-            var result = new ValidationResult();
+            var result = new AuthHive.Core.Interfaces.Base.ValidationResult { IsValid = true };
 
             try
             {
-                // Organization member count validation based on plan
+                // Organization member count validation
                 var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(entity.OrganizationId);
-                
                 if (subscription != null)
                 {
                     var memberCount = await GetOrganizationMemberCountAsync(entity.OrganizationId);
-                    var memberLimit = GetMemberLimitFromPricingConstants(subscription.PlanKey);
-                    
+                    var memberLimit = GetMemberLimitFromPlan(subscription.PlanKey);
+
                     if (memberLimit > 0 && memberCount >= memberLimit)
                     {
-                        result.AddError($"Organization member limit ({memberLimit}) exceeded", "MEMBER_LIMIT_EXCEEDED");
+                        result.AddError("OrganizationId", $"Organization member limit ({memberLimit}) exceeded", "MEMBER_LIMIT_EXCEEDED");
                     }
                 }
 
-                // User organization count limit based on plan
-                var userOrgs = await _connectedIdRepository.GetByUserAsync(entity.UserId);
+                // User organization count limit validation
+                var userOrgs = await SafeGetByUserAsync(entity.UserId);
                 var userOrgCount = userOrgs.Count(o => !o.IsDeleted);
-                var maxOrganizations = GetMaxOrganizationsFromPricingConstants(subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY);
-                
+                var maxOrganizations = GetMaxOrganizationsFromPlan(subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY);
+
                 if (maxOrganizations > 0 && userOrgCount >= maxOrganizations)
                 {
                     result.AddWarning($"User organization limit ({maxOrganizations}) reached");
                 }
 
-                await LogValidationAttemptAsync("BUSINESS_RULES", entity, result);
+                await LogValidationAsync("BUSINESS_RULES", entity, result);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error during business rules validation");
-                result.AddError("Business rules validation error", "BUSINESS_RULES_ERROR");
+                result.AddError("Business rules validation error");
             }
 
             return result;
         }
-
         #endregion
 
-        #region IConnectedIdValidator Interface Implementation
+        #region IConnectedIdValidator Implementation
 
-        /// <summary>
-        /// ConnectedId creation request validation
-        /// </summary>
-        public async Task<ServiceResult> ValidateCreateAsync(CreateConnectedIdRequest request)
+        public async Task<ServiceResult> ValidateCreateRequestAsync(CreateConnectedIdRequest request)
         {
             try
             {
                 var entity = MapRequestToEntity(request);
                 var validationResult = await ValidateCreateAsync(entity);
-                return ConvertValidationResultToServiceResult(validationResult);
+                return ConvertToServiceResult(validationResult);
             }
             catch (Exception ex)
             {
@@ -323,41 +286,809 @@ namespace AuthHive.Auth.Validators
             }
         }
 
-        // Continuing with all other methods...
-        // [Previous methods implementation continues with English messages and proper constants usage]
+        public async Task<ServiceResult> ValidateUpdateRequestAsync(
+            Guid connectedId,
+            UpdateConnectedIdRequest request,
+            Guid updatedByConnectedId)
+        {
+            try
+            {
+                if (!await HasUpdatePermissionAsync(connectedId, updatedByConnectedId))
+                {
+                    return ServiceResult.Failure("Update permission denied", "PERMISSION_DENIED");
+                }
+
+                var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
+                if (entity == null)
+                {
+                    return ServiceResult.NotFound("ConnectedId not found");
+                }
+
+                ApplyUpdateToEntity(entity, request);
+                var validationResult = await ValidateUpdateAsync(entity);
+                return ConvertToServiceResult(validationResult);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during ConnectedId update request validation");
+                return ServiceResult.Failure("Validation error occurred", "VALIDATION_ERROR");
+            }
+        }
+
+        public async Task<ServiceResult> ValidateDeleteRequestAsync(
+            Guid connectedId,
+            Guid deletedByConnectedId)
+        {
+            try
+            {
+                if (!await HasDeletePermissionAsync(connectedId, deletedByConnectedId))
+                {
+                    return ServiceResult.Failure("Delete permission denied", "PERMISSION_DENIED");
+                }
+
+                var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
+                if (entity == null)
+                {
+                    return ServiceResult.NotFound("ConnectedId not found");
+                }
+
+                var validationResult = await ValidateDeleteAsync(entity);
+                return ConvertToServiceResult(validationResult);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during ConnectedId deletion request validation");
+                return ServiceResult.Failure("Validation error occurred", "VALIDATION_ERROR");
+            }
+        }
+
+        public async Task<ServiceResult> ValidateMappingAsync(Guid userId, Guid organizationId)
+        {
+            var result = new ValidationResult { IsValid = true };
+
+            var user = await SafeGetUserAsync(userId);
+            if (user == null || user.IsDeleted)
+            {
+                result.AddError("UserId", "Invalid user", "INVALID_USER");
+            }
+
+            var org = await SafeGetOrganizationAsync(organizationId);
+            if (org is null)
+            {
+                result.AddError("OrganizationId", "Invalid organization", "INVALID_ORGANIZATION");
+            }
+
+            var existing = await SafeGetByUserAndOrganizationAsync(userId, organizationId);
+            if (existing != null && !existing.IsDeleted)
+            {
+                result.AddError("Mapping already exists");
+            }
+
+            return ConvertToServiceResult(result);
+        }
+
+        public async Task<ServiceResult> ValidateDuplicationAsync(Guid userId, Guid organizationId)
+        {
+            var existing = await SafeGetByUserAndOrganizationAsync(userId, organizationId);
+            if (existing != null && !existing.IsDeleted)
+            {
+                var result = ServiceResult.Failure("User already member of organization", "DUPLICATE_MEMBERSHIP");
+                result.Metadata = new Dictionary<string, object>
+                {
+                    ["existingConnectedId"] = existing.Id,
+                    ["status"] = existing.Status.ToString()
+                };
+                return result;
+            }
+
+            return ServiceResult.Success("No duplicate membership found");
+        }
+
+        public async Task<ServiceResult> ValidateMembershipChangeAsync(
+            Guid connectedId,
+            MembershipType currentType,
+            MembershipType newType,
+            Guid changedByConnectedId)
+        {
+            var changer = await _connectedIdRepository.GetByIdAsync(changedByConnectedId);
+            if (changer == null)
+            {
+                return ServiceResult.Failure("Unauthorized change attempt", "UNAUTHORIZED");
+            }
+
+            bool canChange = currentType switch
+            {
+                MembershipType.Guest when newType == MembershipType.Member =>
+                    changer.MembershipType >= MembershipType.Admin,
+                MembershipType.Member when newType == MembershipType.Admin =>
+                    changer.MembershipType == MembershipType.Owner,
+                MembershipType.Admin when newType == MembershipType.Member =>
+                    changer.MembershipType == MembershipType.Owner,
+                _ when newType == MembershipType.Owner =>
+                    changer.MembershipType == MembershipType.Owner,
+                _ => false
+            };
+
+            if (!canChange)
+            {
+                return ServiceResult.Failure(
+                    $"Cannot change from '{currentType}' to '{newType}'",
+                    "INSUFFICIENT_PERMISSION");
+            }
+
+            if (currentType == MembershipType.Owner && newType != MembershipType.Owner)
+            {
+                var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
+                if (entity != null)
+                {
+                    var owners = await SafeGetByOrganizationAsync(entity.OrganizationId);
+                    if (owners.Count(o => !o.IsDeleted && o.MembershipType == MembershipType.Owner) <= 1)
+                    {
+                        return ServiceResult.Failure("Cannot change last owner", "LAST_OWNER");
+                    }
+                }
+            }
+
+            return ServiceResult.Success("Membership type change allowed");
+        }
+
+        public async Task<ServiceResult> ValidateOwnerTransferAsync(
+            Guid currentOwnerId,
+            Guid newOwnerId)
+        {
+            var currentOwner = await _connectedIdRepository.GetByIdAsync(currentOwnerId);
+            if (currentOwner?.MembershipType != MembershipType.Owner)
+            {
+                return ServiceResult.Failure("Current user is not owner", "NOT_OWNER");
+            }
+
+            var newOwner = await _connectedIdRepository.GetByIdAsync(newOwnerId);
+            if (newOwner == null)
+            {
+                return ServiceResult.NotFound("Target user not found");
+            }
+
+            if (currentOwner.OrganizationId != newOwner.OrganizationId)
+            {
+                return ServiceResult.Failure("Different organization member", "DIFFERENT_ORGANIZATION");
+            }
+
+            if (newOwner.MembershipType != MembershipType.Admin)
+            {
+                return ServiceResult.Failure("Owner can only be transferred to Admin", "REQUIRES_ADMIN");
+            }
+
+            if (newOwner.Status != ConnectedIdStatus.Active)
+            {
+                return ServiceResult.Failure("Cannot transfer to inactive user", "INACTIVE_USER");
+            }
+
+            return ServiceResult.Success("Owner transfer allowed");
+        }
+
+        public async Task<ServiceResult> ValidateInvitationCreateAsync(
+            CreateInvitationRequest request,
+            Guid invitedByConnectedId)
+        {
+            var inviter = await _connectedIdRepository.GetByIdAsync(invitedByConnectedId);
+            if (inviter == null || inviter.MembershipType == MembershipType.Guest)
+            {
+                return ServiceResult.Failure("No invitation permission", "NO_INVITATION_PERMISSION");
+            }
+
+            if (!IsValidEmail(request.InviteeEmail))
+            {
+                return ServiceResult.Failure("Invalid email address", "INVALID_EMAIL");
+            }
+
+            var existingUser = await SafeGetUserByEmailAsync(request.InviteeEmail!);
+            if (existingUser != null)
+            {
+                var existing = await SafeGetByUserAndOrganizationAsync(
+                    existingUser.Id, request.OrganizationId);
+                if (existing != null && !existing.IsDeleted)
+                {
+                    return ServiceResult.Failure("Already organization member", "ALREADY_MEMBER");
+                }
+            }
+
+            var memberCount = await GetOrganizationMemberCountAsync(request.OrganizationId);
+            var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(request.OrganizationId);
+
+            if (subscription != null)
+            {
+                var memberLimit = GetMemberLimitFromPlan(subscription.PlanKey);
+                if (memberLimit > 0 && memberCount >= memberLimit)
+                {
+                    return ServiceResult.Failure(
+                        $"Organization member limit ({memberLimit}) exceeded",
+                        "MEMBER_LIMIT_EXCEEDED");
+                }
+            }
+
+            return ServiceResult.Success("Invitation creation allowed");
+        }
+
+        public async Task<ServiceResult> ValidateInvitationAcceptAsync(
+            string invitationCode,
+            Guid userId)
+        {
+            var invitation = await SafeGetInvitationByCodeAsync(invitationCode);
+            if (invitation == null)
+            {
+                return ServiceResult.Failure("Invalid invitation code", "INVALID_CODE");
+            }
+
+            if (invitation.IsExpired(_dateTimeProvider.UtcNow))
+            {
+                return ServiceResult.Failure("Invitation expired", "INVITATION_EXPIRED");
+            }
+
+            var user = await SafeGetUserAsync(userId);
+            if (user == null || user.IsDeleted)
+            {
+                return ServiceResult.Failure("Invalid user", "INVALID_USER");
+            }
+
+            return ServiceResult.Success("Invitation accept allowed");
+        }
+
+        public async Task<ServiceResult> ValidateInvitationCancelAsync(
+            Guid invitationId,
+            Guid cancelledByConnectedId)
+        {
+            var canceller = await _connectedIdRepository.GetByIdAsync(cancelledByConnectedId);
+            if (canceller == null || canceller.MembershipType < MembershipType.Admin)
+            {
+                return ServiceResult.Failure("No cancel permission", "NO_CANCEL_PERMISSION");
+            }
+
+            return ServiceResult.Success("Invitation cancel allowed");
+        }
+
+        public async Task<ServiceResult> ValidateStatusTransitionAsync(
+            Guid connectedId,
+            ConnectedIdStatus currentStatus,
+            ConnectedIdStatus newStatus,
+            Guid changedByConnectedId)
+        {
+            var validTransitions = new Dictionary<ConnectedIdStatus, List<ConnectedIdStatus>>
+            {
+                [ConnectedIdStatus.Pending] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Rejected },
+                [ConnectedIdStatus.Active] = new() { ConnectedIdStatus.Inactive, ConnectedIdStatus.Suspended, ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Inactive] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Suspended] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Rejected] = new() { ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Deleted] = new()
+            };
+
+            if (!validTransitions.ContainsKey(currentStatus) ||
+                !validTransitions[currentStatus].Contains(newStatus))
+            {
+                return ServiceResult.Failure(
+                    $"Cannot transition from '{currentStatus}' to '{newStatus}'",
+                    "INVALID_TRANSITION");
+            }
+
+            var changer = await _connectedIdRepository.GetByIdAsync(changedByConnectedId);
+            if (changer == null || changer.MembershipType < MembershipType.Admin)
+            {
+                return ServiceResult.Failure("Status change permission denied", "INSUFFICIENT_PERMISSION");
+            }
+
+            return ServiceResult.Success("Status transition allowed");
+        }
+
+        public async Task<ServiceResult> ValidateActivationAsync(Guid connectedId)
+        {
+            var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
+            if (entity == null)
+            {
+                return ServiceResult.NotFound("ConnectedId not found");
+            }
+
+            if (entity.Status == ConnectedIdStatus.Suspended)
+            {
+                return ServiceResult.Failure("Cannot activate suspended status", "SUSPENDED");
+            }
+
+            var user = await SafeGetUserAsync(entity.UserId);
+            if (user == null || user.IsDeleted || user.Status != UserStatus.Active)
+            {
+                return ServiceResult.Failure("User is inactive", "USER_INACTIVE");
+            }
+
+            var org = await SafeGetOrganizationAsync(entity.OrganizationId);
+            if (org is null)
+            {
+                return ServiceResult.Failure("Organization is inactive", "ORGANIZATION_INACTIVE");
+            }
+
+            return ServiceResult.Success("Activation allowed");
+        }
+
+        public async Task<ServiceResult> ValidateSuspensionAsync(
+            Guid connectedId,
+            string reason,
+            Guid suspendedByConnectedId)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return ServiceResult.Failure("Suspension reason required", "REASON_REQUIRED");
+            }
+
+            if (connectedId == suspendedByConnectedId)
+            {
+                return ServiceResult.Failure("Cannot suspend self", "CANNOT_SUSPEND_SELF");
+            }
+
+            var suspender = await _connectedIdRepository.GetByIdAsync(suspendedByConnectedId);
+            if (suspender == null || suspender.MembershipType < MembershipType.Admin)
+            {
+                return ServiceResult.Failure("Suspension permission denied", "INSUFFICIENT_PERMISSION");
+            }
+
+            var target = await _connectedIdRepository.GetByIdAsync(connectedId);
+            if (target == null)
+            {
+                return ServiceResult.NotFound("Target ConnectedId not found");
+            }
+
+            if (target.MembershipType == MembershipType.Owner)
+            {
+                return ServiceResult.Failure("Cannot suspend owner", "CANNOT_SUSPEND_OWNER");
+            }
+
+            return ServiceResult.Success("Suspension allowed");
+        }
+
+        public async Task<ServiceResult> ValidateSessionCreationAsync(
+            Guid connectedId,
+            string ipAddress,
+            string? userAgent = null)
+        {
+            var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
+            if (entity == null)
+            {
+                return ServiceResult.NotFound("ConnectedId not found");
+            }
+
+            if (entity.Status != ConnectedIdStatus.Active)
+            {
+                return ServiceResult.Failure("Inactive ConnectedId", "INACTIVE");
+            }
+
+            var activeSessions = await SafeGetActiveSessionsAsync(connectedId);
+            var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(entity.OrganizationId);
+
+            if (subscription != null)
+            {
+                var sessionLimit = GetSessionLimitFromPlan(subscription.PlanKey);
+                if (sessionLimit > 0 && activeSessions.Count() >= sessionLimit)
+                {
+                    return ServiceResult.Failure(
+                        $"Session limit ({sessionLimit}) exceeded",
+                        "SESSION_LIMIT_EXCEEDED");
+                }
+            }
+
+            return ServiceResult.Success("Session creation allowed");
+        }
+
+        public async Task<ServiceResult> ValidateActivityRateAsync(
+            Guid connectedId,
+            string activityType,
+            DateTime? lastActivityTime = null)
+        {
+            var rateLimitKey = $"ratelimit:{connectedId}:{activityType}";
+
+            var cachedValue = await _cacheService.GetAsync<string>(rateLimitKey);
+            var currentCount = 0;
+            if (!string.IsNullOrEmpty(cachedValue) && int.TryParse(cachedValue, out var parsed))
+            {
+                currentCount = parsed;
+            }
+
+            var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
+            if (entity == null)
+            {
+                return ServiceResult.NotFound("ConnectedId not found");
+            }
+
+            var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(entity.OrganizationId);
+            var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
+            var limit = GetRateLimitFromPlan(activityType, planKey);
+
+            if (currentCount >= limit)
+            {
+                return ServiceResult.Failure(
+                    $"Activity rate limit ({currentCount}/{limit}) exceeded",
+                    "RATE_LIMIT_EXCEEDED");
+            }
+
+            if (lastActivityTime.HasValue)
+            {
+                var timeSinceLastActivity = _dateTimeProvider.UtcNow - lastActivityTime.Value;
+                if (timeSinceLastActivity.TotalSeconds < 1)
+                {
+                    return ServiceResult.Success("Activity allowed with abnormal pattern detected");
+                }
+            }
+
+            await _cacheService.IncrementAsync(rateLimitKey, 60);
+            return ServiceResult.Success("Activity allowed");
+        }
+
+        public async Task<ServiceResult> ValidatePermissionAsync(
+            Guid connectedId,
+            string requiredPermission)
+        {
+            // Get active roles for the ConnectedId
+            var activeRoles = await _connectedIdRoleRepository.GetActiveRolesAsync(connectedId);
+
+            if (activeRoles.Any())
+            {
+                // Check permissions for each role
+                foreach (var roleAssignment in activeRoles)
+                {
+                    var permissionsResult = await _roleService.GetPermissionsAsync(
+                        roleAssignment.RoleId,
+                        includeInherited: true
+                    );
+
+                    if (permissionsResult.IsSuccess && permissionsResult.Data != null)
+                    {
+                        var hasPermission = permissionsResult.Data
+                            .Any(p => p.Scope == requiredPermission ||
+                                     p.Name == requiredPermission);
+
+                        if (hasPermission)
+                        {
+                            return ServiceResult.Success("Permission verified");
+                        }
+                    }
+                }
+            }
+
+            // Fallback to MembershipType-based permission check
+            var connected = await _connectedIdRepository.GetByIdAsync(connectedId);
+            if (connected != null)
+            {
+                bool hasPermission = connected.MembershipType switch
+                {
+                    MembershipType.Owner => true,
+                    MembershipType.Admin => !requiredPermission.StartsWith("OWNER_"),
+                    MembershipType.Member => !requiredPermission.StartsWith("ADMIN_"),
+                    MembershipType.Guest => requiredPermission.StartsWith("GUEST_"),
+                    _ => false
+                };
+
+                if (hasPermission)
+                {
+                    return ServiceResult.Success("Permission verified");
+                }
+            }
+
+            return ServiceResult.Failure(
+                $"Required permission missing: {requiredPermission}",
+                "PERMISSION_DENIED");
+        }
+
+        public async Task<ServiceResult> ValidateActionOnTargetAsync(
+            Guid actorConnectedId,
+            Guid targetConnectedId,
+            string action)
+        {
+            var actor = await _connectedIdRepository.GetByIdAsync(actorConnectedId);
+            var target = await _connectedIdRepository.GetByIdAsync(targetConnectedId);
+
+            if (actor == null || target == null)
+            {
+                return ServiceResult.NotFound("ConnectedId not found");
+            }
+
+            if (actor.OrganizationId != target.OrganizationId)
+            {
+                return ServiceResult.Failure("Different organization member", "DIFFERENT_ORGANIZATION");
+            }
+
+            bool canPerform = action switch
+            {
+                "UPDATE" => actor.MembershipType >= target.MembershipType,
+                "DELETE" => actor.MembershipType > target.MembershipType,
+                "SUSPEND" => actor.MembershipType > target.MembershipType && actor.MembershipType >= MembershipType.Admin,
+                _ => false
+            };
+
+            if (!canPerform)
+            {
+                return ServiceResult.Failure(
+                    $"Cannot perform '{action}' action",
+                    "INSUFFICIENT_PERMISSION");
+            }
+
+            return ServiceResult.Success("Action allowed");
+        }
+
+        public async Task<ServiceResult<BulkValidationResult>> ValidateBulkCreateAsync(
+            List<CreateConnectedIdRequest> requests,
+            Guid createdByConnectedId)
+        {
+            var bulkResult = new BulkValidationResult
+            {
+                TotalCount = requests.Count
+            };
+
+            var creator = await _connectedIdRepository.GetByIdAsync(createdByConnectedId);
+            if (creator == null || creator.MembershipType < MembershipType.Admin)
+            {
+                return new ServiceResult<BulkValidationResult>
+                {
+                    IsSuccess = false,
+                    ErrorMessage = "Bulk creation permission denied",
+                    ErrorCode = "INSUFFICIENT_PERMISSION",
+                    Data = null
+                };
+            }
+
+            for (int i = 0; i < requests.Count; i++)
+            {
+                var validation = await ValidateCreateRequestAsync(requests[i]);
+                var itemResult = new ItemValidationResult
+                {
+                    Index = i,
+                    Identifier = requests[i].UserId.ToString(),
+                    IsValid = validation.IsSuccess
+                };
+
+                if (!validation.IsSuccess)
+                {
+                    itemResult.Errors = new List<string> { validation.ErrorMessage ?? "Validation failed" };
+                    bulkResult.InvalidCount++;
+                }
+                else
+                {
+                    bulkResult.ValidCount++;
+                }
+
+                bulkResult.ItemResults.Add(itemResult);
+            }
+
+            bulkResult.IsValid = bulkResult.InvalidCount == 0;
+
+            if (bulkResult.IsValid)
+            {
+                return new ServiceResult<BulkValidationResult>
+                {
+                    IsSuccess = true,
+                    Data = bulkResult,
+                    Message = "Bulk validation successful"
+                };
+            }
+            else
+            {
+                return new ServiceResult<BulkValidationResult>
+                {
+                    IsSuccess = false,
+                    Data = bulkResult,
+                    ErrorMessage = $"Bulk validation failed: {bulkResult.InvalidCount}/{bulkResult.TotalCount} items invalid",
+                    ErrorCode = "BULK_VALIDATION_FAILED"
+                };
+            }
+        }
+
+        public async Task<ServiceResult<BulkValidationResult>> ValidateBulkStatusChangeAsync(
+            List<Guid> connectedIds,
+            ConnectedIdStatus newStatus,
+            Guid changedByConnectedId)
+        {
+            var bulkResult = new BulkValidationResult
+            {
+                TotalCount = connectedIds.Count
+            };
+
+            var changer = await _connectedIdRepository.GetByIdAsync(changedByConnectedId);
+            if (changer == null || changer.MembershipType < MembershipType.Admin)
+            {
+                return new ServiceResult<BulkValidationResult>
+                {
+                    IsSuccess = false,
+                    ErrorMessage = "Bulk status change permission denied",
+                    ErrorCode = "INSUFFICIENT_PERMISSION",
+                    Data = null
+                };
+            }
+
+            for (int i = 0; i < connectedIds.Count; i++)
+            {
+                var entity = await _connectedIdRepository.GetByIdAsync(connectedIds[i]);
+                var itemResult = new ItemValidationResult
+                {
+                    Index = i,
+                    Identifier = connectedIds[i].ToString()
+                };
+
+                if (entity == null)
+                {
+                    itemResult.IsValid = false;
+                    itemResult.Errors = new List<string> { "ConnectedId not found" };
+                    bulkResult.InvalidCount++;
+                }
+                else
+                {
+                    var validation = await ValidateStatusTransitionAsync(
+                        connectedIds[i], entity.Status, newStatus, changedByConnectedId);
+
+                    itemResult.IsValid = validation.IsSuccess;
+                    if (!validation.IsSuccess)
+                    {
+                        itemResult.Errors = new List<string> { validation.ErrorMessage ?? "Validation failed" };
+                        bulkResult.InvalidCount++;
+                    }
+                    else
+                    {
+                        bulkResult.ValidCount++;
+                    }
+                }
+
+                bulkResult.ItemResults.Add(itemResult);
+            }
+
+            bulkResult.IsValid = bulkResult.InvalidCount == 0;
+
+            if (bulkResult.IsValid)
+            {
+                return new ServiceResult<BulkValidationResult>
+                {
+                    IsSuccess = true,
+                    Data = bulkResult,
+                    Message = "Bulk status change validation successful"
+                };
+            }
+            else
+            {
+                return new ServiceResult<BulkValidationResult>
+                {
+                    IsSuccess = false,
+                    Data = bulkResult,
+                    ErrorMessage = $"Bulk validation failed: {bulkResult.InvalidCount}/{bulkResult.TotalCount} items invalid",
+                    ErrorCode = "BULK_VALIDATION_FAILED"
+                };
+            }
+        }
 
         #endregion
 
-        #region Private Helper Methods
+        #region Helper Methods
 
-        private async Task<bool> ValidateOrganizationContextAsync(Guid organizationId)
+        private async Task<User?> SafeGetUserAsync(Guid userId)
         {
-            var httpContext = _httpContextAccessor.HttpContext;
-            if (httpContext == null) return true;
+            try
+            {
+                return await _userRepository.GetByIdAsync(userId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get user by ID: {UserId}", userId);
+                return null;
+            }
+        }
 
-            var contextOrgId = httpContext.Items["OrganizationId"] as Guid?;
-            if (contextOrgId == null) return true;
+        private async Task<User?> SafeGetUserByEmailAsync(string email)
+        {
+            try
+            {
+                return await _userRepository.GetByEmailAsync(email);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get user by email: {Email}", email);
+                return null;
+            }
+        }
 
-            return contextOrgId == organizationId;
+        private async Task<Core.Entities.Organization.Organization?> SafeGetOrganizationAsync(Guid organizationId)
+        {
+            try
+            {
+                return await _organizationRepository.GetByIdAsync(organizationId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get organization by ID: {OrganizationId}", organizationId);
+                return null;
+            }
+        }
+
+        private async Task<ConnectedId?> SafeGetByUserAndOrganizationAsync(Guid userId, Guid organizationId)
+        {
+            try
+            {
+                return await _connectedIdRepository.GetByUserAndOrganizationAsync(userId, organizationId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get ConnectedId by user and organization");
+                return null;
+            }
+        }
+
+        private async Task<IEnumerable<ConnectedId>> SafeGetByOrganizationAsync(Guid organizationId)
+        {
+            try
+            {
+                // IRepository의 Query() 메서드 사용
+                var query = _connectedIdRepository.Query()
+                    .Where(c => c.OrganizationId == organizationId);
+
+                return await query.ToListAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get ConnectedIds by organization");
+                return Enumerable.Empty<ConnectedId>();
+            }
+        }
+        private async Task<IEnumerable<ConnectedId>> SafeGetByUserAsync(Guid userId)
+        {
+            try
+            {
+                // IRepository의 Query() 메서드 사용
+                var query = _connectedIdRepository.Query()
+                    .Where(c => c.UserId == userId);
+
+                return await query.ToListAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get ConnectedIds by user");
+                return Enumerable.Empty<ConnectedId>();
+            }
+        }
+
+        private async Task<IEnumerable<SessionEntity>> SafeGetActiveSessionsAsync(Guid connectedId)
+        {
+            try
+            {
+                return await _sessionRepository.GetActiveSessionsAsync(connectedId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get active sessions");
+                return Enumerable.Empty<SessionEntity>();
+            }
+        }
+
+        private async Task<Core.Entities.Auth.Invitation?> SafeGetInvitationByCodeAsync(string code)
+        {
+            try
+            {
+                return await _invitationRepository.GetByCodeAsync(code);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get invitation by code");
+                return null;
+            }
         }
 
         private async Task<int> GetOrganizationMemberCountAsync(Guid organizationId)
         {
             var cacheKey = string.Format(CACHE_KEY_ORG_MEMBER_COUNT, organizationId);
-            var cached = await _cacheService.GetAsync<int?>(cacheKey);
-            
-            if (cached.HasValue) return cached.Value;
+            var cachedValue = await _cacheService.GetAsync<string>(cacheKey);
 
-            var members = await _connectedIdRepository.GetByOrganizationAsync(organizationId);
+            if (!string.IsNullOrEmpty(cachedValue) && int.TryParse(cachedValue, out var cached))
+                return cached;
+
+            var members = await SafeGetByOrganizationAsync(organizationId);
             var count = members.Count(m => !m.IsDeleted && m.Status == ConnectedIdStatus.Active);
-            
-            await _cacheService.SetAsync(cacheKey, count, TimeSpan.FromSeconds(CACHE_DURATION_SECONDS));
+
+            await _cacheService.SetAsync(cacheKey, count.ToString(), TimeSpan.FromSeconds(CACHE_DURATION_SECONDS));
             return count;
         }
 
-        private int GetMemberLimitFromPricingConstants(string planKey)
+        private int GetMemberLimitFromPlan(string planKey)
         {
-            // Using MAU limits as member limits since specific member limits aren't defined
             if (!PricingConstants.SubscriptionPlans.MAULimits.TryGetValue(planKey, out var limit))
             {
                 return PricingConstants.SubscriptionPlans.MAULimits[PricingConstants.SubscriptionPlans.BASIC_KEY];
@@ -365,7 +1096,7 @@ namespace AuthHive.Auth.Validators
             return limit;
         }
 
-        private int GetMaxOrganizationsFromPricingConstants(string planKey)
+        private int GetMaxOrganizationsFromPlan(string planKey)
         {
             if (!PricingConstants.SubscriptionPlans.OrganizationLimits.TryGetValue(planKey, out var limit))
             {
@@ -374,15 +1105,8 @@ namespace AuthHive.Auth.Validators
             return limit;
         }
 
-        private int GetSessionLimitFromPricingConstants(string planKey)
+        private int GetSessionLimitFromPlan(string planKey)
         {
-            // Since session limits aren't in PricingConstants, using API rate limits as a proxy
-            if (!PricingConstants.SubscriptionPlans.ApiRateLimits.TryGetValue(planKey, out var limit))
-            {
-                return 1; // Default minimum
-            }
-            
-            // Convert API rate limit to reasonable session limit
             return planKey switch
             {
                 PricingConstants.SubscriptionPlans.BASIC_KEY => 1,
@@ -393,15 +1117,13 @@ namespace AuthHive.Auth.Validators
             };
         }
 
-        private int GetRateLimitFromPricingConstants(string activityType, string planKey)
+        private int GetRateLimitFromPlan(string activityType, string planKey)
         {
-            // Get base rate limit from plan
             if (!PricingConstants.SubscriptionPlans.ApiRateLimits.TryGetValue(planKey, out var baseLimit))
             {
                 baseLimit = PricingConstants.SubscriptionPlans.ApiRateLimits[PricingConstants.SubscriptionPlans.BASIC_KEY];
             }
 
-            // Apply activity-specific multipliers
             return activityType switch
             {
                 "API_CALL" => baseLimit,
@@ -411,33 +1133,16 @@ namespace AuthHive.Auth.Validators
             };
         }
 
-        private async Task LogValidationAttemptAsync(string action, ConnectedId entity, ValidationResult result)
-        {
-            await _auditService.LogActionAsync(
-                action: $"ConnectedId.Validate.{action}",
-                entityType: "ConnectedId",
-                entityId: entity.Id.ToString(),
-                details: new
-                {
-                    UserId = entity.UserId,
-                    OrganizationId = entity.OrganizationId,
-                    Success = result.IsValid,
-                    Errors = result.Errors,
-                    Warnings = result.Warnings
-                },
-                connectedId: entity.Id
-            );
-        }
-
         private bool IsValidEmail(string? email)
         {
-            if (string.IsNullOrWhiteSpace(email)) return false;
-            
-            return Regex.IsMatch(email, 
+            if (string.IsNullOrWhiteSpace(email))
+                return false;
+
+            return Regex.IsMatch(email,
                 @"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$");
         }
 
-        private ServiceResult ConvertValidationResultToServiceResult(ValidationResult validationResult)
+        private ServiceResult ConvertToServiceResult(ValidationResult validationResult)
         {
             if (validationResult.IsValid)
             {
@@ -447,7 +1152,7 @@ namespace AuthHive.Auth.Validators
             var primaryError = validationResult.Errors.FirstOrDefault();
             return ServiceResult.Failure(
                 primaryError?.Message ?? "Validation failed",
-                primaryError?.Code ?? "VALIDATION_FAILED"
+                primaryError?.ErrorCode ?? "VALIDATION_FAILED"
             );
         }
 
@@ -470,29 +1175,76 @@ namespace AuthHive.Auth.Validators
             };
         }
 
-        private void ApplyUpdateRequestToEntity(ConnectedId entity, UpdateConnectedIdRequest request)
+        private void ApplyUpdateToEntity(ConnectedId entity, UpdateConnectedIdRequest request)
         {
             if (request.MembershipType.HasValue)
-            {
                 entity.MembershipType = request.MembershipType.Value;
-            }
 
             if (request.Status.HasValue)
-            {
                 entity.Status = request.Status.Value;
-            }
 
             if (request.UpdateDisplayName)
-            {
                 entity.DisplayName = request.DisplayName;
-            }
 
             if (request.LastActiveAt.HasValue)
-            {
                 entity.LastActiveAt = request.LastActiveAt.Value;
-            }
+        }
+
+        private async Task<bool> HasUpdatePermissionAsync(Guid connectedId, Guid updaterConnectedId)
+        {
+            if (connectedId == updaterConnectedId)
+                return true;
+
+            var updater = await _connectedIdRepository.GetByIdAsync(updaterConnectedId);
+            return updater?.MembershipType >= MembershipType.Admin;
+        }
+
+        private async Task<bool> HasDeletePermissionAsync(Guid connectedId, Guid deleterConnectedId)
+        {
+            var deleter = await _connectedIdRepository.GetByIdAsync(deleterConnectedId);
+            var target = await _connectedIdRepository.GetByIdAsync(connectedId);
+
+            if (deleter == null || target == null)
+                return false;
+
+            if (deleter.OrganizationId != target.OrganizationId)
+                return false;
+
+            return deleter.MembershipType > target.MembershipType;
+        }
+
+        private async Task LogValidationAsync(string action, ConnectedId entity, ValidationResult result)
+        {
+            await _auditService.LogActionAsync(
+                performedByConnectedId: entity.Id,
+                action: $"ConnectedId.Validate.{action}",
+                actionType: AuditActionType.Validation,
+                resourceType: "ConnectedId",
+                resourceId: entity.Id.ToString(),
+                success: result.IsValid,
+                metadata: System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    UserId = entity.UserId,
+                    OrganizationId = entity.OrganizationId,
+                    Success = result.IsValid,
+                    Errors = result.Errors,
+                    Warnings = result.Warnings
+                })
+            );
         }
 
         #endregion
     }
+
+    #region Support Classes
+
+
+    public class Session
+    {
+        public Guid Id { get; set; }
+        public Guid ConnectedId { get; set; }
+        public bool IsActive { get; set; }
+    }
+
+    #endregion
 }
