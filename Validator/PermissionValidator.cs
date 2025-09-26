@@ -119,7 +119,7 @@ namespace AuthHive.Services.Auth.Validators
                     request.Scope, context.ConnectedId);
 
                 // ========== 시스템 관리자 권한 확인 ==========
-                var isSystemAdmin = context.OrganizationId == CommonConstants.System.AUTHHIVE_ORGANIZATION_ID;
+                var isSystemAdmin = context.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID;
 
                 if (!isSystemAdmin)
                 {
@@ -274,7 +274,7 @@ namespace AuthHive.Services.Auth.Validators
                     request.Scope);
 
                 // 시스템 관리자 조직의 에러는 크리티컬
-                if (context.OrganizationId == CommonConstants.System.AUTHHIVE_ORGANIZATION_ID)
+                if (context.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                 {
                     // 🔴 비동기 처리 필요: 이메일 알림
                     await SendCriticalErrorAlertAsync(context, ex, "PermissionCreateValidation");
@@ -304,7 +304,7 @@ namespace AuthHive.Services.Auth.Validators
                 // ========== 시스템 권한 수정 권한 확인 ==========
                 if (permission.IsSystemPermission)
                 {
-                    var isSystemAdmin = context.OrganizationId == CommonConstants.System.AUTHHIVE_ORGANIZATION_ID;
+                    var isSystemAdmin = context.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID;
 
                     if (!isSystemAdmin)
                     {
@@ -423,7 +423,7 @@ namespace AuthHive.Services.Auth.Validators
         {
             try
             {
-                var isSystemAdmin = context.OrganizationId == CommonConstants.System.AUTHHIVE_ORGANIZATION_ID;
+                var isSystemAdmin = context.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID;
 
                 if (!isSystemAdmin)
                 {
@@ -1231,7 +1231,7 @@ namespace AuthHive.Services.Auth.Validators
             // PricingConstants 기반 플랜 체크
             var scopeParts = scope.Split(':');
             if (context.OrganizationId != Guid.Empty &&
-                context.OrganizationId != CommonConstants.System.AUTHHIVE_ORGANIZATION_ID)
+                context.OrganizationId != CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
             {
                 var subscription = await _planSubscriptionRepository
                     .GetActiveByOrganizationIdAsync(context.OrganizationId);
