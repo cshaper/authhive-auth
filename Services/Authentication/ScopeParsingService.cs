@@ -360,27 +360,48 @@ namespace AuthHive.Auth.Services.Authentication
                 var parts = scope.Split(':');
                 var hierarchy = new ScopeHierarchy
                 {
-                    Scope = scope,
-                    Components = parts.ToList(),
-                    Level = parts.Length
+                    Scopes = new List<string> { scope }, // Scope 대신 Scopes 사용
+                    IsValid = true,
+                    MaxDepthFound = parts.Length // Level 대신 MaxDepthFound 사용
                 };
 
-                // 부모 스코프 결정
+                // 계층 트리 구조 생성
+                var resource = parts[0];
+                hierarchy.Tree = new Dictionary<string, List<string>>
+                {
+                    [resource] = new List<string> { scope }
+                };
+
+                // 깊이별 스코프 분류
+                hierarchy.ScopesByDepth = new Dictionary<int, List<string>>
+                {
+                    [parts.Length] = new List<string> { scope }
+                };
+
+                // 부모-자식 관계는 Tree 구조로 표현
                 if (parts.Length > 1)
                 {
-                    hierarchy.Parent = string.Join(":", parts.Take(parts.Length - 1)) + ":*";
+                    // 부모 스코프를 Tree에 추가
+                    var parentScope = string.Join(":", parts.Take(parts.Length - 1)) + ":*";
+                    if (!hierarchy.Tree.ContainsKey(resource))
+                    {
+                        hierarchy.Tree[resource] = new List<string>();
+                    }
+                    hierarchy.Tree[resource].Add(parentScope);
                 }
 
-                // 자식 스코프 예시 생성
+                // 자식 스코프 예시를 Tree에 추가
                 if (!scope.EndsWith("*"))
                 {
-                    hierarchy.Children = new List<string>
-                    {
-                        $"{scope}:*",
-                        $"{scope}:read",
-                        $"{scope}:write",
-                        $"{scope}:delete"
-                    };
+                    var childScopes = new List<string>
+            {
+                $"{scope}:*",
+                $"{scope}:read",
+                $"{scope}:write",
+                $"{scope}:delete"
+            };
+
+                    hierarchy.Tree[resource].AddRange(childScopes);
                 }
 
                 return Task.FromResult(ServiceResult<ScopeHierarchy>.Success(hierarchy));
@@ -2133,7 +2154,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     Scope1 = scope1,
                     Scope2 = scope2,
-                    Type = ScopeConflictType.Duplicate,
+                    Type = ScopeConflictType.Redundant,
                     Description = "Duplicate scopes detected",
                     Severity = ConflictSeverity.Medium,
                     Resolution = "Remove one of the duplicate scopes"
@@ -2148,6 +2169,8 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     Scope1 = scope1,
                     Scope2 = scope2,
+                    ///// 2. 상위 리소스와 하위 리소스가 겹치는 경우  
+                    ///"api:*"          vs  "api:v1:users:read"
                     Type = ScopeConflictType.Overlap,
                     Description = $"{scope1} contains {scope2}",
                     Severity = ConflictSeverity.Low,

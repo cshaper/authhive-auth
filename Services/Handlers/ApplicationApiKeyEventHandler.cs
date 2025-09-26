@@ -213,7 +213,7 @@ namespace AuthHive.Application.Handlers
                 await _auditService.LogActionAsync(
                     performedByConnectedId: eventData.ChangedByConnectedId,
                     action: "API_KEY_SCOPE_CHANGED",
-                    actionType: AuditActionType.Permission,
+                    actionType: AuditActionType.PermissionUpdated,
                     resourceType: "ApiKey",
                     resourceId: eventData.ApiKeyId.ToString(),
                     metadata: JsonSerializer.Serialize(new { OldScopes = eventData.OldScopes, NewScopes = eventData.NewScopes })

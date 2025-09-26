@@ -625,7 +625,7 @@ namespace AuthHive.Auth.Services.Organization
                         // .ToString() 없이 Enum 값을 직접 비교합니다.
                         HasAdminPermissions = membership.MemberRole == OrganizationMemberRole.Admin || 
                                               membership.MemberRole == OrganizationMemberRole.Owner,
-                        HasWritePermissions = membership.MemberRole != OrganizationMemberRole.Viewer && 
+                        HasWritePermissions = membership.MemberRole != OrganizationMemberRole.Member && 
                                               membership.MemberRole != OrganizationMemberRole.Guest
                     }
                 };
@@ -866,7 +866,6 @@ namespace AuthHive.Auth.Services.Organization
             if (changerRole == OrganizationMemberRole.Manager)
             {
                 return targetRole == OrganizationMemberRole.Member ||
-                       targetRole == OrganizationMemberRole.Viewer ||
                        targetRole == OrganizationMemberRole.Guest;
             }
 

@@ -314,12 +314,12 @@ namespace AuthHive.Auth.Data.Context
                 entity.HasOne(p => p.ParentPermission)
                     .WithMany(p => p.ChildPermissions)
                     .HasForeignKey(p => p.ParentPermissionId)
-                    .OnDelete(DeleteBehavior.Restrict);
+                    .OnDelete(DeleteBehavior.Cascade);
 
                 entity.HasMany(p => p.RolePermissions)
                     .WithOne(rp => rp.Permission)
                     .HasForeignKey(rp => rp.PermissionId)
-                    .OnDelete(DeleteBehavior.Restrict);
+                    .OnDelete(DeleteBehavior.Cascade);
             });
 
             modelBuilder.Entity<Role>(entity =>
