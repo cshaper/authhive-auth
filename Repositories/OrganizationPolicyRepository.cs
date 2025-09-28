@@ -483,5 +483,38 @@ namespace AuthHive.Auth.Repositories
         }
 
         #endregion
+               #region New Method Implementation
+
+        /// <summary>
+        /// 지정된 조직과 정책 유형 내에서 특정 우선순위가 이미 사용 중인지 확인합니다.
+        /// Entity Framework를 사용하여 데이터베이스에 효율적인 쿼리를 실행합니다.
+        /// </summary>
+        /// <param name="organizationId">조직 ID</param>
+        /// <param name="policyType">정책 유형</param>
+        /// <param name="priority">확인할 우선순위 값</param>
+        /// <param name="excludePolicyId">중복 검사에서 제외할 정책의 ID (주로 정책 수정 시 사용)</param>
+        /// <returns>우선순위가 이미 사용 중이면 true, 그렇지 않으면 false를 반환합니다.</returns>
+        public async Task<bool> IsPriorityTakenAsync(Guid organizationId, OrganizationPolicyType policyType, int priority, Guid? excludePolicyId = null)
+        {
+            // Start building the query
+            var query = _context.OrganizationPolicies
+                .Where(p => p.OrganizationId == organizationId &&
+                            p.PolicyType == policyType &&
+                            p.Priority == priority);
+
+            // If an ID to exclude is provided (during an update operation),
+            // add a condition to ignore that specific policy from the check.
+            if (excludePolicyId.HasValue)
+            {
+                query = query.Where(p => p.Id != excludePolicyId.Value);
+            }
+
+            // Use AnyAsync() for an efficient existence check.
+            // It translates to a `SELECT TOP 1` or `EXISTS` query in SQL,
+            // which is much faster than fetching records.
+            return await query.AnyAsync();
+        }
+
+        #endregion
     }
 }
