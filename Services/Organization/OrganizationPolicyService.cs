@@ -45,7 +45,7 @@ namespace AuthHive.Auth.Services.Organization
             IOrganizationPolicyRepository repository,
             IOrganizationRepository orgRepository,
             AuthDbContext context,
-             IOrganizationHierarchyRepository hierarchyRepository, // 추가
+            IOrganizationHierarchyRepository hierarchyRepository, // 추가
             IOrganizationHierarchyService hierarchyService,
             IMapper mapper,
             IMemoryCache cache,

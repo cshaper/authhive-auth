@@ -27,8 +27,6 @@ using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Models.Common.Validation;
 using Microsoft.EntityFrameworkCore;
-using ValidationResult = AuthHive.Core.Interfaces.Base.ValidationResult;
-using ValidationError = AuthHive.Core.Interfaces.Base.ValidationError;
 using AuthHive.Core.Models.Auth.Permissions.Events;
 using AuthHive.Core.Models.Auth.Role.Requests;
 
@@ -1401,6 +1399,97 @@ namespace AuthHive.Auth.Validators
                 })
             );
         }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateCreateRequestAsync(CreateConnectedIdRequest request)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateUpdateRequestAsync(Guid connectedId, UpdateConnectedIdRequest request, Guid updatedByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateDeleteRequestAsync(Guid connectedId, Guid deletedByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateMappingAsync(Guid userId, Guid organizationId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateDuplicationAsync(Guid userId, Guid organizationId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateMembershipChangeAsync(Guid connectedId, MembershipType currentType, MembershipType newType, Guid changedByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateOwnerTransferAsync(Guid currentOwnerId, Guid newOwnerId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateInvitationCreateAsync(CreateInvitationRequest request, Guid invitedByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateInvitationAcceptAsync(string invitationCode, Guid userId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateInvitationCancelAsync(Guid invitationId, Guid cancelledByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateStatusTransitionAsync(Guid connectedId, ConnectedIdStatus currentStatus, ConnectedIdStatus newStatus, Guid changedByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateActivationAsync(Guid connectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateSuspensionAsync(Guid connectedId, string reason, Guid suspendedByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateSessionCreationAsync(Guid connectedId, string ipAddress, string? userAgent)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateActivityRateAsync(Guid connectedId, string activityType, DateTime? lastActivityTime)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidatePermissionAsync(Guid connectedId, string requiredPermission)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult> IConnectedIdValidator.ValidateActionOnTargetAsync(Guid actorConnectedId, Guid targetConnectedId, string action)
+        {
+            throw new NotImplementedException();
+        }
+
+        Task<ServiceResult<BulkValidationResult>> IConnectedIdValidator.ValidateBulkCreateAsync(List<CreateConnectedIdRequest> requests, Guid createdByConnectedId)
+        {
+            throw new NotImplementedException();
+        }
+
 
         #endregion
     }

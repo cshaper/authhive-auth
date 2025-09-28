@@ -107,7 +107,7 @@ namespace AuthHive.Auth.Services.Validators
             var status = await _sslHelper.CheckCertificateStatusAsync(domain);
 
             if (!status.IsValid)
-                return new ValidationResult($"SSL certificate is invalid or missing. Reason: {status.StatusMessage}", new[] { "SslCertificate" });
+                return new ValidationResult($"SSL certificate is invalid or missing. Reason: {status.Status}", new[] { "SslCertificate" });
 
             if (status.DaysRemaining <= 7)
             {

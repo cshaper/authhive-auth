@@ -234,8 +234,14 @@ namespace AuthHive.Auth.Repositories
                 .OrderByDescending(m => m.JoinedAt)
                 .Take(count)
                 .ToListAsync();
+        } 
+        public Task<int> GetMemberCountAsync(Guid organizationId)
+        {
+            // TODO: 조직의 전체 멤버 수를 조회하는 로직 구현
+            // 예시: return await _context.Set<OrganizationMembership>()
+            //                        .CountAsync(m => m.OrganizationId == organizationId && m.IsActive);
+            throw new NotImplementedException();
         }
-
         #endregion
 
         #region 멤버십 업데이트

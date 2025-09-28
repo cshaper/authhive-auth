@@ -10,6 +10,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Organization.Service;
+using static AuthHive.Core.Constants.Common.CommonConstants;
 
 namespace AuthHive.Auth.Repositories.Organization;
 
