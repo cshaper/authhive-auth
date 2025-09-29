@@ -23,6 +23,7 @@ using AuthHive.Core.Models.PlatformApplication.Responses;
 using Newtonsoft.Json;
 using AuthHive.Core.Enums.Auth;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
+using AuthHive.Core.Models.Common.RateLimiting;
 
 namespace AuthHive.Auth.Providers
 {
@@ -1233,16 +1234,5 @@ namespace AuthHive.Auth.Providers
 
         #endregion
 
-        #region Supporting Classes
-
-        private class RateLimitResult
-        {
-            public bool IsWithinLimit { get; set; }
-            public int RemainingRequests { get; set; }
-            public DateTime ResetAt { get; set; }
-            public int? RiskScore { get; set; }
-        }
-
-        #endregion
     }
 }

@@ -28,6 +28,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.UserExperience;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using AuthHive.Core.Models.External;
+using AuthHive.Core.Models.Business.Events;
 
 namespace AuthHive.Auth.Validator
 {
@@ -287,10 +288,10 @@ namespace AuthHive.Auth.Validator
                         {
                             OrganizationId = request.OrganizationId,
                             PlanKey = planKey,
-                            LimitType = "RoleHierarchyDepth",
+                            LimitType = PlanLimitType.OrganizationDepth,
                             CurrentValue = depth + 1,
                             MaxValue = maxDepth,
-                            Timestamp = _dateTimeProvider.UtcNow
+                            OccurredAt = _dateTimeProvider.UtcNow
                         });
 
                         await _unitOfWork.RollbackTransactionAsync();
@@ -532,10 +533,10 @@ namespace AuthHive.Auth.Validator
                             {
                                 OrganizationId = role.OrganizationId,
                                 PlanKey = planKey,
-                                LimitType = "RoleHierarchyDepth",
+                                LimitType = PlanLimitType.OrganizationDepth,
                                 CurrentValue = newDepth + 1,
                                 MaxValue = maxDepth,
-                                Timestamp = _dateTimeProvider.UtcNow
+                                OccurredAt = _dateTimeProvider.UtcNow
                             });
 
                             await _unitOfWork.RollbackTransactionAsync();
@@ -870,10 +871,10 @@ namespace AuthHive.Auth.Validator
                     {
                         OrganizationId = role.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "PermissionComplexity",
+                        LimitType = PlanLimitType.PermissionScopeDepth,
                         CurrentValue = permissionIds.Count,
                         MaxValue = maxComplexity * 10,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        OccurredAt = _dateTimeProvider.UtcNow
                     });
 
                     await _unitOfWork.RollbackTransactionAsync();
@@ -1240,10 +1241,10 @@ namespace AuthHive.Auth.Validator
                     {
                         OrganizationId = role.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "ConcurrentRoles",
+                        LimitType = PlanLimitType.RoleCount,
                         CurrentValue = currentRoles.Count(),
                         MaxValue = maxConcurrentRoles,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        OccurredAt = _dateTimeProvider.UtcNow
                     });
 
                     await _unitOfWork.RollbackTransactionAsync();
@@ -1355,10 +1356,10 @@ namespace AuthHive.Auth.Validator
                     {
                         OrganizationId = firstRole.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "BulkRoleAssignment",
+                        LimitType = PlanLimitType.BulkRoleAssignment, 
                         CurrentValue = roleIds.Count,
                         MaxValue = maxConcurrentRoles,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        OccurredAt = _dateTimeProvider.UtcNow
                     });
 
                     return ServiceResult.Failure(
@@ -1401,10 +1402,10 @@ namespace AuthHive.Auth.Validator
                     {
                         OrganizationId = firstRole.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "CombinedPermissionComplexity",
+                        LimitType = PlanLimitType.TotalPermissionComplexity, 
                         CurrentValue = totalPermissions.Count,
                         MaxValue = maxComplexity,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        OccurredAt = _dateTimeProvider.UtcNow
                     });
 
                     return ServiceResult.Failure(

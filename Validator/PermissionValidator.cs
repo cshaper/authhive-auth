@@ -37,6 +37,7 @@ using AuthHive.Core.Interfaces.Infra.UserExperience;
 using AuthHive.Core.Models.External;
 using AuthHive.Core.Constants.Common;
 using System.Text.Json;
+using AuthHive.Core.Models.Business.Events;
 
 namespace AuthHive.Services.Auth.Validators
 {
@@ -213,7 +214,7 @@ namespace AuthHive.Services.Auth.Validators
                     {
                         OrganizationId = context.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "PermissionScopeDepth",
+                        LimitType = PlanLimitType.PermissionScopeDepth,
                         CurrentValue = scopeParts.Length,
                         MaxValue = maxDepth
                     });
@@ -368,7 +369,7 @@ namespace AuthHive.Services.Auth.Validators
                         {
                             OrganizationId = context.OrganizationId,
                             PlanKey = planKey,
-                            LimitType = "PermissionScopeDepth",
+                            LimitType = PlanLimitType.PermissionScopeDepth,
                             CurrentValue = scopeParts.Length,
                             MaxValue = maxDepth
                         });
@@ -555,7 +556,7 @@ namespace AuthHive.Services.Auth.Validators
                     {
                         OrganizationId = context.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "BulkOperationSize",
+                        LimitType = PlanLimitType.BulkPermissionOperations,
                         CurrentValue = requests.Count,
                         MaxValue = PermissionConstants.Limits.MaxBulkOperationSize
                     });
@@ -783,7 +784,7 @@ namespace AuthHive.Services.Auth.Validators
                     {
                         OrganizationId = context.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "PermissionScopeDepth",
+                        LimitType = PlanLimitType.PermissionScopeDepth,
                         CurrentValue = maxDepth,
                         MaxValue = maxAllowedDepth
                     });
@@ -932,7 +933,7 @@ namespace AuthHive.Services.Auth.Validators
                     {
                         OrganizationId = context.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "RoleCount",
+                        LimitType = PlanLimitType.RoleCount,
                         CurrentValue = roleCount,
                         MaxValue = roleLimit
                     });

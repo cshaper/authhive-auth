@@ -29,6 +29,7 @@ using AuthHive.Core.Models.Common.Validation;
 using Microsoft.EntityFrameworkCore;
 using AuthHive.Core.Models.Auth.Permissions.Events;
 using AuthHive.Core.Models.Auth.Role.Requests;
+using AuthHive.Core.Models.Business.Events;
 
 namespace AuthHive.Auth.Validators
 {
