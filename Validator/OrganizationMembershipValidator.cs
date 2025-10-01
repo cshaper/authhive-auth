@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ValidationResult = AuthHive.Core.Models.Common.Validation.ValidationResult;
 using ValidationError = AuthHive.Core.Models.Common.Validation.ValidationError;
 using AuthHive.Core.Interfaces.Organization.Validators;
+using AuthHive.Core.Models.Business.Events;
 
 namespace AuthHive.Auth.Services.Validators
 {
@@ -438,13 +439,13 @@ namespace AuthHive.Auth.Services.Validators
                 var currentCount = await _membershipRepository.GetMemberCountAsync(organizationId);
                 if ((currentCount + additionalMembers) > limit)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitExceededEvent 
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
                     { 
                         OrganizationId = organizationId, 
                         PlanKey = planKey, 
-                        LimitType = "MemberCount",
-                        CurrentCount = currentCount, 
-                        Limit = limit 
+                        LimitType = PlanLimitType.MemberCount,
+                        CurrentValue = currentCount, 
+                        MaxValue = limit 
                     });
                     return ValidationResult.Failure(new ValidationError { Field = "MemberCount", Message = $"Member limit ({limit}) for the current plan has been exceeded.", ErrorCode = "MEMBER_LIMIT_EXCEEDED" });
                 }

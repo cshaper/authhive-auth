@@ -1109,35 +1109,36 @@ namespace AuthHive.Auth.Providers
         {
             var cacheKey = $"rate_limit_{apiKey.Id}";
             var limit = apiKey.RateLimitPerMinute;
+            // ResetAt은 공통적으로 사용되므로 미리 정의합니다.
+            var resetTime = _dateTimeProvider.UtcNow.AddMinutes(1);
 
+            // 1. 캐시에 요청 횟수(currentCount)가 있는지 확인합니다.
             if (_cache.TryGetValue<int>(cacheKey, out var currentCount))
             {
+                // 2. [실패] 요청 횟수가 한도에 도달했거나 초과한 경우
                 if (currentCount >= limit)
                 {
-                    return Task.FromResult(new RateLimitResult
-                    {
-                        IsWithinLimit = false,
-                        RemainingRequests = 0,
-                        ResetAt = _dateTimeProvider.UtcNow.AddMinutes(1)
-                    });
+                    // Exceeded 팩토리 메서드를 사용하여 실패 결과를 반환합니다.
+                    // 이 메서드가 IsSuccess=false, RemainingRequests=0 등을 모두 설정합니다.
+                    return Task.FromResult(RateLimitResult.Exceeded(currentCount, limit, resetTime));
                 }
 
+                // 3. [성공] 아직 한도 이내인 경우
+                // 캐시의 카운트를 1 증가시킵니다.
                 _cache.Set(cacheKey, currentCount + 1, TimeSpan.FromMinutes(1));
-                return Task.FromResult(new RateLimitResult
-                {
-                    IsWithinLimit = true,
-                    RemainingRequests = limit - currentCount - 1,
-                    ResetAt = _dateTimeProvider.UtcNow.AddMinutes(1)
-                });
+
+                // Success 팩토리 메서드를 사용하여 성공 결과를 반환합니다.
+                // CurrentRate에 현재 요청을 포함한 'currentCount + 1'을 전달합니다.
+                return Task.FromResult(RateLimitResult.Success(currentCount + 1, limit, resetTime));
             }
 
+            // 4. [첫 요청 성공] 캐시에 값이 없는 경우 (첫 번째 요청)
+            // 캐시에 첫 요청 횟수인 1을 저장합니다.
             _cache.Set(cacheKey, 1, TimeSpan.FromMinutes(1));
-            return Task.FromResult(new RateLimitResult
-            {
-                IsWithinLimit = true,
-                RemainingRequests = limit - 1,
-                ResetAt = _dateTimeProvider.UtcNow.AddMinutes(1)
-            });
+
+            // Success 팩토리 메서드를 사용하여 첫 성공 결과를 반환합니다.
+            // CurrentRate는 1입니다.
+            return Task.FromResult(RateLimitResult.Success(1, limit, resetTime));
         }
 
         private async Task LogSecurityEvent(PlatformApplicationApiKey apiKey, string? reason, string? clientIp)

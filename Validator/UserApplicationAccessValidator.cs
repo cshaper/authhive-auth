@@ -14,6 +14,7 @@ using AuthHive.Core.Interfaces.Business.Platform.Service;
 using AuthHive.Core.Interfaces.Core.Validators;
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Models.Auth.Permissions.Events;
+using AuthHive.Core.Models.Business.Events;
 using AuthHive.Core.Models.PlatformApplication.Common;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
@@ -154,7 +155,7 @@ namespace AuthHive.Auth.Validator
                     {
                         OrganizationId = organizationId,
                         PlanKey = planKey,
-                        LimitType = "ApplicationUsers",
+                        LimitType = PlanLimitType.ApplicationMemberCount,
                         CurrentValue = currentUserCount,
                         MaxValue = memberLimit
                     });

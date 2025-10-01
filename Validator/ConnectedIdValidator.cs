@@ -149,7 +149,7 @@ namespace AuthHive.Auth.Validators
                         {
                             OrganizationId = entity.OrganizationId,
                             PlanKey = planKey,
-                            LimitType = "OrganizationMembers",
+                            LimitType = PlanLimitType.MemberCount,
                             CurrentValue = memberCount,
                             MaxValue = memberLimit
                         });
@@ -263,7 +263,7 @@ namespace AuthHive.Auth.Validators
                     {
                         OrganizationId = entity.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "OrganizationMembers",
+                        LimitType = PlanLimitType.MemberCount,
                         CurrentValue = memberCount,
                         MaxValue = memberLimit
                     });
@@ -285,7 +285,7 @@ namespace AuthHive.Auth.Validators
                     {
                         OrganizationId = entity.OrganizationId,
                         PlanKey = planKey,
-                        LimitType = "UserOrganizationCount",
+                        LimitType = PlanLimitType.OrganizationMemberCount,
                         CurrentValue = userOrgCount,
                         MaxValue = maxOrganizations
                     });
@@ -330,7 +330,7 @@ namespace AuthHive.Auth.Validators
                             {
                                 OrganizationId = entity.OrganizationId,
                                 PlanKey = planKey,
-                                LimitType = "RoleCount",
+                                LimitType = PlanLimitType.RoleCount,
                                 CurrentValue = roleCount,
                                 MaxValue = roleLimit
                             });
@@ -359,7 +359,7 @@ namespace AuthHive.Auth.Validators
                         {
                             OrganizationId = entity.OrganizationId,
                             PlanKey = planKey,
-                            LimitType = "ApiRateLimit",
+                            LimitType = PlanLimitType.ApiRateLimit,
                             CurrentValue = currentApiRate,
                             MaxValue = apiRateLimit
                         });
@@ -391,7 +391,7 @@ namespace AuthHive.Auth.Validators
                             {
                                 OrganizationId = entity.OrganizationId,
                                 PlanKey = planKey,
-                                LimitType = "StorageLimit",
+                                LimitType = PlanLimitType.StorageLimits,
                                 CurrentValue = (int)storageUsedGB,
                                 MaxValue = storageLimitGB
                             });
