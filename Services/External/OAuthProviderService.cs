@@ -183,14 +183,14 @@ namespace AuthHive.Auth.Services.External
             // ... ExchangeTokenAsync 로직 구현 ...
             return Task.FromResult(ServiceResult<TokenIssueResponse>.Failure("Not implemented"));
         }
-        
+
         // 인터페이스에 맞게 누락된 메서드 추가
         public Task<ServiceResult<TokenRefreshResponse>> RefreshTokenAsync(string provider, string refreshToken)
         {
             // ... RefreshTokenAsync 로직 구현 ...
             return Task.FromResult(ServiceResult<TokenRefreshResponse>.Failure("Not implemented"));
         }
-        
+
         // 인터페이스에 맞게 시그니처 수정 및 컴파일 오류 해결
         public Task<ServiceResult<UserProfileEntity>> GetUserProfileAsync(string provider, string accessToken)
         {
@@ -209,7 +209,7 @@ namespace AuthHive.Auth.Services.External
         #endregion
 
         #region Private Helper Methods
-        
+
         private async Task<ServiceResult> CheckOrganizationPlanLimitsAsync(Guid organizationId, PlanLimitType limitType)
         {
             if (!_limitCheckers.TryGetValue(limitType, out var checker))
@@ -225,22 +225,25 @@ namespace AuthHive.Auth.Services.External
             if (maxLimit == -1) return ServiceResult.Success();
 
             var currentUsage = await checker.GetCurrentUsageAsync(organizationId);
-
             if (currentUsage >= maxLimit)
             {
                 string errorMessage = $"Limit for {limitType} exceeded. Maximum: {maxLimit}, Current: {currentUsage}";
-                await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                {
-                    OrganizationId = organizationId,
-                    PlanKey = planKey,
-                    LimitType = limitType,
-                    CurrentValue = (int)currentUsage,
-                    MaxValue = (int)maxLimit,
-                    Message = errorMessage,
-                    OccurredAt = _dateTimeProvider.UtcNow
-                });
-                return ServiceResult.Failure(errorMessage);
+
+                // ✅ 수정된 부분: 모든 필수 정보를 생성자의 파라미터로 전달합니다.
+                var limitEvent = new PlanLimitReachedEvent(
+                    organizationId: organizationId,
+                    planKey: planKey,
+                    limitType: limitType,
+                    currentValue: (int)currentUsage,
+                    maxValue: (int)maxLimit
+                );
+
+                await _eventBus.PublishAsync(limitEvent);
+
+                // 이벤트 객체 내부에 이미 더 상세한 메시지가 있으므로 그것을 사용할 수 있습니다.
+                return ServiceResult.Failure(limitEvent.Message);
             }
+
             return ServiceResult.Success();
         }
 
@@ -282,7 +285,7 @@ namespace AuthHive.Auth.Services.External
         }
 
         private void LoadProvidersFromConfiguration() { /* ... appsettings.json 등에서 공급자 정보 로드 ... */ }
-        
+
         private class RateLimitInfo
         {
             public int Count { get; set; }

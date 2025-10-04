@@ -9,8 +9,11 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Infra.Security;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Validator;
+using AuthHive.Core.Models.Base;
+using AuthHive.Core.Models.Business.Events;
 using AuthHive.Core.Models.Infra.Security;
 using AuthHive.Core.Models.Organization.Common;
+using AuthHive.Core.Models.Organization.Events;
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Services.Validators
@@ -24,9 +27,9 @@ namespace AuthHive.Auth.Services.Validators
         private readonly ICacheService _cache;
         private readonly IEventBus _eventBus; // [추가] 이벤트 버스 의존성
         private readonly ILogger<OrganizationDomainValidator> _logger;
-        
+
         private static readonly Regex DomainFormatRegex = new Regex(
-            @"^((?!-))(xn--)?[a-z0-9][a-z0-9-_]{0,61}[a-z0-9]{0,1}\.(xn--)?([a-z0-9\-]{1,61}|[a-z0-9-]{1,30}\.[a-z]{2,})$", 
+            @"^((?!-))(xn--)?[a-z0-9][a-z0-9-_]{0,61}[a-z0-9]{0,1}\.(xn--)?([a-z0-9\-]{1,61}|[a-z0-9-]{1,30}\.[a-z]{2,})$",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private const string DOMAIN_EXISTS_CACHE_KEY = "domain_exists_{0}";
@@ -77,50 +80,111 @@ namespace AuthHive.Auth.Services.Validators
 
             return ValidationResult.Success!;
         }
-
         public async Task<ValidationResult> ValidateDnsRecordsAsync(string domain)
         {
             var domainEntity = await _domainRepository.GetByDomainAsync(domain);
             if (domainEntity?.VerificationToken == null || domainEntity.VerificationMethod == null)
+            {
+                _logger.LogWarning("Verification token for domain {Domain} is not available.", domain);
+                // FIX #2: Changed from ValidationResult.Failure to constructor
                 return new ValidationResult("Verification token for the domain is not available.", new[] { "Domain" });
+            }
 
             var verificationResult = await _dnsHelper.VerifyDnsRecordAsync(domain, domainEntity.VerificationToken, domainEntity.VerificationMethod);
 
             if (!verificationResult.IsMatch)
             {
-                // [추가] DNS 검증 실패 이벤트 발행
-                await _eventBus.PublishAsync(new DomainVerificationFailedEvent
-                {
-                    OrganizationId = domainEntity.OrganizationId,
-                    Domain = domain,
-                    Reason = $"Expected '{verificationResult.ExpectedValue}' but found '{verificationResult.ActualValue}'."
-                });
+                _logger.LogWarning("DNS verification failed for domain {Domain}. Expected: {Expected}, Found: {Actual}", domain, verificationResult.ExpectedValue, verificationResult.ActualValue);
+
+                // Since we cannot track attempts on the entity, we'll assume this is the first failure detection in this context.
+                const int newAttemptCount = 1;
+
+                var verificationFailedEvent = new DomainVerificationFailedEvent(
+                    organizationId: domainEntity.OrganizationId,
+                    domainId: domainEntity.Id,
+                    domain: domain,
+                    reason: $"Expected '{verificationResult.ExpectedValue}' but found '{verificationResult.ActualValue}'.",
+                    attemptCount: newAttemptCount,
+                    triggeredBy: null  // Since we removed the parameter, we pass null here
+                );
+                await _eventBus.PublishAsync(verificationFailedEvent);
+
+                // FIX #3: Changed from ValidationResult.Failure to constructor
+                return new ValidationResult($"DNS record verification failed: Expected '{verificationResult.ExpectedValue}' but found '{verificationResult.ActualValue}'.", new[] { "DnsRecord" });
+            }
+
+            _logger.LogInformation("DNS verification successful for domain {Domain}.", domain);
+            return ValidationResult.Success!;
+        }
+        public async Task<ValidationResult> ValidateDnsRecordsAsync(string domain, Guid? triggeredBy)
+        {
+            var domainEntity = await _domainRepository.GetByDomainAsync(domain);
+            if (domainEntity?.VerificationToken == null || domainEntity.VerificationMethod == null)
+            {
+                _logger.LogWarning("Verification token for domain {Domain} is not available.", domain);
+                return new ValidationResult("Verification token for the domain is not available.", new[] { "Domain" });
+            }
+
+            var verificationResult = await _dnsHelper.VerifyDnsRecordAsync(domain, domainEntity.VerificationToken, domainEntity.VerificationMethod);
+
+            if (!verificationResult.IsMatch)
+            {
+                _logger.LogWarning("DNS verification failed for domain {Domain}. Expected: {Expected}, Found: {Actual}", domain, verificationResult.ExpectedValue, verificationResult.ActualValue);
+
+                // Since we cannot track attempts on the entity, we'll assume this is the first failure detection in this context.
+                const int newAttemptCount = 1;
+
+                var verificationFailedEvent = new DomainVerificationFailedEvent(
+                    organizationId: domainEntity.OrganizationId,
+                    domainId: domainEntity.Id,
+                    domain: domain,
+                    reason: $"Expected '{verificationResult.ExpectedValue}' but found '{verificationResult.ActualValue}'.",
+                    attemptCount: newAttemptCount,
+                    triggeredBy: triggeredBy
+                );
+                await _eventBus.PublishAsync(verificationFailedEvent);
 
                 return new ValidationResult($"DNS record verification failed: Expected '{verificationResult.ExpectedValue}' but found '{verificationResult.ActualValue}'.", new[] { "DnsRecord" });
             }
 
+            _logger.LogInformation("DNS verification successful for domain {Domain}.", domain);
             return ValidationResult.Success!;
         }
 
         public async Task<ValidationResult> ValidateSslCertificateAsync(string domain)
         {
+            // First, get the domain entity to find out which organization it belongs to.
+            var domainEntity = await _domainRepository.GetByDomainAsync(domain);
+            if (domainEntity == null)
+            {
+                // If the domain isn't registered in our system, we can't validate it.
+                return new ValidationResult("Domain not found in the system.", new[] { "Domain" });
+            }
+
             var status = await _sslHelper.CheckCertificateStatusAsync(domain);
 
             if (!status.IsValid)
-                return new ValidationResult($"SSL certificate is invalid or missing. Reason: {status.Status}", new[] { "SslCertificate" });
-
-            if (status.DaysRemaining <= 7)
             {
-                // [추가] SSL 인증서 만료 임박 이벤트 발행
-                await _eventBus.PublishAsync(new SslCertificateExpiringEvent
-                {
-                    Domain = domain,
-                    DaysRemaining = status.DaysRemaining.Value
-                });
-                
+                return new ValidationResult($"SSL certificate is invalid or missing. Reason: {status.Status}", new[] { "SslCertificate" });
+            }
+
+            // Check if the certificate is expiring soon.
+            if (status.DaysRemaining.HasValue && status.DaysRemaining.Value <= 7)
+            {
+                // ✅ FIXED: Switched from object initializer to the correct constructor call.
+                // We now provide all the required information.
+                var expiringEvent = new SslCertificateExpiringEvent(
+                    organizationId: domainEntity.OrganizationId,
+                    domain: domain,
+                    daysRemaining: status.DaysRemaining.Value,
+                    expiresAt: status.ExpiresAt ?? DateTime.UtcNow.AddDays(status.DaysRemaining.Value) // Use the actual expiration date if available
+                );
+                await _eventBus.PublishAsync(expiringEvent);
+
+                // Return a warning in the validation result.
                 return new ValidationResult($"SSL certificate is expiring in {status.DaysRemaining} days. Please renew it.", new[] { "SslCertificate" });
             }
-            
+
             return ValidationResult.Success!;
         }
 
@@ -130,7 +194,7 @@ namespace AuthHive.Auth.Services.Validators
 
             if (domain == null || domain.OrganizationId != organizationId)
                 return new ValidationResult("Domain not found or does not belong to the organization.", new[] { "Domain" });
-            
+
             if (!domain.IsVerified)
                 return new ValidationResult("Only a verified domain can be set as primary.", new[] { "Domain" });
 
@@ -150,13 +214,14 @@ namespace AuthHive.Auth.Services.Validators
             {
                 if (limit != -1 && currentCount >= limit)
                 {
-                    // [추가] 도메인 개수 한도 초과 이벤트 발행
-                    await _eventBus.PublishAsync(new DomainCountLimitReachedEvent
-                    {
-                        OrganizationId = organizationId,
-                        CurrentPlan = subscription.PlanName,
-                        Limit = limit
-                    });
+                    // ✅ FIXED: Switched from object initializer to the correct constructor call.
+                    var limitEvent = new DomainCountLimitReachedEvent(
+                        organizationId: organizationId,
+                        currentPlan: subscription.PlanKey, // Use PlanKey for consistency
+                        limit: limit,
+                        triggeredBy: null // Pass the user's ConnectedId if available
+                    );
+                    await _eventBus.PublishAsync(limitEvent);
 
                     return new ValidationResult($"You have reached the maximum of {limit} domains for your current plan.", new[] { "DomainLimit" });
                 }
@@ -164,37 +229,8 @@ namespace AuthHive.Auth.Services.Validators
 
             return ValidationResult.Success!;
         }
-        
+
         private class CachedBoolValue { public bool Value { get; set; } }
 
-        #region Domain Events (Should be moved to a dedicated Models/Events folder)
-
-        public class DomainVerificationFailedEvent : IDomainEvent
-        {
-            public Guid EventId { get; set; } = Guid.NewGuid();
-            public Guid OrganizationId { get; set; }
-            public string Domain { get; set; } = string.Empty;
-            public string Reason { get; set; } = string.Empty;
-            public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        }
-
-        public class SslCertificateExpiringEvent : IDomainEvent
-        {
-            public Guid EventId { get; set; } = Guid.NewGuid();
-            public string Domain { get; set; } = string.Empty;
-            public int DaysRemaining { get; set; }
-            public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        }
-
-        public class DomainCountLimitReachedEvent : IDomainEvent
-        {
-            public Guid EventId { get; set; } = Guid.NewGuid();
-            public Guid OrganizationId { get; set; }
-            public string CurrentPlan { get; set; } = string.Empty;
-            public int Limit { get; set; }
-            public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        }
-
-        #endregion
     }
 }

@@ -34,8 +34,8 @@ public class OrganizationSettingsHierarchyHandler : IOrganizationSettingsHierarc
     }
 
     public async Task<ServiceResult<InheritOrganizationSettingsResponse>> InheritFromParentAsync(
-        Guid organizationId, 
-        Guid connectedId, 
+        Guid organizationId,
+        Guid connectedId,
         IEnumerable<OrganizationSettingCategory>? categories = null)
     {
         var organization = await _organizationRepository.GetByIdAsync(organizationId);
@@ -47,10 +47,10 @@ public class OrganizationSettingsHierarchyHandler : IOrganizationSettingsHierarc
 
         var parentId = organization.ParentId.Value;
         _logger.LogInformation("Inheriting settings from parent {ParentId} to child {ChildId}", parentId, organizationId);
-        
+
         var inheritedEntities = await _settingsRepository.InheritSettingsFromParentAsync(
-            organizationId, 
-            parentId, 
+            organizationId,
+            parentId,
             categories?.Select(c => c.ToString()));
 
         var response = new InheritOrganizationSettingsResponse
@@ -65,12 +65,12 @@ public class OrganizationSettingsHierarchyHandler : IOrganizationSettingsHierarc
     }
 
     public async Task<ServiceResult<PropagateOrganizationSettingsResponse>> PropagateToChildrenAsync(
-        PropagateOrganizationSettingsRequest request, 
+        PropagateOrganizationSettingsRequest request,
         Guid connectedId)
     {
-        _logger.LogInformation("Propagating settings from parent {ParentId} by user {ConnectedId}", 
+        _logger.LogInformation("Propagating settings from parent {ParentId} by user {ConnectedId}",
             request.ParentOrganizationId, connectedId);
-        
+
         var affectedCount = await _commandRepository.PropagateSettingsToChildrenAsync(
             request.ParentOrganizationId,
             request.SettingKeys,
@@ -78,19 +78,22 @@ public class OrganizationSettingsHierarchyHandler : IOrganizationSettingsHierarc
 
         var response = new PropagateOrganizationSettingsResponse
         {
-            SettingsPropagated = affectedCount
+            IsSuccess = affectedCount > 0,
+            PropagatedSettingsCount = affectedCount,  // 올바른 속성명
+            AffectedOrganizationsCount = 0,  // 실제 영향받은 조직 수를 계산해야 함
+            Message = $"{affectedCount}개의 설정이 하위 조직에 전파되었습니다."
         };
 
         return ServiceResult<PropagateOrganizationSettingsResponse>.Success(response);
     }
 
     public async Task<ServiceResult<OrganizationSettingsDto>> OverrideInheritedSettingAsync(
-        OverrideInheritedSettingRequest request, 
+        OverrideInheritedSettingRequest request,
         Guid connectedId)
     {
-        _logger.LogInformation("User {ConnectedId} is overriding setting '{SettingKey}' for organization {OrgId}", 
+        _logger.LogInformation("User {ConnectedId} is overriding setting '{SettingKey}' for organization {OrgId}",
             connectedId, request.SettingKey, request.OrganizationId);
-        
+
         var settingToUpsert = new Core.Entities.Organization.OrganizationSettings
         {
             OrganizationId = request.OrganizationId,

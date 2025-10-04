@@ -22,6 +22,7 @@ using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using Serilog;
 using AuthHive.Infrastructure.Events;
+using AuthHive.Business.Services.Organization;
 
 Log.Logger = new LoggerConfiguration()
    .WriteTo.Console()

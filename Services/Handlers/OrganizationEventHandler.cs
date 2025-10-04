@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -60,71 +61,181 @@ namespace AuthHive.Organization.Handlers
         }
         #endregion
 
+        #region Creation, Update, Deletion Events
+
         public async Task HandleOrganizationCreatedAsync(OrganizationCreatedEvent @event, CancellationToken cancellationToken = default)
         {
-            await LogOrgEventAsync("ORGANIZATION_CREATED", AuditActionType.Create, @event.CreatedByConnectedId, @event.OrganizationId, @event);
+            // OrganizationCreatedEvent는 BaseEvent를 상속받아 AggregateId를 가짐
+            var organizationId = @event.AggregateId;
+            var createdBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("ORGANIZATION_CREATED", AuditActionType.Create, createdBy, organizationId, @event);
             
             // 신규 조직 생성 시, 기본 설정을 캐시에 미리 넣어 'Cache Warming'을 할 수 있습니다.
-            // 예: await _cacheService.SetAsync(GetOrgCacheKey(@event.OrganizationId), newlyCreatedOrgDto);
+            // 예: await _cacheService.SetAsync(GetOrgCacheKey(organizationId), newlyCreatedOrgDto);
         }
 
         public async Task HandleOrganizationUpdatedAsync(OrganizationUpdatedEvent @event, CancellationToken cancellationToken = default)
         {
+            var organizationId = @event.AggregateId;
+            var updatedBy = @event.TriggeredBy ?? Guid.Empty;
+            
             // 1. 감사 로그 기록
-            await LogOrgEventAsync("ORGANIZATION_UPDATED", AuditActionType.Update, @event.UpdatedByConnectedId, @event.OrganizationId, @event);
+            await LogOrgEventAsync("ORGANIZATION_UPDATED", AuditActionType.Update, updatedBy, organizationId, @event);
             
             // 2. (가장 중요) 해당 조직의 캐시를 무효화하여 다음 요청 시 새로운 정보를 가져오도록 합니다.
-            await InvalidateOrganizationCacheAsync(@event.OrganizationId);
+            await InvalidateOrganizationCacheAsync(organizationId);
         }
 
         public async Task HandleOrganizationDeletedAsync(OrganizationDeletedEvent @event, CancellationToken cancellationToken = default)
         {
-            await LogOrgEventAsync("ORGANIZATION_DELETED", AuditActionType.Delete, @event.DeletedByConnectedId, @event.OrganizationId, @event, AuditEventSeverity.Critical);
+            var organizationId = @event.AggregateId;
+            var deletedBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("ORGANIZATION_DELETED", AuditActionType.Delete, deletedBy, organizationId, @event, AuditEventSeverity.Critical);
             
             // 조직 삭제 시 관련 캐시(조직 정보, 사용자 권한 등)를 모두 정리합니다.
-            await InvalidateOrganizationCacheAsync(@event.OrganizationId);
-            await InvalidateAllUserPermissionsInOrgAsync(@event.OrganizationId);
+            await InvalidateOrganizationCacheAsync(organizationId);
+            await InvalidateAllUserPermissionsInOrgAsync(organizationId);
         }
 
-        public async Task HandleOrganizationStatusChangedAsync(OrganizationStatusChangedEvent @event, CancellationToken cancellationToken = default)
-        {
-            await LogOrgEventAsync("ORGANIZATION_STATUS_CHANGED", AuditActionType.Update, @event.ChangedByConnectedId, @event.OrganizationId, @event, AuditEventSeverity.Warning);
-            
-            await InvalidateOrganizationCacheAsync(@event.OrganizationId);
+        #endregion
 
-            // 조직이 정지되거나 비활성화되면, 소속된 모든 사용자의 권한이 영향을 받으므로 캐시를 무효화해야 합니다.
-            if (@event.NewStatus == Core.Enums.Core.OrganizationStatus.Suspended || @event.NewStatus == Core.Enums.Core.OrganizationStatus.Inactive)
-            {
-                await InvalidateAllUserPermissionsInOrgAsync(@event.OrganizationId, @event.AffectsChildOrganizations);
-            }
-        }
+        #region Status Change Events (Replacing OrganizationStatusChangedEvent)
 
         public async Task HandleOrganizationActivatedAsync(OrganizationActivatedEvent @event, CancellationToken cancellationToken = default)
         {
-            await LogOrgEventAsync("ORGANIZATION_ACTIVATED", AuditActionType.Update, @event.ActivatedByConnectedId, @event.OrganizationId, @event);
-            await InvalidateOrganizationCacheAsync(@event.OrganizationId);
+            var organizationId = @event.AggregateId;
+            var activatedBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("ORGANIZATION_ACTIVATED", AuditActionType.Update, activatedBy, organizationId, 
+                new { @event.PreviousStatus, @event.Reason });
+            
+            await InvalidateOrganizationCacheAsync(organizationId);
+            
+            // 조직이 활성화되면 하위 조직들도 영향을 받을 수 있으므로 권한 재계산
+            await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: true);
+            
+            _logger.LogInformation(
+                "Organization activated: {OrganizationId}, Previous: {PreviousStatus}, Reason: {Reason}", 
+                organizationId, @event.PreviousStatus, @event.Reason);
         }
 
         public async Task HandleOrganizationSuspendedAsync(OrganizationSuspendedEvent @event, CancellationToken cancellationToken = default)
         {
-            await LogOrgEventAsync("ORGANIZATION_SUSPENDED", AuditActionType.Update, @event.SuspendedByConnectedId, @event.OrganizationId, @event, AuditEventSeverity.Critical);
+            var organizationId = @event.AggregateId;
+            var suspendedBy = @event.TriggeredBy ?? Guid.Empty;
             
-            await InvalidateOrganizationCacheAsync(@event.OrganizationId);
-            await InvalidateAllUserPermissionsInOrgAsync(@event.OrganizationId, @event.AffectsChildOrganizations);
+            // Log the suspension with the reason from the event
+            var auditLog = new AuditLog
+            {
+                Action = "ORGANIZATION_SUSPENDED",
+                ActionType = AuditActionType.Update,
+                PerformedByConnectedId = suspendedBy,
+                TargetOrganizationId = organizationId,
+                Success = true,
+                Timestamp = _dateTimeProvider.UtcNow,
+                Severity = AuditEventSeverity.Critical,
+                Metadata = JsonSerializer.Serialize(new
+                {
+                    @event.PreviousStatus,
+                    @event.Reason,
+                    @event.Priority,
+                    @event.Tags
+                })
+            };
+            await _auditService.LogAsync(auditLog);
+            
+            await InvalidateOrganizationCacheAsync(organizationId);
+            
+            // When organization is suspended, invalidate all user permissions
+            await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: true);
+            
+            _logger.LogWarning(
+                "Organization {OrganizationId} suspended. Previous status: {PreviousStatus}, Reason: {Reason}", 
+                organizationId, 
+                @event.PreviousStatus, 
+                @event.Reason);
         }
+
+        public async Task HandleOrganizationDeactivatedAsync(OrganizationDeactivatedEvent @event, CancellationToken cancellationToken = default)
+        {
+            var organizationId = @event.AggregateId;
+            var deactivatedBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("ORGANIZATION_DEACTIVATED", AuditActionType.Update, deactivatedBy, organizationId,
+                new { @event.PreviousStatus, @event.Reason },
+                AuditEventSeverity.Warning);
+            
+            await InvalidateOrganizationCacheAsync(organizationId);
+            
+            // 비활성화된 조직의 모든 사용자 권한 무효화
+            await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: false);
+            
+            _logger.LogWarning(
+                "Organization deactivated: {OrganizationId}, Previous: {PreviousStatus}, Reason: {Reason}", 
+                organizationId, @event.PreviousStatus, @event.Reason);
+        }
+
+        #endregion
+
+        #region Hierarchy Change Events
 
         public async Task HandleOrganizationParentChangedAsync(OrganizationParentChangedEvent @event, CancellationToken cancellationToken = default)
         {
-            await LogOrgEventAsync("ORGANIZATION_PARENT_CHANGED", AuditActionType.Update, @event.UpdatedByConnectedId, @event.OrganizationId, @event);
+            var organizationId = @event.AggregateId;
+            var updatedBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("ORGANIZATION_PARENT_CHANGED", AuditActionType.Update, updatedBy, organizationId, @event);
 
             // 조직의 계층 구조가 변경되면, 자신과 부모의 캐시를 모두 무효화합니다.
-            await InvalidateOrganizationCacheAsync(@event.OrganizationId);
-            if (@event.OldParentId.HasValue) await InvalidateOrganizationCacheAsync(@event.OldParentId.Value);
-            if (@event.NewParentId.HasValue) await InvalidateOrganizationCacheAsync(@event.NewParentId.Value);
+            await InvalidateOrganizationCacheAsync(organizationId);
+            
+            if (@event.OldParentId.HasValue) 
+                await InvalidateOrganizationCacheAsync(@event.OldParentId.Value);
+                
+            if (@event.NewParentId.HasValue) 
+                await InvalidateOrganizationCacheAsync(@event.NewParentId.Value);
 
             // 권한 상속 모델을 사용하는 경우, 조직 이동은 모든 하위 구성원의 권한에 영향을 줄 수 있습니다.
-            await InvalidateAllUserPermissionsInOrgAsync(@event.OrganizationId, true);
+            await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: true);
         }
+
+        #endregion
+
+        #region Domain Events
+
+        public async Task HandleDomainVerifiedAsync(DomainVerifiedEvent @event, CancellationToken cancellationToken = default)
+        {
+            var organizationId = @event.AggregateId;
+            var verifiedBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("DOMAIN_VERIFIED", AuditActionType.Update, verifiedBy, organizationId,
+                new { @event.DomainName, @event.VerificationMethod, @event.VerifiedAt });
+            
+            await InvalidateOrganizationCacheAsync(organizationId);
+            
+            _logger.LogInformation(
+                "Domain verified for organization: {OrganizationId}, Domain: {DomainName}, Method: {Method}", 
+                organizationId, @event.DomainName, @event.VerificationMethod);
+        }
+
+        public async Task HandlePrimaryDomainChangedAsync(PrimaryDomainChangedEvent @event, CancellationToken cancellationToken = default)
+        {
+            var organizationId = @event.AggregateId;
+            var changedBy = @event.TriggeredBy ?? Guid.Empty;
+            
+            await LogOrgEventAsync("PRIMARY_DOMAIN_CHANGED", AuditActionType.Update, changedBy, organizationId,
+                new { @event.OldDomain, @event.NewDomain, @event.Reason });
+            
+            await InvalidateOrganizationCacheAsync(organizationId);
+            
+            _logger.LogInformation(
+                "Primary domain changed for organization: {OrganizationId}, Old: {OldDomain}, New: {NewDomain}", 
+                organizationId, @event.OldDomain, @event.NewDomain);
+        }
+
+        #endregion
 
         #region Private Helper Methods
 

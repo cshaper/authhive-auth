@@ -129,15 +129,13 @@ namespace AuthHive.Services.Auth.Validators
                         context.ConnectedId);
 
                     // 🔴 보안 이벤트 필요: 무단 시스템 권한 접근은 보안 이슈
-                    await _eventBus.PublishAsync(new SystemPermissionModificationAttemptedEvent
-                    {
-                        AttemptedBy = context.ConnectedId,
-                        PermissionId = Guid.Empty,
-                        PermissionScope = request.Scope,
-                        Action = "Create",
-                        IsAuthorized = false,
-                        OrganizationId = context.OrganizationId
-                    });
+                    var sysPermEvent = new SystemPermissionModificationAttemptedEvent(Guid.Empty);
+                    sysPermEvent.AttemptedBy = context.ConnectedId;
+                    sysPermEvent.PermissionScope = request.Scope;
+                    sysPermEvent.Action = "Create";
+                    sysPermEvent.IsAuthorized = false;
+                    sysPermEvent.OrganizationId = context.OrganizationId;
+                    await _eventBus.PublishAsync(sysPermEvent);
 
                     // 감사 로그
                     await _auditService.LogActionAsync(
@@ -194,7 +192,6 @@ namespace AuthHive.Services.Auth.Validators
 
                     if (!parentValidation.IsSuccess)
                     {
-                        // ❌ 이벤트 불필요: 내부 검증 단계
                         await _unitOfWork.RollbackTransactionAsync();
                         return parentValidation;
                     }
@@ -210,14 +207,13 @@ namespace AuthHive.Services.Auth.Validators
                 if (maxDepth > 0 && scopeParts.Length > maxDepth)
                 {
                     // 🔴 비즈니스 이벤트 필요: 플랜 제한 도달 = 영업 기회
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = context.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.PermissionScopeDepth,
-                        CurrentValue = scopeParts.Length,
-                        MaxValue = maxDepth
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        context.OrganizationId,
+                        planKey,
+                        PlanLimitType.PermissionScopeDepth,
+                        scopeParts.Length,
+                        maxDepth
+                    ));
 
                     await _unitOfWork.RollbackTransactionAsync();
                     return ServiceResult.Failure(
@@ -231,15 +227,13 @@ namespace AuthHive.Services.Auth.Validators
                 if (request.IsSystemPermission)
                 {
                     // 🔴 시스템 권한 생성은 중요 이벤트
-                    await _eventBus.PublishAsync(new SystemPermissionModificationAttemptedEvent
-                    {
-                        AttemptedBy = context.ConnectedId,
-                        PermissionId = Guid.Empty,
-                        PermissionScope = request.Scope,
-                        Action = "Create",
-                        IsAuthorized = true,
-                        OrganizationId = context.OrganizationId
-                    });
+                    var sysPermSuccessEvent = new SystemPermissionModificationAttemptedEvent(Guid.Empty);
+                    sysPermSuccessEvent.AttemptedBy = context.ConnectedId;
+                    sysPermSuccessEvent.PermissionScope = request.Scope;
+                    sysPermSuccessEvent.Action = "Create";
+                    sysPermSuccessEvent.IsAuthorized = true;
+                    sysPermSuccessEvent.OrganizationId = context.OrganizationId;
+                    await _eventBus.PublishAsync(sysPermSuccessEvent);
                 }
 
                 // 감사 로그: 모든 성공은 감사 로그에 기록
@@ -310,15 +304,14 @@ namespace AuthHive.Services.Auth.Validators
                     if (!isSystemAdmin)
                     {
                         // 🔴 보안 이벤트 필요: 무단 시스템 권한 수정 시도
-                        await _eventBus.PublishAsync(new SystemPermissionModificationAttemptedEvent
-                        {
-                            AttemptedBy = context.ConnectedId,
-                            PermissionId = permission.Id,
-                            PermissionScope = permission.Scope,
-                            Action = "Update",
-                            IsAuthorized = false,
-                            OrganizationId = context.OrganizationId
-                        });
+                        var sysPermEvent = new SystemPermissionModificationAttemptedEvent(permission.Id);
+                        sysPermEvent.AttemptedBy = context.ConnectedId;
+                        sysPermEvent.PermissionId = permission.Id;
+                        sysPermEvent.PermissionScope = permission.Scope;
+                        sysPermEvent.Action = "Update";
+                        sysPermEvent.IsAuthorized = false;
+                        sysPermEvent.OrganizationId = context.OrganizationId;
+                        await _eventBus.PublishAsync(sysPermEvent);
 
                         await _auditService.LogActionAsync(
                             context.ConnectedId,
@@ -365,14 +358,13 @@ namespace AuthHive.Services.Auth.Validators
                     if (maxDepth > 0 && scopeParts.Length > maxDepth)
                     {
                         // 🔴 비즈니스 이벤트 필요: 플랜 제한
-                        await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                        {
-                            OrganizationId = context.OrganizationId,
-                            PlanKey = planKey,
-                            LimitType = PlanLimitType.PermissionScopeDepth,
-                            CurrentValue = scopeParts.Length,
-                            MaxValue = maxDepth
-                        });
+                        await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                            context.OrganizationId,
+                            planKey,
+                            PlanLimitType.PermissionScopeDepth,
+                            scopeParts.Length,
+                            maxDepth
+                        ));
 
                         await _unitOfWork.RollbackTransactionAsync();
                         return ServiceResult.Failure(
@@ -431,15 +423,14 @@ namespace AuthHive.Services.Auth.Validators
                     if (permission.IsSystemPermission)
                     {
                         // 🔴 보안 이벤트 필요: 시스템 권한 삭제 시도
-                        await _eventBus.PublishAsync(new SystemPermissionModificationAttemptedEvent
-                        {
-                            AttemptedBy = context.ConnectedId,
-                            PermissionId = permission.Id,
-                            PermissionScope = permission.Scope,
-                            Action = "Delete",
-                            IsAuthorized = false,
-                            OrganizationId = context.OrganizationId
-                        });
+                        var sysPermEvent = new SystemPermissionModificationAttemptedEvent(permission.Id);
+                        sysPermEvent.AttemptedBy = context.ConnectedId;
+                        sysPermEvent.PermissionId = permission.Id;
+                        sysPermEvent.PermissionScope = permission.Scope;
+                        sysPermEvent.Action = "Delete";
+                        sysPermEvent.IsAuthorized = false;
+                        sysPermEvent.OrganizationId = context.OrganizationId;
+                        await _eventBus.PublishAsync(sysPermEvent);
 
                         return ServiceResult.Failure(
                             "System permissions can only be deleted by system administrators",
@@ -552,14 +543,13 @@ namespace AuthHive.Services.Auth.Validators
                 if (planKey != PricingConstants.SubscriptionPlans.ENTERPRISE_KEY)
                 {
                     // 🔴 비즈니스 이벤트: 대량 작업 제한 = 업그레이드 기회
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = context.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.BulkPermissionOperations,
-                        CurrentValue = requests.Count,
-                        MaxValue = PermissionConstants.Limits.MaxBulkOperationSize
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        context.OrganizationId,
+                        planKey,
+                        PlanLimitType.BulkPermissionOperations,
+                        requests.Count,
+                        PermissionConstants.Limits.MaxBulkOperationSize
+                    ));
                 }
 
                 return ServiceResult.Failure(
@@ -780,14 +770,13 @@ namespace AuthHive.Services.Auth.Validators
                 if (!hierarchy.IsValid && hierarchy.DepthViolations.Any())
                 {
                     // 🔴 비즈니스 이벤트: 다수의 스코프가 플랜 제한 초과
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = context.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.PermissionScopeDepth,
-                        CurrentValue = maxDepth,
-                        MaxValue = maxAllowedDepth
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        context.OrganizationId,
+                        planKey,
+                        PlanLimitType.PermissionScopeDepth,
+                        maxDepth,
+                        maxAllowedDepth
+                    ));
                 }
 
                 return ServiceResult<ScopeHierarchy>.Success(hierarchy);
@@ -846,14 +835,13 @@ namespace AuthHive.Services.Auth.Validators
                     c.Description.Contains("audit") || c.Description.Contains("payment")))
                 {
                     // 🔴 보안 이벤트: ScopeConflictDetectedEvent 사용
-                    await _eventBus.PublishAsync(new ScopeConflictDetectedEvent
-                    {
-                        ConflictingScopes = criticalConflicts.SelectMany(c => new[] { c.Scope1, c.Scope2 }).Distinct().ToList(),
-                        ConflictType = "Direct",
-                        Description = "Critical permission conflicts detected",
-                        DetectedBy = context.ConnectedId,
-                        OrganizationId = context.OrganizationId
-                    });
+                    var conflictEvent = new ScopeConflictDetectedEvent(context.OrganizationId);
+                    conflictEvent.ConflictingScopes = criticalConflicts.SelectMany(c => new[] { c.Scope1, c.Scope2 }).Distinct().ToList();
+                    conflictEvent.ConflictType = "Direct";
+                    conflictEvent.Description = "Critical permission conflicts detected";
+                    conflictEvent.DetectedBy = context.ConnectedId;
+                    conflictEvent.OrganizationId = context.OrganizationId;
+                    await _eventBus.PublishAsync(conflictEvent);
                 }
 
                 return ServiceResult<List<ScopeConflict>>.Success(conflicts);
@@ -929,14 +917,13 @@ namespace AuthHive.Services.Auth.Validators
                         $"Organization is at role limit ({roleLimit}) for {planKey} plan");
 
                     // 🔴 비즈니스 이벤트: 역할 제한 도달
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = context.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.RoleCount,
-                        CurrentValue = roleCount,
-                        MaxValue = roleLimit
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        context.OrganizationId,
+                        planKey,
+                        PlanLimitType.RoleCount,
+                        roleCount,
+                        roleLimit
+                    ));
                 }
 
                 return ServiceResult<PlanRestrictionValidation>.Success(validation);
@@ -1006,14 +993,13 @@ namespace AuthHive.Services.Auth.Validators
                 if (assessment.RiskLevel == RiskLevel.Critical)
                 {
                     // 기존 DangerousPermissionCombinationDetectedEvent 사용
-                    await _eventBus.PublishAsync(new DangerousPermissionCombinationDetectedEvent
-                    {
-                        ConnectedId = context.ConnectedId,
-                        OrganizationId = context.OrganizationId,
-                        PermissionIds = permissionIds,
-                        RiskLevel = "Critical", // string으로 변환
-                        DangerousCombinations = assessment.DangerousCombinations
-                    });
+                    var dangerousEvent = new DangerousPermissionCombinationDetectedEvent(context.OrganizationId);
+                    dangerousEvent.ConnectedId = context.ConnectedId;
+                    dangerousEvent.OrganizationId = context.OrganizationId;
+                    dangerousEvent.PermissionIds = permissionIds;
+                    dangerousEvent.RiskLevel = "Critical"; // string으로 변환
+                    dangerousEvent.DangerousCombinations = assessment.DangerousCombinations;
+                    await _eventBus.PublishAsync(dangerousEvent);
                 }
 
                 // 권한 상승 위험 확인

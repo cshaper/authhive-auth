@@ -206,7 +206,6 @@ namespace AuthHive.Auth.Validator
                 }
 
                 // 4. Check for duplicate role name in organization
-                // IRoleRepository에 GetByNameAsync가 없으므로 GetByOrganizationAsync를 사용하여 필터링
                 var existingRoles = await _roleRepository.GetByOrganizationAsync(request.OrganizationId, includeInactive: true);
                 var existingRole = existingRoles.FirstOrDefault(r => r.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase));
                 if (existingRole != null)
@@ -217,7 +216,7 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.DuplicateRole);
                 }
 
-                // 5. Check for duplicate role key - GetByRoleKeyAsync 사용
+                // 5. Check for duplicate role key
                 var existingRoleByKey = await _roleRepository.GetByRoleKeyAsync(request.OrganizationId, request.RoleKey);
                 if (existingRoleByKey != null)
                 {
@@ -227,7 +226,7 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.DuplicateKey);
                 }
 
-                // 6. Get organization's plan and check role limit from PricingConstants
+                // 6. Get organization's plan and check role limit
                 var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(request.OrganizationId);
                 var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
                 var roleLimit = PricingConstants.SubscriptionPlans.RoleLimits[planKey];
@@ -238,15 +237,12 @@ namespace AuthHive.Auth.Validator
 
                     if (currentRoleCount >= roleLimit)
                     {
-                        // Fire plan limit reached event - this is a business opportunity
-                        await _eventBus.PublishAsync(new RoleLimitReachedEvent
+                        await _eventBus.PublishAsync(new RoleLimitReachedEvent(request.OrganizationId)
                         {
-                            OrganizationId = request.OrganizationId,
                             PlanKey = planKey,
                             CurrentRoleCount = currentRoleCount,
                             MaxRoleLimit = roleLimit,
                             AttemptedBy = createdByConnectedId,
-                            Timestamp = _dateTimeProvider.UtcNow
                         });
 
                         _logger.LogWarning(
@@ -260,7 +256,7 @@ namespace AuthHive.Auth.Validator
                     }
                 }
 
-                // 7. Validate parent role if specified (check hierarchy depth against plan)
+                // 7. Validate parent role if specified
                 if (request.ParentRoleId.HasValue)
                 {
                     var parentRole = await _roleRepository.GetByIdAsync(request.ParentRoleId.Value);
@@ -278,21 +274,19 @@ namespace AuthHive.Auth.Validator
                             RoleConstants.ErrorCodes.InvalidParent);
                     }
 
-                    // Check hierarchy depth against plan limits
                     var depth = await GetRoleHierarchyDepthAsync(request.ParentRoleId.Value);
                     var maxDepth = PricingConstants.SubscriptionPlans.OrganizationDepthLimits[planKey];
 
                     if (maxDepth > 0 && depth >= maxDepth)
                     {
-                        await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                        {
-                            OrganizationId = request.OrganizationId,
-                            PlanKey = planKey,
-                            LimitType = PlanLimitType.OrganizationDepth,
-                            CurrentValue = depth + 1,
-                            MaxValue = maxDepth,
-                            OccurredAt = _dateTimeProvider.UtcNow
-                        });
+                        await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                            request.OrganizationId,
+                            planKey,
+                            PlanLimitType.OrganizationDepth,
+                            depth + 1,
+                            maxDepth,
+                            createdByConnectedId
+                        ));
 
                         await _unitOfWork.RollbackTransactionAsync();
                         return ServiceResult.Failure(
@@ -311,7 +305,6 @@ namespace AuthHive.Auth.Validator
                         return permissionValidation;
                     }
 
-                    // Check for dangerous combinations
                     var riskAssessment = await AssessPermissionRiskAsync(request.InitialPermissionIds);
                     if (riskAssessment.IsSuccess && riskAssessment.Data?.Level == RiskLevel.Critical)
                     {
@@ -319,19 +312,15 @@ namespace AuthHive.Auth.Validator
                             "Critical risk permissions detected in new role: {Risks}",
                             string.Join(", ", riskAssessment.Data.Risks));
 
-                        // Fire dangerous permission event - security issue
-                        await _eventBus.PublishAsync(new DangerousPermissionCombinationEvent
+                        await _eventBus.PublishAsync(new DangerousPermissionCombinationEvent(Guid.Empty) // RoleId is not known yet
                         {
-                            OrganizationId = request.OrganizationId,
-                            RoleId = Guid.Empty, // Will be assigned after creation
+                           // OrganizationId is inherited from BaseEvent's aggregateId
                             PermissionIds = request.InitialPermissionIds,
                             RiskLevel = RiskLevel.Critical,
                             RiskDetails = riskAssessment.Data.Risks,
-                            AssignedBy = createdByConnectedId,
-                            Timestamp = _dateTimeProvider.UtcNow
+                            AssignedBy = createdByConnectedId
                         });
 
-                        // For critical risks, still allow but notify
                         if (request.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                         {
                             await SendCriticalSecurityAlertAsync(
@@ -357,7 +346,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InsufficientPermission);
                 }
 
-                // Audit log - success
                 await _auditService.LogActionAsync(
                     createdByConnectedId,
                     "ValidateRoleCreate",
@@ -382,11 +370,9 @@ namespace AuthHive.Auth.Validator
             catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
-
                 _logger.LogError(ex, "Error validating role creation");
 
-                // Send alert for critical errors in system organization
-                if (request.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
+                if (request?.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                 {
                     await SendCriticalErrorAlertAsync(ex, "RoleCreateValidation", createdByConnectedId);
                 }
@@ -410,7 +396,6 @@ namespace AuthHive.Auth.Validator
                     "Validating role update for {RoleId} by {UpdatedBy}",
                     roleId, updatedByConnectedId);
 
-                // 1. Check if role exists
                 var role = await _roleRepository.GetByIdAsync(roleId);
                 if (role == null)
                 {
@@ -418,25 +403,21 @@ namespace AuthHive.Auth.Validator
                     return ServiceResult.Failure("Role not found", RoleConstants.ErrorCodes.RoleNotFound);
                 }
 
-                // 2. Prevent system role modification
                 if (role.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                 {
                     _logger.LogWarning(
                         "Attempt to modify system role {RoleId} by {UpdatedBy}",
                         roleId, updatedByConnectedId);
 
-                    // Fire system role modification attempt event - security issue
-                    await _eventBus.PublishAsync(new SystemRoleModificationAttemptedEvent
+                    await _eventBus.PublishAsync(new SystemRoleModificationAttemptedEvent(roleId)
                     {
-                        OrganizationId = role.OrganizationId,
+                        // OrganizationId is inherited
                         AttemptedBy = updatedByConnectedId,
-                        RoleId = roleId,
                         RoleName = role.Name,
                         Action = "Update",
                         IsAuthorized = false,
-                        IpAddress = string.Empty, // Would come from context
-                        UserAgent = string.Empty, // Would come from context
-                        Timestamp = _dateTimeProvider.UtcNow
+                        IpAddress = string.Empty,
+                        UserAgent = string.Empty,
                     });
 
                     await _auditService.LogActionAsync(
@@ -454,7 +435,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.SystemRoleProtected);
                 }
 
-                // 3. Check update permissions
                 var hasUpdatePermission = await CheckUserPermissionAsync(
                     updatedByConnectedId,
                     "ROLE_UPDATE",
@@ -468,10 +448,8 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InsufficientPermission);
                 }
 
-                // 4. Validate name change if provided
                 if (!string.IsNullOrWhiteSpace(request.Name) && request.Name != role.Name)
                 {
-                    // GetByOrganizationAsync를 사용하여 이름 중복 검사
                     var allRoles = await _roleRepository.GetByOrganizationAsync(role.OrganizationId, includeInactive: true);
                     var duplicateRole = allRoles.FirstOrDefault(r =>
                         r.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase) &&
@@ -486,7 +464,6 @@ namespace AuthHive.Auth.Validator
                     }
                 }
 
-                // 5. Validate key change if provided - GetByRoleKeyAsync 사용
                 if (!string.IsNullOrWhiteSpace(request.RoleKey) && request.RoleKey != role.RoleKey)
                 {
                     if (_systemReservedRoleKeys.Contains(request.RoleKey.ToUpper()))
@@ -507,10 +484,8 @@ namespace AuthHive.Auth.Validator
                     }
                 }
 
-                // 6. Validate hierarchy change if parent role is being changed
                 if (request.ParentRoleId.HasValue && request.ParentRoleId != role.ParentRoleId)
                 {
-                    // Prevent circular reference
                     if (await IsCircularReferenceAsync(roleId, request.ParentRoleId.Value))
                     {
                         await _unitOfWork.RollbackTransactionAsync();
@@ -519,7 +494,6 @@ namespace AuthHive.Auth.Validator
                             RoleConstants.ErrorCodes.CircularReference);
                     }
 
-                    // Check depth against plan limits
                     var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(role.OrganizationId);
                     var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
                     var maxDepth = PricingConstants.SubscriptionPlans.OrganizationDepthLimits[planKey];
@@ -529,15 +503,14 @@ namespace AuthHive.Auth.Validator
                         var newDepth = await GetRoleHierarchyDepthAsync(request.ParentRoleId.Value);
                         if (newDepth >= maxDepth)
                         {
-                            await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                            {
-                                OrganizationId = role.OrganizationId,
-                                PlanKey = planKey,
-                                LimitType = PlanLimitType.OrganizationDepth,
-                                CurrentValue = newDepth + 1,
-                                MaxValue = maxDepth,
-                                OccurredAt = _dateTimeProvider.UtcNow
-                            });
+                            await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                                role.OrganizationId,
+                                planKey,
+                                PlanLimitType.OrganizationDepth,
+                                newDepth + 1,
+                                maxDepth,
+                                updatedByConnectedId
+                            ));
 
                             await _unitOfWork.RollbackTransactionAsync();
                             return ServiceResult.Failure(
@@ -547,47 +520,34 @@ namespace AuthHive.Auth.Validator
                     }
                 }
 
-                // 7. Check impact of permission changes
                 if (request.PermissionIds != null)
                 {
-                    // [수정 1] GetByRoleAsync와 Select를 사용해 현재 권한 ID 목록을 가져옵니다.
                     var rolePermissions = await _permissionRepository.GetByRoleAsync(roleId);
-                    var currentPermissionIds = rolePermissions.Select(rp => rp.PermissionId).ToHashSet(); // HashSet으로 변경하여 성능 향상
-
-                    // Set으로 변경하여 Except 성능을 최적화 할 수 있습니다.
-                    //"Set으로 변경한다"는 것은, C#의 데이터 종류 중 하나인 'List' 대신 'HashSet'을 사용한다는 의미입니다.
+                    var currentPermissionIds = rolePermissions.Select(rp => rp.PermissionId).ToHashSet();
                     var removedPermissions = currentPermissionIds.Except(request.PermissionIds).ToList();
 
                     if (removedPermissions.Any())
                     {
-
-                        // [수정 2] 역할이 할당된 사용자-역할 '목록'을 가져옵니다.
                         var assignments = await _connectedIdRoleRepository.GetByRoleAsync(roleId);
-
-                        // [수정 3] 목록의 '개수(숫자)'를 세어 변수에 저장합니다.
                         var affectedUserCount = assignments.Count();
 
-                        // [수정 4] '개수'를 사용하여 비교하고, 로깅하고, 이벤트에 전달합니다.
-                        if (affectedUserCount > 100) // Threshold for mass impact
+                        if (affectedUserCount > 100)
                         {
                             _logger.LogWarning(
                                 "Role update will remove permissions from {Count} users",
                                 affectedUserCount);
 
-                            // Fire mass cache invalidation event - performance impact
-                            await _eventBus.PublishAsync(new MassRoleCacheInvalidationEvent
+                            await _eventBus.PublishAsync(new MassRoleCacheInvalidationEvent(roleId)
                             {
-                                OrganizationId = role.OrganizationId,
-                                TriggeringRoleId = roleId,
+                                // OrganizationId is inherited
                                 AffectedConnectedIds = affectedUserCount,
-                                AffectedSessions = affectedUserCount, // Estimate
-                                InvalidationReason = "Permission removal from role",
-                                Timestamp = _dateTimeProvider.UtcNow
+                                AffectedSessions = affectedUserCount,
+                                InvalidationReason = "Permission removal from role"
                             });
                         }
                     }
                 }
-                // Audit log - success
+
                 await _auditService.LogActionAsync(
                     updatedByConnectedId,
                     "ValidateRoleUpdate",
@@ -607,14 +567,12 @@ namespace AuthHive.Auth.Validator
                     }));
 
                 await _unitOfWork.CommitTransactionAsync();
-
                 _logger.LogInformation("Role update validation successful for {RoleId}", roleId);
                 return ServiceResult.Success();
             }
             catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
-
                 _logger.LogError(ex, "Error validating role update for {RoleId}", roleId);
                 return ServiceResult.Failure(
                     "An error occurred during role update validation",
@@ -634,7 +592,6 @@ namespace AuthHive.Auth.Validator
                     "Validating role deletion for {RoleId} by {DeletedBy}",
                     roleId, deletedByConnectedId);
 
-                // 1. Check if role exists
                 var role = await _roleRepository.GetByIdAsync(roleId);
                 if (role == null)
                 {
@@ -642,22 +599,19 @@ namespace AuthHive.Auth.Validator
                     return ServiceResult.Failure("Role not found", RoleConstants.ErrorCodes.RoleNotFound);
                 }
 
-                // 2. Prevent system role deletion
                 if (role.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                 {
                     _logger.LogWarning(
                         "Attempt to delete system role {RoleId} by {DeletedBy}",
                         roleId, deletedByConnectedId);
 
-                    await _eventBus.PublishAsync(new SystemRoleModificationAttemptedEvent
+                    await _eventBus.PublishAsync(new SystemRoleModificationAttemptedEvent(roleId)
                     {
-                        OrganizationId = role.OrganizationId,
+                        // OrganizationId is inherited
                         AttemptedBy = deletedByConnectedId,
-                        RoleId = roleId,
                         RoleName = role.Name,
                         Action = "Delete",
-                        IsAuthorized = false,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        IsAuthorized = false
                     });
 
                     await _auditService.LogActionAsync(
@@ -675,7 +629,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.SystemRoleProtected);
                 }
 
-                // 3. Check delete permissions
                 var hasDeletePermission = await CheckUserPermissionAsync(
                     deletedByConnectedId,
                     "ROLE_DELETE",
@@ -689,8 +642,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InsufficientPermission);
                 }
 
-                // 4. Check if role is in use
-                // [수정] GetByRoleAsync를 호출하고 .Count()로 사용자 수를 계산합니다.
                 var assignments = await _connectedIdRoleRepository.GetByRoleAsync(roleId);
                 var usersWithRole = assignments.Count();
                 if (usersWithRole > 0)
@@ -703,7 +654,6 @@ namespace AuthHive.Auth.Validator
                             RoleConstants.ErrorCodes.RoleInUse);
                     }
 
-                    // Validate replacement role
                     var replacementRole = await _roleRepository.GetByIdAsync(replacementRoleId.Value);
                     if (replacementRole == null)
                     {
@@ -722,7 +672,6 @@ namespace AuthHive.Auth.Validator
                     }
                 }
 
-                // 5. Check for child roles
                 var childRoles = await _roleRepository.GetChildRolesAsync(roleId);
                 if (childRoles.Any())
                 {
@@ -732,15 +681,12 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.HasChildRoles);
                 }
 
-                // 6. Check if this is the last admin role
-                // [수정] _rolePermissionRepository를 사용하고 Permission.Scope 속성을 올바르게 참조합니다.
                 var rolePermissions = await _permissionRepository.GetByRoleAsync(roleId);
                 var permissionScopes = rolePermissions.Select(rp => rp.Permission?.Scope ?? string.Empty).ToHashSet();
 
                 if (permissionScopes.Contains("ADMIN") || permissionScopes.Contains("SUPER_ADMIN"))
                 {
-                    // [수정] GetByMinimumLevelAsync를 사용해 관리자 역할 수를 계산합니다.
-                    const int AdminLevel = 3; // 관리자 최소 레벨을 3으로 가정
+                    const int AdminLevel = 3;
                     var adminRoles = await _roleRepository.GetByMinimumLevelAsync(role.OrganizationId, AdminLevel);
                     var adminRolesCount = adminRoles.Count();
 
@@ -750,14 +696,12 @@ namespace AuthHive.Auth.Validator
                             "Attempt to delete last admin role for organization {OrgId}",
                             role.OrganizationId);
 
-                        await _eventBus.PublishAsync(new LastAdminRoleWarningEvent
+                        await _eventBus.PublishAsync(new LastAdminRoleWarningEvent(role.OrganizationId)
                         {
-                            OrganizationId = role.OrganizationId,
                             RoleId = roleId,
                             ConnectedId = deletedByConnectedId,
                             Action = "Delete",
-                            RemainingAdmins = 0,
-                            Timestamp = _dateTimeProvider.UtcNow
+                            RemainingAdmins = 0
                         });
 
                         await _unitOfWork.RollbackTransactionAsync();
@@ -767,23 +711,18 @@ namespace AuthHive.Auth.Validator
                     }
                 }
 
-                // 7. Fire critical role deleted event if applicable
-                // [수정] Role 엔티티에 IsCritical 속성이 추가되었다고 가정합니다.
                 if (role.IsCritical || usersWithRole > 50)
                 {
-                    await _eventBus.PublishAsync(new CriticalRoleDeletedEvent
+                    await _eventBus.PublishAsync(new CriticalRoleDeletedEvent(roleId)
                     {
-                        OrganizationId = role.OrganizationId,
-                        RoleId = roleId,
+                        // OrganizationId is inherited
                         RoleName = role.Name,
                         AffectedUsers = usersWithRole,
                         DeletedBy = deletedByConnectedId,
-                        ReplacementRoleId = replacementRoleId,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        ReplacementRoleId = replacementRoleId
                     });
                 }
 
-                // Audit log - success
                 await _auditService.LogActionAsync(
                     deletedByConnectedId,
                     "ValidateRoleDelete",
@@ -800,7 +739,6 @@ namespace AuthHive.Auth.Validator
                     }));
 
                 await _unitOfWork.CommitTransactionAsync();
-
                 _logger.LogInformation("Role deletion validation successful for {RoleId}", roleId);
                 return ServiceResult.Success();
             }
@@ -829,7 +767,6 @@ namespace AuthHive.Auth.Validator
                 _logger.LogInformation(
                     "Validating permission assignment for role {RoleId}", roleId);
 
-                // 1. Check if role exists
                 var role = await _roleRepository.GetByIdAsync(roleId);
                 if (role == null)
                 {
@@ -837,7 +774,6 @@ namespace AuthHive.Auth.Validator
                     return ServiceResult.Failure("Role not found", RoleConstants.ErrorCodes.RoleNotFound);
                 }
 
-                // 2. Check permission to modify role
                 var hasPermission = await CheckUserPermissionAsync(
                     assignedByConnectedId,
                     "PERMISSION_ASSIGN",
@@ -851,7 +787,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InsufficientPermission);
                 }
 
-                // 3. Validate all permissions exist
                 var validationResult = await ValidatePermissionsExistAsync(permissionIds);
                 if (!validationResult.IsSuccess)
                 {
@@ -859,23 +794,20 @@ namespace AuthHive.Auth.Validator
                     return validationResult;
                 }
 
-                // 4. Check permission count against plan limits
                 var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(role.OrganizationId);
                 var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
 
-                // Using scope depth as proxy for permission complexity
                 var maxComplexity = PricingConstants.SubscriptionPlans.PermissionScopeDepthLimits[planKey];
-                if (maxComplexity > 0 && permissionIds.Count > maxComplexity * 10) // Arbitrary multiplier
+                if (maxComplexity > 0 && permissionIds.Count > maxComplexity * 10)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = role.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.PermissionScopeDepth,
-                        CurrentValue = permissionIds.Count,
-                        MaxValue = maxComplexity * 10,
-                        OccurredAt = _dateTimeProvider.UtcNow
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        role.OrganizationId,
+                        planKey,
+                        PlanLimitType.PermissionScopeDepth,
+                        permissionIds.Count,
+                        maxComplexity * 10,
+                        assignedByConnectedId
+                    ));
 
                     await _unitOfWork.RollbackTransactionAsync();
                     return ServiceResult.Failure(
@@ -883,18 +815,15 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.ComplexityExceeded);
                 }
 
-                // 5. Check for permission conflicts
                 var conflicts = await CheckPermissionConflictsAsync(permissionIds);
                 if (conflicts.Any())
                 {
-                    await _eventBus.PublishAsync(new RolePermissionConflictEvent
+                    await _eventBus.PublishAsync(new RolePermissionConflictEvent(role.OrganizationId)
                     {
-                        OrganizationId = role.OrganizationId,
                         ChildRoleId = roleId,
                         ParentRoleId = role.ParentRoleId ?? Guid.Empty,
                         ConflictingPermissions = conflicts,
-                        Resolution = "Assignment blocked",
-                        Timestamp = _dateTimeProvider.UtcNow
+                        Resolution = "Assignment blocked"
                     });
 
                     await _unitOfWork.RollbackTransactionAsync();
@@ -903,7 +832,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.PermissionConflict);
                 }
 
-                // 6. Assess risk level
                 var riskAssessment = await AssessPermissionRiskAsync(permissionIds);
                 if (riskAssessment.IsSuccess && riskAssessment.Data?.Level >= RiskLevel.High)
                 {
@@ -913,18 +841,15 @@ namespace AuthHive.Auth.Validator
 
                     if (riskAssessment.Data.Level == RiskLevel.Critical)
                     {
-                        await _eventBus.PublishAsync(new DangerousPermissionCombinationEvent
+                        await _eventBus.PublishAsync(new DangerousPermissionCombinationEvent(roleId)
                         {
-                            OrganizationId = role.OrganizationId,
-                            RoleId = roleId,
+                           // OrganizationId is inherited
                             PermissionIds = permissionIds,
                             RiskLevel = RiskLevel.Critical,
                             RiskDetails = riskAssessment.Data.Risks,
-                            AssignedBy = assignedByConnectedId,
-                            Timestamp = _dateTimeProvider.UtcNow
+                            AssignedBy = assignedByConnectedId
                         });
 
-                        // Don't block, but notify
                         if (role.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                         {
                             await SendCriticalSecurityAlertAsync(
@@ -951,7 +876,6 @@ namespace AuthHive.Auth.Validator
                     }));
 
                 await _unitOfWork.CommitTransactionAsync();
-
                 _logger.LogInformation(
                     "Permission assignment validation successful for role {RoleId}", roleId);
                 return ServiceResult.Success();
@@ -959,7 +883,6 @@ namespace AuthHive.Auth.Validator
             catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
-
                 _logger.LogError(ex,
                     "Error validating permission assignment for role {RoleId}", roleId);
                 return ServiceResult.Failure(
@@ -980,25 +903,20 @@ namespace AuthHive.Auth.Validator
                     RiskScores = new Dictionary<string, int>()
                 };
 
-                // [수정 1] _permissionRepository를 사용하고, FindAsync로 여러 권한을 한 번에 조회합니다.
                 var permissions = await _permissionRepository.FindAsync(p => permissionIds.Contains(p.Id));
-
-                // [수정 2] Permission 엔티티의 'Scope' 속성을 사용합니다.
                 var permissionScopes = permissions.Select(p => p.PermissionScope).ToHashSet();
 
 
-                // Check for dangerous combinations
                 foreach (var combo in _dangerousPermissionCombos)
                 {
                     if (permissionScopes.Contains(combo.Perm1) && permissionScopes.Contains(combo.Perm2))
                     {
                         assessment.Risks.Add(combo.Risk);
-                        assessment.RiskScores[$"{combo.Perm1}+{combo.Perm2}"] = 10; // High score
+                        assessment.RiskScores[$"{combo.Perm1}+{combo.Perm2}"] = 10;
                         assessment.Level = RiskLevel.High;
                     }
                 }
 
-                // Check for broad access patterns
                 if (permissionScopes.Any(p => p.EndsWith("_ALL")))
                 {
                     assessment.Risks.Add("Broad access permissions detected");
@@ -1007,7 +925,6 @@ namespace AuthHive.Auth.Validator
                         assessment.Level = RiskLevel.Medium;
                 }
 
-                // Check for system-level permissions
                 if (permissionScopes.Any(p => p.StartsWith("SYSTEM_")))
                 {
                     assessment.Risks.Add("System-level permissions detected");
@@ -1015,7 +932,6 @@ namespace AuthHive.Auth.Validator
                     assessment.Level = RiskLevel.Critical;
                 }
 
-                // Add recommendations based on risk level
                 switch (assessment.Level)
                 {
                     case RiskLevel.Critical:
@@ -1057,18 +973,15 @@ namespace AuthHive.Auth.Validator
                 if (!parentRoleId.HasValue)
                     return ServiceResult.Success();
 
-                // Check if parent exists
                 var parentRole = await _roleRepository.GetByIdAsync(parentRoleId.Value);
                 if (parentRole == null)
                     return ServiceResult.Failure("Parent role not found", RoleConstants.ErrorCodes.ParentNotFound);
 
-                // Check for circular reference
                 if (await IsCircularReferenceAsync(roleId, parentRoleId.Value))
                     return ServiceResult.Failure(
                         "This would create a circular reference in the hierarchy",
                         RoleConstants.ErrorCodes.CircularReference);
 
-                // Check hierarchy depth against plan limits
                 var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(parentRole.OrganizationId);
                 var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
                 var maxDepth = PricingConstants.SubscriptionPlans.OrganizationDepthLimits[planKey];
@@ -1078,7 +991,6 @@ namespace AuthHive.Auth.Validator
                     var depth = await GetRoleHierarchyDepthAsync(parentRoleId.Value);
                     if (depth >= maxDepth)
                     {
-                        // ... (이하 로직은 ValidateCreateAsync의 계층 검증 부분과 유사)
                         return ServiceResult.Failure(
                             $"Role hierarchy cannot exceed {maxDepth} levels for {planKey} plan",
                             RoleConstants.ErrorCodes.HierarchyDepthExceeded);
@@ -1099,7 +1011,6 @@ namespace AuthHive.Auth.Validator
         {
             try
             {
-                // Get both roles
                 var childRole = await _roleRepository.GetByIdAsync(childRoleId);
                 var parentRole = await _roleRepository.GetByIdAsync(parentRoleId);
 
@@ -1108,27 +1019,21 @@ namespace AuthHive.Auth.Validator
                 if (parentRole == null)
                     return ServiceResult.Failure("Parent role not found", RoleConstants.ErrorCodes.ParentNotFound);
 
-                // Ensure same organization
                 if (childRole.OrganizationId != parentRole.OrganizationId)
                     return ServiceResult.Failure(
                         "Roles must belong to the same organization",
                         RoleConstants.ErrorCodes.DifferentOrganization);
 
-                // Check if parent is inheritable
                 if (!parentRole.IsInheritable)
                     return ServiceResult.Failure(
                         "Parent role is not inheritable",
                         RoleConstants.ErrorCodes.NotInheritable);
 
-                // Check for conflicts
                 var childRolePermissions = await _permissionRepository.GetByRoleAsync(childRoleId);
                 var parentRolePermissions = await _permissionRepository.GetByRoleAsync(parentRoleId);
 
-                // [수정] 부모 권한을 Dictionary로 만들어 조회를 빠르게 합니다.
                 var parentPermissionsMap = parentRolePermissions
                     .Where(prp => prp.Permission != null)
-                    // '!' (null forgiving operator)를 사용해 컴파일러에게 Permission이 null이 아님을 명확히 알려줍니다.
-                    // 이렇게 하면 CS8621 경고가 해결됩니다.
                     .ToDictionary(prp => prp.Permission!.ScopeResource, prp => prp.Permission);
 
                 var conflicts = new List<string>();
@@ -1137,10 +1042,8 @@ namespace AuthHive.Auth.Validator
                     var childPerm = childRolePerm.Permission;
                     if (childPerm == null) continue;
 
-                    // Dictionary를 사용해 부모에게 같은 리소스에 대한 권한이 있는지 빠르게 찾습니다.
                     if (parentPermissionsMap.TryGetValue(childPerm.ScopeResource, out var conflictingParentPerm))
                     {
-                        // 리소스는 같지만, 액션이 다르고 부모 권한이 배타적일 경우 충돌로 간주합니다.
                         if (conflictingParentPerm.ScopeAction != childPerm.ScopeAction && conflictingParentPerm.IsExclusive)
                         {
                             conflicts.Add($"'{childPerm.Scope}' conflicts with exclusive parent permission '{conflictingParentPerm.Scope}'");
@@ -1150,14 +1053,12 @@ namespace AuthHive.Auth.Validator
 
                 if (conflicts.Any())
                 {
-                    await _eventBus.PublishAsync(new RolePermissionConflictEvent
+                    await _eventBus.PublishAsync(new RolePermissionConflictEvent(childRole.OrganizationId)
                     {
-                        OrganizationId = childRole.OrganizationId,
                         ChildRoleId = childRoleId,
                         ParentRoleId = parentRoleId,
                         ConflictingPermissions = conflicts,
-                        Resolution = "Inheritance blocked",
-                        Timestamp = _dateTimeProvider.UtcNow
+                        Resolution = "Inheritance blocked"
                     });
 
                     return ServiceResult.Failure(
@@ -1192,7 +1093,6 @@ namespace AuthHive.Auth.Validator
                     "Validating role assignment: ConnectedId={ConnectedId}, Role={RoleId}",
                     connectedId, roleId);
 
-                // 1. Check if role exists
                 var role = await _roleRepository.GetByIdAsync(roleId);
                 if (role == null)
                 {
@@ -1200,7 +1100,6 @@ namespace AuthHive.Auth.Validator
                     return ServiceResult.Failure("Role not found", RoleConstants.ErrorCodes.RoleNotFound);
                 }
 
-                // 2. Check if user has permission to assign this role
                 var hasAssignPermission = await CheckUserPermissionAsync(
                     assignedByConnectedId,
                     "ROLE_ASSIGN",
@@ -1214,7 +1113,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InsufficientPermission);
                 }
 
-                // 3. Check if target ConnectedId is active
                 var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(connectedId);
                 if (connectedIdEntity == null || !connectedIdEntity.IsActive)
                 {
@@ -1224,28 +1122,24 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InactiveUser);
                 }
 
-                // 4. Check concurrent role limit based on plan
                 var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(role.OrganizationId);
                 var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
 
-                // Use member limits as proxy for concurrent role limits
                 var memberLimit = PricingConstants.SubscriptionPlans.MemberLimits[planKey];
                 var currentRoles = await _connectedIdRoleRepository.GetActiveRolesAsync(connectedId);
 
-                // Allow multiple roles but with reasonable limit based on plan
                 var maxConcurrentRoles = memberLimit > 0 ? Math.Min(memberLimit / 5, 10) : 10;
 
                 if (currentRoles.Count() >= maxConcurrentRoles)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = role.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.RoleCount,
-                        CurrentValue = currentRoles.Count(),
-                        MaxValue = maxConcurrentRoles,
-                        OccurredAt = _dateTimeProvider.UtcNow
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        role.OrganizationId,
+                        planKey,
+                        PlanLimitType.RoleCount,
+                        currentRoles.Count(),
+                        maxConcurrentRoles,
+                        assignedByConnectedId
+                    ));
 
                     await _unitOfWork.RollbackTransactionAsync();
                     return ServiceResult.Failure(
@@ -1253,19 +1147,16 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.RoleLimitExceeded);
                 }
 
-                // 5. Check for conflicting roles
                 var conflicts = await CheckRoleConflictsAsync(connectedId, roleId, currentRoles);
                 if (conflicts.Any())
                 {
-                    await _eventBus.PublishAsync(new RoleConflictDetectedEvent
+                    await _eventBus.PublishAsync(new RoleConflictDetectedEvent(role.OrganizationId)
                     {
-                        OrganizationId = role.OrganizationId,
                         ConnectedId = connectedId,
                         ExistingRoleId = currentRoles.First().RoleId,
                         NewRoleId = roleId,
                         ConflictType = "MutuallyExclusive",
-                        ConflictDetails = conflicts,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        ConflictDetails = conflicts
                     });
 
                     await _unitOfWork.RollbackTransactionAsync();
@@ -1274,26 +1165,22 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.RoleConflict);
                 }
 
-                // 6. Check if this is an admin role assignment
                 var rolePermissions = await _permissionRepository.GetByRoleAsync(roleId);
                 if (rolePermissions?.Any(p => p.PermissionScope.Contains("ADMIN")) == true)
                 {
                     _logger.LogInformation("Admin role assignment detected for {ConnectedId}", connectedId);
 
-                    await _eventBus.PublishAsync(new AdminRoleAssignedEvent
+                    await _eventBus.PublishAsync(new AdminRoleAssignedEvent(role.OrganizationId)
                     {
-                        OrganizationId = role.OrganizationId,
                         ConnectedId = connectedId,
                         RoleId = roleId,
                         RoleName = role.Name,
                         PermissionLevel = PermissionLevel.Admin,
                         AssignedBy = assignedByConnectedId,
-                        ExpiresAt = _dateTimeProvider.UtcNow.AddDays(90),
-                        Timestamp = _dateTimeProvider.UtcNow
+                        ExpiresAt = _dateTimeProvider.UtcNow.AddDays(90)
                     });
                 }
 
-                // 7. Check membership type compatibility
                 var membership = await _membershipRepository.GetMembershipAsync(role.OrganizationId, connectedId);
                 if (membership?.MemberRole == OrganizationMemberRole.Guest && role.RequiresMembership)
                 {
@@ -1323,7 +1210,6 @@ namespace AuthHive.Auth.Validator
             catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
-
                 _logger.LogError(ex, "Error validating role assignment");
                 return ServiceResult.Failure(
                     "Failed to validate role assignment",
@@ -1340,7 +1226,6 @@ namespace AuthHive.Auth.Validator
                 if (roleIds == null || !roleIds.Any())
                     return ServiceResult.Failure("No roles specified", RoleConstants.ErrorCodes.InvalidRequest);
 
-                // Get plan limits
                 var firstRole = await _roleRepository.GetByIdAsync(roleIds.First());
                 if (firstRole == null)
                     return ServiceResult.Failure("Role not found", RoleConstants.ErrorCodes.RoleNotFound);
@@ -1352,22 +1237,20 @@ namespace AuthHive.Auth.Validator
 
                 if (roleIds.Count > maxConcurrentRoles)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = firstRole.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.BulkRoleAssignment, 
-                        CurrentValue = roleIds.Count,
-                        MaxValue = maxConcurrentRoles,
-                        OccurredAt = _dateTimeProvider.UtcNow
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        firstRole.OrganizationId,
+                        planKey,
+                        PlanLimitType.BulkRoleAssignment,
+                        roleIds.Count,
+                        maxConcurrentRoles,
+                        connectedId
+                    ));
 
                     return ServiceResult.Failure(
                         $"Cannot assign more than {maxConcurrentRoles} roles at once on {planKey} plan",
                         RoleConstants.ErrorCodes.BulkLimitExceeded);
                 }
 
-                // Check each role exists
                 var roles = new List<Role>();
                 foreach (var roleId in roleIds)
                 {
@@ -1377,20 +1260,15 @@ namespace AuthHive.Auth.Validator
                     roles.Add(role);
                 }
 
-                // Check for mutual exclusions
                 var exclusiveRoles = roles.Where(r => r.IsMutuallyExclusive).ToList();
                 if (exclusiveRoles.Count > 1)
                     return ServiceResult.Failure(
                         $"Cannot assign multiple mutually exclusive roles: {string.Join(", ", exclusiveRoles.Select(r => r.Name))}",
                         RoleConstants.ErrorCodes.MutualExclusion);
 
-                // Check total permission complexity
                 var totalPermissions = new HashSet<Guid>();
-
-                // 2. ID 목록을 사용해 관련된 모든 RolePermission을 DB에서 한 번에 가져옵니다.
                 var allRolePermissions = await _permissionRepository.FindAsync(rp => roleIds.Contains(rp.RoleId));
 
-                // 3. 가져온 권한 ID들을 totalPermissions에 추가합니다.
                 foreach (var permId in allRolePermissions.Select(rp => rp.PermissionId))
                 {
                     totalPermissions.Add(permId);
@@ -1398,15 +1276,14 @@ namespace AuthHive.Auth.Validator
                 var maxComplexity = PricingConstants.SubscriptionPlans.PermissionScopeDepthLimits[planKey] * 20;
                 if (maxComplexity > 0 && totalPermissions.Count > maxComplexity)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = firstRole.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.TotalPermissionComplexity, 
-                        CurrentValue = totalPermissions.Count,
-                        MaxValue = maxComplexity,
-                        OccurredAt = _dateTimeProvider.UtcNow
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        firstRole.OrganizationId,
+                        planKey,
+                        PlanLimitType.TotalPermissionComplexity,
+                        totalPermissions.Count,
+                        maxComplexity,
+                        connectedId
+                    ));
 
                     return ServiceResult.Failure(
                         $"Combined roles exceed permission complexity limit for {planKey} plan",
@@ -1433,8 +1310,6 @@ namespace AuthHive.Auth.Validator
 
             try
             {
-                // 1. Check if role assignment exists
-                // [수정] GetAssignmentAsync 대신 GetActiveRolesAsync와 FirstOrDefault를 사용합니다.
                 var userRoles = await _connectedIdRoleRepository.GetActiveRolesAsync(connectedId);
                 var assignment = userRoles.FirstOrDefault(r => r.RoleId == roleId);
                 if (assignment == null)
@@ -1443,9 +1318,8 @@ namespace AuthHive.Auth.Validator
                     return ServiceResult.Failure("Role assignment not found", RoleConstants.ErrorCodes.AssignmentNotFound);
                 }
 
-                // 2. Check revocation permission
                 var role = await _roleRepository.GetByIdAsync(roleId);
-                if (role == null) // 역할이 없는 경우에 대한 방어 코드 추가
+                if (role == null)
                 {
                     await _unitOfWork.RollbackTransactionAsync();
                     return ServiceResult.Failure("Role to be revoked not found", RoleConstants.ErrorCodes.RoleNotFound);
@@ -1464,8 +1338,6 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.InsufficientPermission);
                 }
 
-                // 3. Check if this is a required role
-                // (Role 엔티티에 IsRequired 속성이 추가되었다고 가정)
                 if (role.IsRequired)
                 {
                     await _unitOfWork.RollbackTransactionAsync();
@@ -1474,26 +1346,21 @@ namespace AuthHive.Auth.Validator
                         RoleConstants.ErrorCodes.RequiredRole);
                 }
 
-                // 4. Check if this would leave the organization without admins
-                // [수정] GetRolePermissionsAsync 대신 GetByRoleAsync와 Select를 사용합니다.
                 var rolePermissions = await _permissionRepository.GetByRoleAsync(roleId);
                 var permissionScopes = rolePermissions.Select(rp => rp.Permission?.Scope ?? string.Empty).ToHashSet();
 
                 if (permissionScopes.Any(scope => scope.Contains("ADMIN")))
                 {
-                    // [수정] CountOtherAdminsAsync 대신 내부 헬퍼 메서드를 호출합니다.
                     var otherAdmins = await CountOtherAdminsInOrgAsync(role.OrganizationId, connectedId);
 
                     if (otherAdmins == 0)
                     {
-                        await _eventBus.PublishAsync(new LastAdminRoleWarningEvent
+                        await _eventBus.PublishAsync(new LastAdminRoleWarningEvent(role.OrganizationId)
                         {
-                            OrganizationId = role.OrganizationId,
                             RoleId = roleId,
                             ConnectedId = connectedId,
                             Action = "Revoke",
-                            RemainingAdmins = 0,
-                            Timestamp = _dateTimeProvider.UtcNow
+                            RemainingAdmins = 0
                         });
 
                         await _unitOfWork.RollbackTransactionAsync();
@@ -1522,7 +1389,6 @@ namespace AuthHive.Auth.Validator
             catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
-
                 _logger.LogError(ex, "Error validating role revocation");
                 return ServiceResult.Failure(
                     "Failed to validate role revocation",
@@ -1543,13 +1409,11 @@ namespace AuthHive.Auth.Validator
                 if (role == null)
                     return ServiceResult.Failure("Role not found", RoleConstants.ErrorCodes.RoleNotFound);
 
-                // Get organization's plan
                 var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(organizationId);
                 var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
 
                 var errors = new List<string>();
 
-                // Check role count against plan limit
                 var roleCount = await _roleRepository.CountByOrganizationAsync(organizationId);
                 var roleLimit = PricingConstants.SubscriptionPlans.RoleLimits[planKey];
 
@@ -1558,8 +1422,6 @@ namespace AuthHive.Auth.Validator
                     errors.Add($"Organization exceeds role limit ({roleLimit}) for {planKey} plan");
                 }
 
-                // Check permission complexity
-                // [수정] GetByRoleAsync를 호출하고 .Count()로 권한 수를 계산합니다.
                 var permissions = await _permissionRepository.GetByRoleAsync(roleId);
                 var permissionCount = permissions.Count();
                 var maxComplexity = PricingConstants.SubscriptionPlans.PermissionScopeDepthLimits[planKey] * 10;
@@ -1571,17 +1433,14 @@ namespace AuthHive.Auth.Validator
 
                 if (errors.Any())
                 {
-                    // Fire consolidated plan violation event
-                    await _eventBus.PublishAsync(new ComplianceRoleChangeEvent
+                    await _eventBus.PublishAsync(new ComplianceRoleChangeEvent(roleId)
                     {
-                        OrganizationId = organizationId,
-                        RoleId = roleId,
+                       // OrganizationId is inherited
                         ComplianceStandard = $"{planKey}_PLAN_POLICY",
                         ChangeType = "PolicyViolation",
                         ChangeReason = string.Join("; ", errors),
-                        ChangedBy = Guid.Empty, // System check
-                        RequiresApproval = true,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        ChangedBy = Guid.Empty,
+                        RequiresApproval = true
                     });
 
                     return ServiceResult.Failure(
@@ -1612,21 +1471,17 @@ namespace AuthHive.Auth.Validator
 
                 var now = _dateTimeProvider.UtcNow;
 
-                // Check time-based activation
                 if (now < role.ActivationStartTime)
                     return ServiceResult.Failure("Role is not yet active", RoleConstants.ErrorCodes.NotYetActive);
 
                 if (role.ExpiresAt.HasValue && now > role.ExpiresAt.Value)
                     return ServiceResult.Failure("Role has expired", RoleConstants.ErrorCodes.Expired);
 
-                // Check condition-based activation
                 if (role.RequiresApproval)
                 {
-                    // Check if there's an approval record
                     var cacheKey = $"{CACHE_KEY_PREFIX}approval:{connectedId}:{roleId}";
-                    // [수정] bool? 대신 CacheBoolWrapper 클래스를 사용해 캐시를 조회합니다.
                     var approvalWrapper = await _cacheService.GetAsync<CacheBoolWrapper>(cacheKey);
-                    var isApproved = approvalWrapper?.Value; // wrapper가 null이면 isApproved도 null이 됩니다.
+                    var isApproved = approvalWrapper?.Value;
 
                     if (!isApproved.HasValue || !isApproved.Value)
                         return ServiceResult.Failure(
@@ -1657,9 +1512,9 @@ namespace AuthHive.Auth.Validator
                 TotalCount = requests.Count,
                 ValidCount = 0,
                 InvalidCount = 0,
-                IsValid = true, // [추가] 기본값은 true로 시작하고, 에러 발생 시 false로 변경
-                ItemResults = new List<ItemValidationResult>(),   // [변경] Errors -> ItemResults
-                ErrorSummary = new Dictionary<string, int>()   // [추가] 에러 유형별 개요
+                IsValid = true,
+                ItemResults = new List<ItemValidationResult>(),
+                ErrorSummary = new Dictionary<string, int>()
             };
 
             if (requests == null || !requests.Any())
@@ -1667,7 +1522,6 @@ namespace AuthHive.Auth.Validator
                 return ServiceResult<BulkValidationResult>.Success(result);
             }
 
-            // Check bulk operation limit based on plan
             var firstOrgId = requests.First().OrganizationId;
             var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(firstOrgId);
             var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
@@ -1676,21 +1530,19 @@ namespace AuthHive.Auth.Validator
 
             if (requests.Count > bulkLimit)
             {
-                await _eventBus.PublishAsync(new BulkOperationLimitReachedEvent
+                await _eventBus.PublishAsync(new BulkOperationLimitReachedEvent(firstOrgId)
                 {
-                    OrganizationId = firstOrgId,
                     PlanKey = planKey,
                     OperationType = "RoleCreate",
                     RequestedCount = requests.Count,
-                    AllowedCount = bulkLimit,
-                    Timestamp = _dateTimeProvider.UtcNow
+                    AllowedCount = bulkLimit
                 });
 
                 result.InvalidCount = requests.Count;
-                result.IsValid = false; // [추가] 전체 작업이 유효하지 않음을 명시
+                result.IsValid = false;
                 result.ItemResults.Add(new ItemValidationResult
                 {
-                    Index = -1, // -1은 특정 항목이 아닌, 전체 작업에 대한 에러를 의미
+                    Index = -1,
                     Identifier = "Bulk Operation Limit",
                     IsValid = false,
                     Errors = new List<string> { $"Bulk operation exceeds {planKey} plan limit of {bulkLimit}" }
@@ -1704,9 +1556,6 @@ namespace AuthHive.Auth.Validator
 
             for (int i = 0; i < requests.Count; i++)
             {
-                // ValidateCreateAsync는 내부적으로 트랜잭션을 시작하므로, 
-                // 여기서는 개별 검증만 수행하고 트랜잭션은 한 번만 관리하는 것이 좋습니다.
-                // 여기서는 각 요청을 개별적으로 검증한다고 가정합니다.
                 var validation = await ValidateCreateAsync(requests[i], createdByConnectedId);
                 if (validation.IsSuccess)
                 {
@@ -1718,7 +1567,7 @@ namespace AuthHive.Auth.Validator
                     result.ItemResults.Add(new ItemValidationResult
                     {
                         Index = i,
-                        Identifier = requests[i].Name, // 혹은 다른 식별자
+                        Identifier = requests[i].Name,
                         IsValid = false,
                         Errors = new List<string> { validation.ErrorMessage ?? "Validation failed" }
                     });
@@ -1732,7 +1581,6 @@ namespace AuthHive.Auth.Validator
             List<(Guid ConnectedId, Guid RoleId)> assignments,
             Guid assignedByConnectedId)
         {
-            // [수정] BulkValidationResult의 새로운 구조에 맞게 객체를 생성합니다.
             var result = new BulkValidationResult
             {
                 TotalCount = assignments.Count,
@@ -1748,7 +1596,6 @@ namespace AuthHive.Auth.Validator
                 return ServiceResult<BulkValidationResult>.Success(result);
             }
 
-            // Similar bulk limit check
             var firstRole = await _roleRepository.GetByIdAsync(assignments.First().RoleId);
             if (firstRole != null)
             {
@@ -1759,22 +1606,19 @@ namespace AuthHive.Auth.Validator
 
                 if (assignments.Count > bulkLimit)
                 {
-                    await _eventBus.PublishAsync(new BulkOperationLimitReachedEvent
+                    await _eventBus.PublishAsync(new BulkOperationLimitReachedEvent(firstRole.OrganizationId)
                     {
-                        OrganizationId = firstRole.OrganizationId,
                         PlanKey = planKey,
                         OperationType = "RoleAssignment",
                         RequestedCount = assignments.Count,
-                        AllowedCount = bulkLimit,
-                        Timestamp = _dateTimeProvider.UtcNow
+                        AllowedCount = bulkLimit
                     });
 
                     result.InvalidCount = assignments.Count;
                     result.IsValid = false;
-                    // [수정] ItemResults에 전체 에러를 추가합니다.
                     result.ItemResults.Add(new ItemValidationResult
                     {
-                        Index = -1, // -1 for global error
+                        Index = -1,
                         Identifier = "Bulk Operation",
                         IsValid = false,
                         Errors = new List<string> { $"Bulk operation exceeds {planKey} plan limit of {bulkLimit}" }
@@ -1799,8 +1643,6 @@ namespace AuthHive.Auth.Validator
                 {
                     result.InvalidCount++;
                     result.IsValid = false;
-
-                    // [수정] Errors 속성 대신 ItemResults 리스트에 상세 결과를 추가합니다.
                     result.ItemResults.Add(new ItemValidationResult
                     {
                         Index = i,
@@ -1833,7 +1675,6 @@ namespace AuthHive.Auth.Validator
                 }
             }
 
-            // 자기 자신을 제외
             adminUserIds.Remove(currentConnectedId);
 
             return adminUserIds.Count;
@@ -1843,33 +1684,23 @@ namespace AuthHive.Auth.Validator
         {
             var cacheKey = $"{CACHE_KEY_PREFIX}permission:{connectedId}:{permissionScope}:{organizationId}";
 
-            // [수정] bool? 대신 CacheBoolWrapper를 사용해 캐시를 조회합니다.
             var cachedWrapper = await _cacheService.GetAsync<CacheBoolWrapper>(cacheKey);
             if (cachedWrapper != null)
             {
                 return cachedWrapper.Value;
             }
 
-            // [수정] GetUserRolesAsync -> GetActiveRolesAsync로 변경
             var userRoles = await _connectedIdRoleRepository.GetActiveRolesAsync(connectedId);
             if (!userRoles.Any())
             {
-                // [수정] bool 값을 Wrapper에 담아 캐시에 저장합니다.
                 await _cacheService.SetAsync(cacheKey, new CacheBoolWrapper { Value = false }, TimeSpan.FromMinutes(CACHE_DURATION_MINUTES));
                 return false;
             }
 
-            // [개선] N+1 문제를 해결하기 위해 DB 조회를 루프 밖으로 이동 (성능 향상)
-            // 1. 사용자가 가진 모든 역할의 ID 목록을 추출합니다.
             var roleIds = userRoles.Select(ur => ur.RoleId).ToList();
-
-            // 2. 모든 역할에 대한 권한 정보를 DB에서 한 번에 가져옵니다.
             var allPermissions = await _permissionRepository.FindAsync(rp => roleIds.Contains(rp.RoleId));
-
-            // 3. 가져온 권한 정보에 원하는 권한이 있는지 확인합니다.
             bool hasPermission = allPermissions.Any(rp => rp.PermissionScope == permissionScope);
 
-            // [수정] 결과를 Wrapper에 담아 캐시에 저장합니다.
             await _cacheService.SetAsync(cacheKey, new CacheBoolWrapper { Value = hasPermission }, TimeSpan.FromMinutes(CACHE_DURATION_MINUTES));
 
             return hasPermission;
@@ -1877,10 +1708,8 @@ namespace AuthHive.Auth.Validator
 
         private async Task<ServiceResult> ValidatePermissionsExistAsync(List<Guid> permissionIds)
         {
-            // [수정] _permissionRepository의 FindAsync를 사용해 여러 권한을 한 번에 조회합니다.
             var permissions = await _permissionRepository.FindAsync(p => permissionIds.Contains(p.Id));
             var foundIds = permissions.Select(p => p.Id).ToHashSet();
-
             var missingIds = permissionIds.Where(id => !foundIds.Contains(id)).ToList();
 
             if (missingIds.Any())
@@ -1920,7 +1749,7 @@ namespace AuthHive.Auth.Validator
         {
             var depth = 0;
             var currentId = roleId;
-            var maxCheck = 20; // Prevent infinite loops
+            var maxCheck = 20;
 
             while (currentId != Guid.Empty && depth < maxCheck)
             {
@@ -1938,7 +1767,7 @@ namespace AuthHive.Auth.Validator
         private async Task<Guid> GetRootRoleIdAsync(Guid roleId)
         {
             var currentId = roleId;
-            var maxCheck = 20; // Prevent infinite loops
+            var maxCheck = 20;
             var iterations = 0;
 
             while (currentId != Guid.Empty && iterations < maxCheck)
@@ -1959,15 +1788,12 @@ namespace AuthHive.Auth.Validator
             var conflicts = new List<string>();
             var permissions = await _permissionRepository.FindAsync(p => permissionIds.Contains(p.Id));
 
-            // [수정] 그룹화(GroupBy)를 할 때 p.Permission을 거쳐서 ScopeResource에 접근합니다.
-            // 또한, Permission 객체가 null인 경우를 대비해 먼저 필터링해주는 것이 안전합니다.
             var permissionsByResource = permissions
                 .Where(p => p.Permission != null)
                 .GroupBy(p => p.Permission!.ScopeResource);
 
             foreach (var group in permissionsByResource)
             {
-                // 같은 리소스에 대한 권한이 2개 이상이고, 그 중 하나라도 'IsExclusive'가 true이면 충돌로 간주
                 if (group.Count() > 1 && group.Any(p => p.Permission!.IsExclusive))
                 {
                     var conflictingScopes = string.Join(", ", group.Select(p => $"'{p.Permission!.Scope}'"));
@@ -1983,36 +1809,26 @@ namespace AuthHive.Auth.Validator
             var conflicts = new List<string>();
             var newRole = await _roleRepository.GetByIdAsync(newRoleId);
 
-            // [수정 1] newRole이 null일 경우를 처리하여 NullReferenceException을 방지합니다.
             if (newRole == null)
             {
-                // 존재하지 않는 역할이므로 충돌 검사를 진행할 수 없습니다.
-                // 에러를 던지거나, 호출한 쪽에서 처리하도록 빈 목록을 반환합니다.
                 _logger.LogWarning("Could not check role conflicts for a non-existent new role with ID {RoleId}", newRoleId);
                 return conflicts;
             }
 
-            // [개선] 새로운 역할이 상호 배타적인 역할인지 확인합니다.
             if (newRole.IsMutuallyExclusive)
             {
-                // 사용자가 이미 가지고 있는 역할들 중에서 상호 배타적인 역할들을 찾습니다.
                 var existingExclusiveRoles = currentRoles
                     .Where(r => r.Role?.IsMutuallyExclusive == true)
-                    .Select(r => r.Role!.Name) // [개선] 충돌 메시지에 표시할 역할 이름을 추출합니다.
+                    .Select(r => r.Role!.Name)
                     .ToList();
 
                 if (existingExclusiveRoles.Any())
                 {
-                    // [개선] 어떤 역할과 충돌하는지 명확한 메시지를 추가합니다.
                     var conflictDetails = string.Join(", ", existingExclusiveRoles);
                     conflicts.Add($"Cannot assign mutually exclusive role '{newRole.Name}' because user already has exclusive role(s): {conflictDetails}");
                 }
             }
-
-            // (추가 개선 제안) 사용자가 이미 배타적 역할을 가지고 있을 때, 
-            // 새로운 역할(배타적이 아니더라도)을 추가하는 것을 막는 로직도 고려해볼 수 있습니다.
-            // else if (currentRoles.Any(r => r.Role?.IsMutuallyExclusive == true)) { ... }
-
+            
             return conflicts;
         }
 
@@ -2076,3 +1892,4 @@ namespace AuthHive.Auth.Validator
         #endregion
     }
 }
+

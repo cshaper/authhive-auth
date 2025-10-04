@@ -14,6 +14,8 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Handler;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Models.Policy.Commands;
+using AuthHive.Core.Models.Policy.Events;
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Organization.Handlers
@@ -669,7 +671,7 @@ namespace AuthHive.Auth.Organization.Handlers
             if (descendants.Any())
             {
                 // 전파 이벤트 발행
-                await _eventBus.PublishAsync(new PropagatePolicyCommand
+                await _eventBus.PublishAsync(new PropagatePolicyCommand(organizationId)
                 {
                     PolicyId = policyId,
                     SourceOrganizationId = organizationId,
@@ -689,7 +691,7 @@ namespace AuthHive.Auth.Organization.Handlers
 
         private async Task NotifyCriticalPolicyChangeAsync(Guid organizationId, Guid policyId, Dictionary<string, object?> changes)
         {
-            await _eventBus.PublishAsync(new CriticalPolicyChangeNotification
+            await _eventBus.PublishAsync(new CriticalPolicyChangeNotification(organizationId)
             {
                 OrganizationId = organizationId,
                 PolicyId = policyId,
@@ -699,7 +701,7 @@ namespace AuthHive.Auth.Organization.Handlers
 
         private async Task NotifyPolicyStateChangeAsync(Guid organizationId, Guid policyId, bool isEnabled)
         {
-            await _eventBus.PublishAsync(new PolicyStateChangeNotification
+            await _eventBus.PublishAsync(new PolicyStateChangeNotification(organizationId)
             {
                 OrganizationId = organizationId,
                 PolicyId = policyId,
@@ -709,7 +711,7 @@ namespace AuthHive.Auth.Organization.Handlers
 
         private async Task NotifyPolicyConflictAsync(Guid organizationId, OrganizationPolicyType policyType, string description)
         {
-            await _eventBus.PublishAsync(new PolicyConflictNotification
+            await _eventBus.PublishAsync(new PolicyConflictNotification(organizationId)
             {
                 OrganizationId = organizationId,
                 PolicyType = policyType,
@@ -722,7 +724,7 @@ namespace AuthHive.Auth.Organization.Handlers
             _logger.LogWarning("SECURITY ALERT: Security policy disabled - Organization={OrganizationId}, PolicyId={PolicyId}, Type={PolicyType}",
                 organizationId, policyId, policyType);
             
-            await _eventBus.PublishAsync(new SecurityPolicyDisabledWarning
+            await _eventBus.PublishAsync(new SecurityPolicyDisabledWarning(organizationId)
             {
                 OrganizationId = organizationId,
                 PolicyId = policyId,
@@ -793,7 +795,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             _logger.LogInformation("Attempting conflict resolution: Organization={OrganizationId}, Strategy={Strategy}",
                 organizationId, strategy);
-            // 충돌 해결 로직 구현
+            // TODO: 충돌 해결 로직 구현
             await Task.CompletedTask;
         }
 
@@ -811,14 +813,14 @@ namespace AuthHive.Auth.Organization.Handlers
         private async Task EnableRealTimeMonitoringAsync(Guid organizationId)
         {
             _logger.LogInformation("Enabling real-time monitoring for Organization={OrganizationId}", organizationId);
-            // 실시간 모니터링 활성화 로직
+            // TODO: 실시간 모니터링 활성화 로직
             await Task.CompletedTask;
         }
 
         private async Task DisableRealTimeMonitoringAsync(Guid organizationId)
         {
             _logger.LogInformation("Disabling real-time monitoring for Organization={OrganizationId}", organizationId);
-            // 실시간 모니터링 비활성화 로직
+            // TODO: 실시간 모니터링 비활성화 로직
             await Task.CompletedTask;
         }
 
@@ -826,7 +828,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             _logger.LogInformation("Validating compliance standards: Organization={OrganizationId}, Standards={Standards}",
                 organizationId, standards);
-            // 컴플라이언스 표준 검증 로직
+            // TODO: 컴플라이언스 표준 검증 로직
             await Task.CompletedTask;
         }
 
@@ -834,59 +836,10 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             _logger.LogInformation("Configuring violation action: Organization={OrganizationId}, Action={Action}",
                 organizationId, violationAction);
-            // Violation action 설정 로직
+            //TODO: Violation action 설정 로직
             await Task.CompletedTask;
         }
 
         #endregion
     }
-
-    #region Domain Event Classes
-
-    internal class PropagatePolicyCommand : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid PolicyId { get; set; }
-        public Guid SourceOrganizationId { get; set; }
-        public List<Guid> TargetOrganizationIds { get; set; } = new();
-    }
-
-    internal class CriticalPolicyChangeNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public Guid PolicyId { get; set; }
-        public Dictionary<string, object?> Changes { get; set; } = new();
-    }
-
-    internal class PolicyStateChangeNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public Guid PolicyId { get; set; }
-        public bool IsEnabled { get; set; }
-    }
-
-    internal class PolicyConflictNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public OrganizationPolicyType PolicyType { get; set; }
-        public string Description { get; set; } = string.Empty;
-    }
-
-    internal class SecurityPolicyDisabledWarning : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public Guid PolicyId { get; set; }
-        public OrganizationPolicyType PolicyType { get; set; }
-    }
-
-    #endregion
 }

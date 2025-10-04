@@ -1,24 +1,24 @@
 // Namespaces
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
-using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Enums.Audit;
+using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Application.Handlers;
 using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
-// Assuming IEmailService and related DTOs are in this namespace
-
 using AuthHive.Core.Models.PlatformApplication.Events;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Infra.UserExperience;
+using Microsoft.Extensions.Logging;
 
 
 namespace AuthHive.Application.Handlers
 {
     /// <summary>
+    /// API 키 관련 이벤트를 처리하며, 캐싱, 감사 로깅, 보안 응답 트리거 등의 작업을 수행합니다.
     /// </summary>
     public class ApplicationApiKeyEventHandler : IApplicationApiKeyEventHandler
     {
@@ -26,21 +26,21 @@ namespace AuthHive.Application.Handlers
         private readonly ICacheService _cacheService;
         private readonly IAuditService _auditService;
         private readonly IEventBus _eventBus;
-        // IEmailService for critical notifications
-        private readonly IEmailService _emailService; 
+        // 중요 알림을 위한 IEmailService (주석 처리됨)
+        // private readonly IEmailService _emailService;
 
         public ApplicationApiKeyEventHandler(
             ILogger<ApplicationApiKeyEventHandler> logger,
             ICacheService cacheService,
             IAuditService auditService,
-            IEventBus eventBus,
-            IEmailService emailService)
+            IEventBus eventBus
+            /* IEmailService emailService */)
         {
             _logger = logger;
             _cacheService = cacheService;
             _auditService = auditService;
             _eventBus = eventBus;
-            _emailService = emailService;
+            // _emailService = emailService;
         }
 
         #region Lifecycle Events
@@ -49,9 +49,9 @@ namespace AuthHive.Application.Handlers
         {
             await HandleEventAsync("ApiKeyCreated", eventData.ApplicationId, eventData.ApiKeyId, async () =>
             {
-                // Cache the new API key details immediately for fast access.
+                // 새로운 API 키 정보를 즉시 캐시하여 빠른 접근을 보장합니다.
                 var cacheKey = GetApiKeyCacheKey(eventData.ApplicationId, eventData.ApiKeyId);
-                // Cache only essential, non-sensitive data.
+                // 민감하지 않은 필수 데이터만 캐시합니다.
                 var cachedData = new { eventData.ApiKeyId, eventData.ApplicationId, eventData.KeyName, Status = "Active" };
                 await _cacheService.SetAsync(cacheKey, cachedData, TimeSpan.FromHours(24));
 
@@ -103,12 +103,12 @@ namespace AuthHive.Application.Handlers
             await HandleEventAsync("ApiKeyExpired", eventData.ApplicationId, eventData.ApiKeyId, async () =>
             {
                 await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
-                // System-triggered event
+                // 시스템에 의해 트리거된 이벤트입니다.
                 await _auditService.LogSecurityEventAsync(
                     eventType: "ApiKeyExpired",
                     severity: AuditEventSeverity.Info,
                     description: $"API Key '{eventData.ApiKeyId}' for Application '{eventData.ApplicationId}' has expired.",
-                    connectedId: null, // System event
+                    connectedId: null, // 시스템 이벤트
                     details: new Dictionary<string, object> { ["ExpiredAt"] = eventData.ExpiredAt }
                 );
             });
@@ -120,12 +120,12 @@ namespace AuthHive.Application.Handlers
 
         public Task HandleApiKeyUsedAsync(ApiKeyUsedEvent eventData)
         {
-            // RECOMMENDATION: This is a high-frequency event.
-            // Logging every single use to the main audit database is extremely costly.
-            // This handler should focus on lightweight, in-memory operations like updating rate-limit counters.
-            // For analytics, stream these events to a separate, high-throughput logging pipeline (e.g., Kafka -> Data Lake).
-            
-            // Example: Increment a counter in cache
+            // 권장 사항: 이 이벤트는 매우 빈번하게 발생합니다.
+            // 모든 사용 기록을 메인 감사 데이터베이스에 로깅하는 것은 비용이 매우 큽니다.
+            // 이 핸들러는 사용량 제한 카운터 업데이트와 같은 가벼운 인메모리 작업에 집중해야 합니다.
+            // 분석을 위해서는 이 이벤트들을 별도의 고성능 로깅 파이프라인(예: Kafka -> Data Lake)으로 스트리밍하는 것이 좋습니다.
+
+            // 예시: 캐시의 카운터 증가
             var usageCounterKey = GetApiKeyUsageCounterKey(eventData.ApiKeyId);
             _cacheService.IncrementAsync(usageCounterKey, 1);
 
@@ -136,12 +136,12 @@ namespace AuthHive.Application.Handlers
         {
             _logger.LogWarning("Rate limit reached for API Key {ApiKeyId} on App {AppId}", eventData.ApiKeyId, eventData.ApplicationId);
 
-            // This is a security-relevant event, log it as such.
+            // 보안 관련 중요 이벤트이므로, 보안 로그로 기록합니다.
             await _auditService.LogSecurityEventAsync(
                 eventType: "ApiKeyRateLimitReached",
                 severity: AuditEventSeverity.Warning,
                 description: $"API Key is being throttled.",
-                connectedId: null, // System event, but tied to the key
+                connectedId: null, // 시스템 이벤트이지만, 특정 키와 관련이 있습니다.
                 details: new Dictionary<string, object>
                 {
                     ["ApiKeyId"] = eventData.ApiKeyId,
@@ -175,9 +175,16 @@ namespace AuthHive.Application.Handlers
 
         public async Task HandleApiKeyDeactivatedAsync(ApiKeyDeactivatedEvent eventData)
         {
-            await HandleEventAsync("ApiKeyDeactivated", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // 비활성화 이벤트는 반드시 연관된 애플리케이션 ID를 가져야 합니다.
+            if (!eventData.ApplicationId.HasValue)
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
+                _logger.LogError("Cannot handle ApiKeyDeactivatedEvent: ApplicationId is missing for ApiKeyId {ApiKeyId}.", eventData.ApiKeyId);
+                return; // 데이터가 유효하지 않으면 조기 종료합니다.
+            }
+
+            await HandleEventAsync("ApiKeyDeactivated", eventData.ApplicationId.Value, eventData.ApiKeyId, async () =>
+            {
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.ApiKeyId);
                 await _auditService.LogActionAsync(
                     performedByConnectedId: eventData.DeactivatedByConnectedId,
                     action: "API_KEY_DEACTIVATED",
@@ -191,6 +198,12 @@ namespace AuthHive.Application.Handlers
 
         public async Task HandleApiKeyReactivatedAsync(ApiKeyReactivatedEvent eventData)
         {
+            if (eventData.ApplicationId == Guid.Empty)
+            {
+                _logger.LogError("Cannot handle ApiKeyReactivatedEvent: ApplicationId is an empty Guid for ApiKeyId {ApiKeyId}.", eventData.ApiKeyId);
+                return;
+            }
+
             await HandleEventAsync("ApiKeyReactivated", eventData.ApplicationId, eventData.ApiKeyId, async () =>
             {
                 await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
@@ -206,10 +219,16 @@ namespace AuthHive.Application.Handlers
 
         public async Task HandleApiKeyScopeChangedAsync(ApiKeyScopeChangedEvent eventData)
         {
+            if (eventData.ApplicationId == Guid.Empty)
+            {
+                _logger.LogError("Cannot handle ApiKeyScopeChangedEvent: ApplicationId is an empty Guid for ApiKeyId {ApiKeyId}.", eventData.ApiKeyId);
+                return;
+            }
+
             await HandleEventAsync("ApiKeyScopeChanged", eventData.ApplicationId, eventData.ApiKeyId, async () =>
             {
                 await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
-                // Scope changes are critical security events.
+                // 스코프 변경은 중요한 보안 이벤트입니다.
                 await _auditService.LogActionAsync(
                     performedByConnectedId: eventData.ChangedByConnectedId,
                     action: "API_KEY_SCOPE_CHANGED",
@@ -229,7 +248,7 @@ namespace AuthHive.Application.Handlers
         {
             _logger.LogCritical("Suspicious activity detected for API Key {ApiKeyId}! Type: {Activity}", eventData.ApiKeyId, eventData.ActivityType);
 
-            // Log a high-severity security event.
+            // 높은 심각도의 보안 이벤트를 기록합니다.
             await _auditService.LogSecurityEventAsync(
                 eventType: "SuspiciousApiKeyActivity",
                 severity: AuditEventSeverity.Critical,
@@ -242,8 +261,7 @@ namespace AuthHive.Application.Handlers
                 }).ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
             );
 
-            // RECOMMENDATION: Publish an internal event to trigger automated responses,
-            // such as sending a critical alert email or temporarily locking the key.
+            // 권장 사항: 내부 이벤트를 발행하여 자동화된 응답(예: 관리자에게 긴급 알림 이메일 전송 또는 키 임시 잠금)을 트리거합니다.
             // await _eventBus.PublishAsync(new ApiKeyLockoutRequiredEvent { ... });
         }
 
@@ -251,7 +269,7 @@ namespace AuthHive.Application.Handlers
         {
             _logger.LogCritical("API Key {ApiKeyId} exposure detected at {Location}!", eventData.ApiKeyId, eventData.ExposureLocation);
 
-            // 1. Log a critical security event.
+            // 1. 심각한 보안 이벤트를 기록합니다.
             await _auditService.LogSecurityEventAsync(
                 eventType: "ApiKeyExposureDetected",
                 severity: AuditEventSeverity.Critical,
@@ -265,19 +283,24 @@ namespace AuthHive.Application.Handlers
                 }
             );
 
-            // 2. Publish an event to automatically deactivate the key.
-            // This is a crucial automated security response.
-            await _eventBus.PublishAsync(new ApiKeyDeactivatedEvent
+            // 노출된 키는 반드시 애플리케이션 ID를 가져야 합니다.
+            if (eventData.ApplicationId == Guid.Empty)
             {
-                ApiKeyId = eventData.ApiKeyId,
-                ApplicationId = eventData.ApplicationId,
+                _logger.LogCritical("Cannot process ApiKeyExposureEvent for ApiKeyId {ApiKeyId}: ApplicationId is missing or empty.", eventData.ApiKeyId);
+                return;
+            }
+
+            // 2. 키를 자동으로 비활성화하는 이벤트를 발행합니다.
+            // 이것은 매우 중요한 자동화된 보안 조치입니다.
+            await _eventBus.PublishAsync(new ApiKeyDeactivatedEvent(eventData.ApplicationId, eventData.ApiKeyId)
+            {
                 Reason = $"Automatically deactivated due to public exposure detected at {eventData.ExposureLocation}.",
-                // System-level action, no specific user initiated it.
-                DeactivatedByConnectedId = Guid.Empty, 
+                // 특정 사용자가 아닌 시스템에 의한 조치입니다.
+                DeactivatedByConnectedId = Guid.Empty,
                 DeactivatedAt = DateTime.UtcNow
             });
 
-            // 3. Send an urgent email to the account owner.
+            // 3. 계정 소유자에게 긴급 이메일을 보냅니다.
             // await _emailService.SendApiKeyExposedAlertAsync(eventData);
         }
 
@@ -295,7 +318,7 @@ namespace AuthHive.Application.Handlers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error handling {EventName}: App={AppId}, Key={KeyId}", eventName, applicationId, apiKeyId);
-                throw;
+                throw; // 에러를 다시 던져서 상위 호출자에게 알립니다.
             }
         }
 
@@ -306,10 +329,11 @@ namespace AuthHive.Application.Handlers
             _logger.LogDebug("Invalidated API Key cache for App={AppId}, Key={KeyId}", applicationId, apiKeyId);
         }
 
-        // Cache keys must be designed for multi-tenancy.
+        // 캐시 키는 멀티테넌시를 고려하여 설계해야 합니다.
         private static string GetApiKeyCacheKey(Guid applicationId, Guid apiKeyId) => $"apikeys:{applicationId}:{apiKeyId}";
         private static string GetApiKeyUsageCounterKey(Guid apiKeyId) => $"apikeys:usage:{apiKeyId}";
 
         #endregion
     }
 }
+

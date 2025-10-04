@@ -391,7 +391,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// AccountSecurityService를 통한 패스워드 정책 조회 (위임)
         /// </summary>
-        public async Task<ServiceResult<PasswordPolicy>> GetPasswordPolicyAsync(Guid? organizationId = null)
+        public async Task<ServiceResult<PasswordPolicyDto>> GetPasswordPolicyAsync(Guid? organizationId = null)
         {
             try
             {
@@ -414,7 +414,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to delegate password policy retrieval to AccountSecurityService");
-                return ServiceResult<PasswordPolicy>.Failure("Failed to retrieve password policy");
+                return ServiceResult<PasswordPolicyDto>.Failure("Failed to retrieve password policy");
             }
         }
 

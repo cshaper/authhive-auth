@@ -12,6 +12,7 @@ using AuthHive.Core.Constants.Auth;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Caching.Memory;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
+using AuthHive.Core.Models.Auth.Session.Common;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -76,7 +77,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var passwordHealthy = await _passwordService.IsHealthyAsync();
                 var securityHealthy = await _securityService.IsHealthyAsync();
                 var tokenHealthy = await _tokenService.IsHealthyAsync();
-                
+
                 return passwordHealthy && securityHealthy && tokenHealthy;
             }
             catch (Exception ex)
@@ -100,7 +101,7 @@ namespace AuthHive.Auth.Services.Authentication
         private async Task<ServiceResult<RiskAssessment>> GetCachedRiskAssessmentAsync(string ipAddress)
         {
             var cacheKey = $"{RISK_ASSESSMENT_PREFIX}{ipAddress}";
-            
+
             // 캐시에서 먼저 확인
             if (_cache.TryGetValue<RiskAssessment>(cacheKey, out var cachedAssessment) && cachedAssessment != null)
             {
@@ -110,18 +111,18 @@ namespace AuthHive.Auth.Services.Authentication
 
             // 캐시 미스 - 실제 평가 수행
             var assessmentResult = await _attemptService.AssessIpRiskAsync(ipAddress);
-            
+
             if (assessmentResult.IsSuccess && assessmentResult.Data != null)
             {
                 // 결과를 캐시에 저장 (위험도가 높을수록 짧은 TTL)
-                var ttl = assessmentResult.Data.RiskScore >= 0.7 
+                var ttl = assessmentResult.Data.RiskScore >= 0.7
                     ? TimeSpan.FromMinutes(5)   // 고위험 IP - 5분
                     : TimeSpan.FromMinutes(15); // 저위험 IP - 15분
-                
+
                 _cache.Set(cacheKey, assessmentResult.Data, ttl);
                 _logger.LogDebug("Risk assessment cached for IP {IpAddress} with TTL {TTL}", ipAddress, ttl);
             }
-            
+
             return assessmentResult;
         }
 
@@ -131,7 +132,7 @@ namespace AuthHive.Auth.Services.Authentication
         private async Task<ServiceResult<MfaSettingsResponse>> GetCachedMfaSettingsAsync(Guid userId)
         {
             var cacheKey = $"mfa_settings_{userId}";
-            
+
             // 캐시에서 먼저 확인
             if (_cache.TryGetValue<MfaSettingsResponse>(cacheKey, out var cachedSettings) && cachedSettings != null)
             {
@@ -141,14 +142,14 @@ namespace AuthHive.Auth.Services.Authentication
 
             // 캐시 미스 - 실제 MFA 설정 조회
             var settingsResult = await _mfaService.GetMfaSettingsAsync(userId);
-            
+
             if (settingsResult.IsSuccess && settingsResult.Data != null)
             {
                 // MFA 설정은 비교적 안정적이므로 30분 캐싱
                 _cache.Set(cacheKey, settingsResult.Data, TimeSpan.FromMinutes(30));
                 _logger.LogDebug("MFA settings cached for user {UserId}", userId);
             }
-            
+
             return settingsResult;
         }
 
@@ -156,11 +157,11 @@ namespace AuthHive.Auth.Services.Authentication
         /// MFA 필요성 판단 결과 캐싱
         /// </summary>
         private async Task<ServiceResult<MfaRequirement>> GetCachedMfaRequirementAsync(
-            Guid userId, 
+            Guid userId,
             Guid? organizationId)
         {
             var cacheKey = $"mfa_requirement_{userId}_{organizationId}";
-            
+
             // 캐시에서 먼저 확인
             if (_cache.TryGetValue<MfaRequirement>(cacheKey, out var cachedRequirement) && cachedRequirement != null)
             {
@@ -170,14 +171,14 @@ namespace AuthHive.Auth.Services.Authentication
 
             // 캐시 미스 - 실제 MFA 필요성 판단
             var requirementResult = await _mfaService.CheckMfaRequirementAsync(userId, organizationId);
-            
+
             if (requirementResult.IsSuccess && requirementResult.Data != null)
             {
                 // MFA 필요성은 조직 정책에 따라 달라질 수 있으므로 10분 캐싱
                 _cache.Set(cacheKey, requirementResult.Data, TimeSpan.FromMinutes(10));
                 _logger.LogDebug("MFA requirement cached for user {UserId}", userId);
             }
-            
+
             return requirementResult;
         }
 
@@ -186,7 +187,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// </summary>
         private Task ClearSessionCacheAsync(Guid? connectedId, Guid? sessionId = null)
         {
-            if (!connectedId.HasValue) 
+            if (!connectedId.HasValue)
                 return Task.CompletedTask;
 
             try
@@ -214,7 +215,7 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 _logger.LogWarning(ex, "Failed to clear cache for ConnectedId {ConnectedId}", connectedId.Value);
             }
-            
+
             return Task.CompletedTask;
         }
 
@@ -223,7 +224,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// </summary>
         private Task ClearUserCacheAsync(Guid? userId, Guid? sessionId = null)
         {
-            if (!userId.HasValue) 
+            if (!userId.HasValue)
                 return Task.CompletedTask;
 
             try
@@ -262,7 +263,7 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 _logger.LogWarning(ex, "Failed to clear cache for user {UserId}", userId.Value);
             }
-            
+
             return Task.CompletedTask;
         }
 
@@ -295,7 +296,7 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 _logger.LogWarning(ex, "Failed to clear all cache for user {UserId}", userId);
             }
-            
+
             return Task.CompletedTask;
         }
 
@@ -307,14 +308,14 @@ namespace AuthHive.Auth.Services.Authentication
             try
             {
                 var stats = new Dictionary<string, object>();
-                
+
                 // 캐시 히트/미스 통계는 실제 캐시 구현체(Redis 등)에서 제공하는 메트릭 사용
                 // 현재는 기본적인 정보만 제공
                 stats["cache_provider"] = "MemoryCache";
                 stats["risk_assessment_ttl_minutes"] = "5-15";
                 stats["mfa_settings_ttl_minutes"] = "30";
                 stats["mfa_requirement_ttl_minutes"] = "10";
-                
+
                 return await Task.FromResult(ServiceResult<Dictionary<string, object>>.Success(stats));
             }
             catch (Exception ex)
@@ -344,7 +345,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // 동시에 실행하여 성능 최적화
                 await Task.WhenAll(warmupTasks);
-                
+
                 _logger.LogInformation("Cache warmup completed for user {UserId}", userId);
                 return ServiceResult.Success("Cache warmup completed");
             }
@@ -383,7 +384,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var authResponse = primaryAuthResult.Data;
-                
+
                 // 3. MFA 필요성 판단 및 처리
                 if (authResponse.UserId.HasValue)
                 {
@@ -426,7 +427,7 @@ namespace AuthHive.Auth.Services.Authentication
                     var riskAssessment = await GetCachedRiskAssessmentAsync(request.IpAddress);
                     if (riskAssessment.IsSuccess && riskAssessment.Data?.RiskScore >= 0.8)
                     {
-                        _logger.LogWarning("High risk IP detected: {IpAddress}, Risk: {RiskScore}", 
+                        _logger.LogWarning("High risk IP detected: {IpAddress}, Risk: {RiskScore}",
                             request.IpAddress, riskAssessment.Data.RiskScore);
                         return ServiceResult.Failure("Access denied due to security policy");
                     }
@@ -437,7 +438,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     var bruteForceCheck = await _attemptService.DetectBruteForceAttackAsync(
                         request.Username, request.IpAddress);
-                    
+
                     if (bruteForceCheck.IsSuccess && bruteForceCheck.Data == true)
                     {
                         return ServiceResult.Failure("Too many failed attempts. Please try again later.");
@@ -484,8 +485,8 @@ namespace AuthHive.Auth.Services.Authentication
             }
 
             return await _passwordService.AuthenticateWithPasswordAsync(
-                request.Username, 
-                request.Password, 
+                request.Username,
+                request.Password,
                 request.OrganizationId);
         }
 
@@ -558,7 +559,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// MFA 플로우 조율 - MFA 필요성 판단 및 처리 (캐싱 적용)
         /// </summary>
         private async Task<ServiceResult<AuthenticationResponse>> HandleMfaFlowAsync(
-            AuthenticationRequest request, 
+            AuthenticationRequest request,
             AuthenticationResponse primaryResponse)
         {
             try
@@ -604,24 +605,24 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     // MFA 코드 미제공 - MFA Challenge 시작
                     var availableMethods = await GetAvailableMfaMethodsAsync(primaryResponse.UserId.Value);
-                    
+
                     primaryResponse.RequiresMfa = true;
                     primaryResponse.MfaMethods = availableMethods;
                     primaryResponse.MfaVerified = false;
-                    
+
                     // 첫 번째 가능한 방법으로 챌린지 시작
                     if (availableMethods.Count > 0)
                     {
                         var challengeResult = await _mfaService.InitiateMfaAsync(
-                            primaryResponse.UserId.Value, 
+                            primaryResponse.UserId.Value,
                             availableMethods[0]);
-                        
+
                         if (challengeResult.IsSuccess)
                         {
                             _logger.LogInformation("MFA challenge initiated for user {UserId}", primaryResponse.UserId.Value);
                         }
                     }
-                    
+
                     return ServiceResult<AuthenticationResponse>.Success(primaryResponse);
                 }
             }
@@ -649,7 +650,7 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 _logger.LogWarning(ex, "Failed to get MFA methods for user {UserId}", userId);
             }
-            
+
             return new List<string> { "totp" }; // 기본값
         }
         #endregion
@@ -659,7 +660,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// 인증 성공 후 처리 - 세션 갱신, 보안 이벤트 로깅 등
         /// </summary>
         private async Task PostAuthenticationProcessingAsync(
-            AuthenticationRequest request, 
+            AuthenticationRequest request,
             AuthenticationResponse response)
         {
             try
@@ -676,11 +677,16 @@ namespace AuthHive.Auth.Services.Authentication
                     request.UserAgent);
 
                 // 신뢰할 수 있는 장치 확인 및 알림
+                // 신뢰할 수 있는 장치 확인 및 알림
                 if (!string.IsNullOrEmpty(request.DeviceInfo?.DeviceId))
                 {
+                    // DeviceInfo의 여러 속성을 조합하여 fingerprint 생성
+                    var deviceFingerprint = GenerateDeviceFingerprint(request.DeviceInfo);
+
                     var isTrusted = await _securityService.IsTrustedDeviceAsync(
-                        response.UserId.Value, 
-                        request.DeviceInfo.DeviceId);
+                        response.UserId.Value,
+                        request.DeviceInfo.DeviceId,
+                        deviceFingerprint);
 
                     if (isTrusted.IsSuccess && !isTrusted.Data)
                     {
@@ -717,7 +723,7 @@ namespace AuthHive.Auth.Services.Authentication
             try
             {
                 var result = AuthenticationResult.InvalidCredentials; // 기본값
-                
+
                 // 실패 원인에 따른 결과 코드 매핑
                 if (reason.Contains("locked", StringComparison.OrdinalIgnoreCase))
                     result = AuthenticationResult.AccountLocked;
@@ -745,22 +751,22 @@ namespace AuthHive.Auth.Services.Authentication
         /// 사용자 등록 - PasswordService로 위임
         /// </summary>
         public async Task<ServiceResult<AuthenticationResponse>> RegisterAsync(
-            string email, 
-            string password, 
-            string displayName, 
+            string email,
+            string password,
+            string displayName,
             Guid? organizationId = null)
         {
             try
             {
                 _logger.LogInformation("User registration attempt for email {Email}", email);
-                
+
                 var result = await _passwordService.RegisterAsync(email, password, displayName, organizationId);
-                
+
                 if (result.IsSuccess)
                 {
                     _logger.LogInformation("User registration successful for email {Email}", email);
                 }
-                
+
                 return result;
             }
             catch (Exception ex)
@@ -770,7 +776,42 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
         #endregion
+        #region Device Fingerprinting
 
+        /// <summary>
+        /// 디바이스 핑거프린트 생성
+        /// 디바이스의 여러 속성을 조합하여 고유한 식별자 생성
+        /// </summary>
+        private string GenerateDeviceFingerprint(DeviceInfo deviceInfo)
+        {
+            if (deviceInfo == null)
+                return string.Empty;
+
+            // 주요 디바이스 속성들을 조합
+            var components = new List<string>
+    {
+        deviceInfo.DeviceId,
+        deviceInfo.DeviceType,
+        deviceInfo.OperatingSystem,
+        deviceInfo.Browser,
+        deviceInfo.BrowserVersion,
+        deviceInfo.DeviceModel ?? string.Empty
+    };
+
+            // null이거나 빈 값 제거
+            var validComponents = components.Where(c => !string.IsNullOrWhiteSpace(c));
+
+            // SHA256 해시로 fingerprint 생성
+            using (var sha256 = System.Security.Cryptography.SHA256.Create())
+            {
+                var combinedString = string.Join("|", validComponents);
+                var bytes = System.Text.Encoding.UTF8.GetBytes(combinedString);
+                var hashBytes = sha256.ComputeHash(bytes);
+                return Convert.ToBase64String(hashBytes);
+            }
+        }
+
+        #endregion
         #region 로그아웃 처리
         /// <summary>
         /// 로그아웃 처리 - 세션과 토큰 정리
@@ -832,9 +873,9 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // ConnectedId를 통한 세션 조회 필요 - userId로 직접 조회는 불가능
                 // 대신 사용자의 모든 ConnectedId를 찾아서 각각의 활성 세션을 조회해야 함
-                
+
                 int loggedOutCount = 0;
-                
+
                 // 모든 토큰 해지
                 var revokeResult = await _tokenService.RevokeAllTokensForUserAsync(userId);
                 if (revokeResult.IsSuccess && revokeResult.Data > 0)
@@ -862,7 +903,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// 패스워드 재설정 요청 - PasswordService로 위임
         /// </summary>
         public async Task<ServiceResult<PasswordResetToken>> RequestPasswordResetAsync(
-            string email, 
+            string email,
             Guid? organizationId = null)
         {
             return await _passwordService.RequestPasswordResetAsync(email, organizationId);
@@ -880,8 +921,8 @@ namespace AuthHive.Auth.Services.Authentication
         /// 패스워드 변경 - PasswordService로 위임
         /// </summary>
         public async Task<ServiceResult> ChangePasswordAsync(
-            Guid userId, 
-            string currentPassword, 
+            Guid userId,
+            string currentPassword,
             string newPassword)
         {
             return await _passwordService.ChangePasswordAsync(userId, currentPassword, newPassword);

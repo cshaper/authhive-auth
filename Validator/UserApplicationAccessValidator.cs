@@ -123,14 +123,16 @@ namespace AuthHive.Auth.Validator
 
             if (granterAccess.AccessLevel < requestedLevel || (granterAccess.AccessLevel == requestedLevel && granterAccess.AccessLevel != ApplicationAccessLevel.Owner))
             {
-                await _eventBus.PublishAsync(new UnauthorizedPermissionGrantAttemptedEvent
-                {
-                    GranterConnectedId = grantedByConnectedId,
-                    TargetConnectedId = targetConnectedId,
-                    ApplicationId = applicationId,
-                    GranterLevel = granterAccess.AccessLevel,
-                    RequestedLevel = requestedLevel
-                });
+                // ✅ FIXED: Switched from object initializer to the correct constructor call.
+                var unauthorizedEvent = new UnauthorizedPermissionGrantAttemptedEvent(
+                    granterConnectedId: grantedByConnectedId,
+                    targetConnectedId: targetConnectedId,
+                    applicationId: applicationId,
+                    granterLevel: granterAccess.AccessLevel,
+                    requestedLevel: requestedLevel
+                );
+                await _eventBus.PublishAsync(unauthorizedEvent);
+
                 return AccessValidationResult.Failure("AccessLevel", $"Users with '{granterAccess.AccessLevel}' access cannot grant '{requestedLevel}' access.", "INSUFFICIENT_GRANT_AUTHORITY");
             }
 
@@ -151,14 +153,16 @@ namespace AuthHive.Auth.Validator
                 var currentUserCount = await _accessRepository.GetActiveCountByApplicationAsync(applicationId);
                 if (currentUserCount >= memberLimit)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = organizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.ApplicationMemberCount,
-                        CurrentValue = currentUserCount,
-                        MaxValue = memberLimit
-                    });
+                    // ✅ FIXED: Switched from object initializer to the correct constructor call.
+                    var limitEvent = new PlanLimitReachedEvent(
+                        organizationId: organizationId,
+                        planKey: planKey,
+                        limitType: PlanLimitType.ApplicationMemberCount,
+                        currentValue: currentUserCount,
+                        maxValue: memberLimit,
+                        triggeredBy: null // Or pass the user's ConnectedId if available in this context
+                    );
+                    await _eventBus.PublishAsync(limitEvent);
 
                     return AccessValidationResult.Failure("UserLimit", $"The user limit ({memberLimit}) for the current '{planKey}' plan has been reached.", "APPLICATION_USER_LIMIT_REACHED");
                 }
@@ -375,17 +379,5 @@ namespace AuthHive.Auth.Validator
 
         #endregion
     }
-    public class UnauthorizedPermissionGrantAttemptedEvent : IDomainEvent
-    {
-        // Required by the IDomainEvent interface
-        public Guid EventId { get; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; } = DateTime.UtcNow;
 
-        // Your existing properties
-        public Guid GranterConnectedId { get; set; }
-        public Guid TargetConnectedId { get; set; }
-        public Guid ApplicationId { get; set; }
-        public ApplicationAccessLevel GranterLevel { get; set; }
-        public ApplicationAccessLevel RequestedLevel { get; set; }
-    }
 }

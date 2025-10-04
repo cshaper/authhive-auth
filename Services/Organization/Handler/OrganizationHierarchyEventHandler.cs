@@ -14,8 +14,10 @@ using AuthHive.Core.Interfaces.Organization.Handler;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Models.Organization;
+using AuthHive.Core.Models.Policy.Commands;
 using Microsoft.Extensions.Logging;
-
+using AuthHive.Core.Models.User.Events;
+using AuthHive.Core.Models.Organization.Events;
 namespace AuthHive.Auth.Organization.Handlers
 {
     /// <summary>
@@ -38,7 +40,7 @@ namespace AuthHive.Auth.Organization.Handlers
         private const string DESCENDANTS_CACHE_PREFIX = "org:descendants";
         private const string ANCESTORS_CACHE_PREFIX = "org:ancestors";
         private const string TREE_CACHE_PREFIX = "org:tree";
-        
+
         // 감사 액션 상수
         private const string CHILD_ORG_CREATED = "ORGANIZATION_CHILD_CREATED";
         private const string ORG_MOVED = "ORGANIZATION_HIERARCHY_MOVED";
@@ -73,7 +75,7 @@ namespace AuthHive.Auth.Organization.Handlers
         }
 
         #region IService Implementation
-        
+
         public Task InitializeAsync()
         {
             _logger.LogInformation("OrganizationHierarchyEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
@@ -84,7 +86,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync();
         }
-        
+
         #endregion
 
         #region IOrganizationHierarchyEventHandler Implementation
@@ -136,12 +138,12 @@ namespace AuthHive.Auth.Organization.Handlers
                 // 6. 계층 구조 통계 업데이트
                 await UpdateHierarchyStatisticsAsync(args.ParentOrganizationId, 1);
 
-                _logger.LogInformation("Successfully processed child organization created for Organization={OrganizationId}", 
+                _logger.LogInformation("Successfully processed child organization created for Organization={OrganizationId}",
                     args.OrganizationId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing child organization created for Organization={OrganizationId}", 
+                _logger.LogError(ex, "Error processing child organization created for Organization={OrganizationId}",
                     args.OrganizationId);
                 throw;
             }
@@ -157,7 +159,7 @@ namespace AuthHive.Auth.Organization.Handlers
                 // 1. 순환 참조 검증
                 if (await WouldCreateCyclicReferenceAsync(args.OrganizationId, args.NewParentId))
                 {
-                    _logger.LogError("Cyclic reference detected in hierarchy move for Organization={OrganizationId}", 
+                    _logger.LogError("Cyclic reference detected in hierarchy move for Organization={OrganizationId}",
                         args.OrganizationId);
                     throw new InvalidOperationException("Moving organization would create cyclic reference");
                 }
@@ -184,8 +186,8 @@ namespace AuthHive.Auth.Organization.Handlers
 
                 // 4. 캐시 무효화 - 이동에 영향받는 모든 조직
                 await InvalidateHierarchyCachesForMoveAsync(
-                    args.OrganizationId, 
-                    args.OldParentId, 
+                    args.OrganizationId,
+                    args.OldParentId,
                     args.NewParentId
                 );
 
@@ -205,12 +207,12 @@ namespace AuthHive.Auth.Organization.Handlers
                     await UpdateHierarchyStatisticsAsync(args.NewParentId, 1);
                 }
 
-                _logger.LogWarning("Successfully processed organization move for Organization={OrganizationId}", 
+                _logger.LogWarning("Successfully processed organization move for Organization={OrganizationId}",
                     args.OrganizationId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing organization move for Organization={OrganizationId}", 
+                _logger.LogError(ex, "Error processing organization move for Organization={OrganizationId}",
                     args.OrganizationId);
                 throw;
             }
@@ -252,12 +254,12 @@ namespace AuthHive.Auth.Organization.Handlers
                 // 4. 계층 구조 무결성 검증
                 await ValidateHierarchyIntegrityAsync(args.OrganizationId);
 
-                _logger.LogInformation("Successfully processed hierarchy change for Organization={OrganizationId}", 
+                _logger.LogInformation("Successfully processed hierarchy change for Organization={OrganizationId}",
                     args.OrganizationId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing hierarchy change for Organization={OrganizationId}", 
+                _logger.LogError(ex, "Error processing hierarchy change for Organization={OrganizationId}",
                     args.OrganizationId);
                 throw;
             }
@@ -305,12 +307,12 @@ namespace AuthHive.Auth.Organization.Handlers
                 // 4. 정책 충돌 검사
                 await CheckPolicyConflictsInHierarchyAsync(args.OrganizationId, args.PolicyType);
 
-                _logger.LogInformation("Successfully processed inheritance policy change for Organization={OrganizationId}", 
+                _logger.LogInformation("Successfully processed inheritance policy change for Organization={OrganizationId}",
                     args.OrganizationId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing inheritance policy change for Organization={OrganizationId}", 
+                _logger.LogError(ex, "Error processing inheritance policy change for Organization={OrganizationId}",
                     args.OrganizationId);
                 throw;
             }
@@ -352,7 +354,7 @@ namespace AuthHive.Auth.Organization.Handlers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing max depth reached for Organization={OrganizationId}", 
+                _logger.LogError(ex, "Error processing max depth reached for Organization={OrganizationId}",
                     args.OrganizationId);
                 throw;
             }
@@ -399,12 +401,12 @@ namespace AuthHive.Auth.Organization.Handlers
                     await UpdateHierarchyStatisticsAsync(args.ParentOrganizationId, -1);
                 }
 
-                _logger.LogWarning("Successfully processed child organization removal for Organization={OrganizationId}", 
+                _logger.LogWarning("Successfully processed child organization removal for Organization={OrganizationId}",
                     args.OrganizationId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing child organization removal for Organization={OrganizationId}", 
+                _logger.LogError(ex, "Error processing child organization removal for Organization={OrganizationId}",
                     args.OrganizationId);
                 throw;
             }
@@ -443,7 +445,7 @@ namespace AuthHive.Auth.Organization.Handlers
             // TODO: 실제 구현에서는 조직의 플랜을 확인
             // var org = await _organizationRepository.GetByIdAsync(organizationId.Value);
             // return org.PricingTier switch { ... }
-            
+
             return DEFAULT_MAX_DEPTH;
         }
 
@@ -488,7 +490,7 @@ namespace AuthHive.Auth.Organization.Handlers
             await InvalidateDescendantsCacheAsync(organizationId);
             await InvalidateAncestorsCacheAsync(organizationId);
             await InvalidateTreeCacheAsync(organizationId);
-            
+
             var pathCacheKey = $"{HIERARCHY_PATH_CACHE_PREFIX}:{organizationId}";
             await _cacheService.RemoveAsync(pathCacheKey);
         }
@@ -508,7 +510,7 @@ namespace AuthHive.Auth.Organization.Handlers
             {
                 await InvalidateDescendantsCacheAsync(oldParentId.Value);
                 await InvalidateTreeCacheAsync(oldParentId.Value);
-                
+
                 var oldAncestors = await _hierarchyRepository.GetAncestorsAsync(oldParentId.Value);
                 foreach (var ancestor in oldAncestors)
                 {
@@ -521,7 +523,7 @@ namespace AuthHive.Auth.Organization.Handlers
             {
                 await InvalidateDescendantsCacheAsync(newParentId.Value);
                 await InvalidateTreeCacheAsync(newParentId.Value);
-                
+
                 var newAncestors = await _hierarchyRepository.GetAncestorsAsync(newParentId.Value);
                 foreach (var ancestor in newAncestors)
                 {
@@ -544,7 +546,8 @@ namespace AuthHive.Auth.Organization.Handlers
                 var inheritablePolicies = await _policyRepository.GetInheritablePoliciesAsync(parentOrgId);
                 foreach (var policy in inheritablePolicies)
                 {
-                    await _eventBus.PublishAsync(new InheritPolicyCommand
+                    // new InheritPolicyCommand 뒤에 (childOrgId)를 추가합니다.
+                    await _eventBus.PublishAsync(new InheritPolicyCommand(childOrgId)
                     {
                         SourceOrganizationId = parentOrgId,
                         TargetOrganizationId = childOrgId,
@@ -584,10 +587,10 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             // 상속된 정책 조회 - GetInheritablePoliciesAsync 활용
             var parentPolicies = await _policyRepository.GetInheritablePoliciesAsync(parentId);
-            
+
             // 조직의 활성화된 정책 조회
             var orgPolicies = await _policyRepository.GetEnabledPoliciesAsync(orgId);
-            
+
             // 부모로부터 상속된 정책 식별 및 제거
             foreach (var policy in orgPolicies)
             {
@@ -611,7 +614,7 @@ namespace AuthHive.Auth.Organization.Handlers
 
         private async Task NotifyPermissionRecalculationNeededAsync(Guid organizationId)
         {
-            await _eventBus.PublishAsync(new PermissionRecalculationNeededEvent
+            await _eventBus.PublishAsync(new PermissionRecalculationNeededEvent(organizationId)
             {
                 OrganizationId = organizationId,
                 Reason = "Hierarchy structure changed"
@@ -621,7 +624,7 @@ namespace AuthHive.Auth.Organization.Handlers
         private async Task ProcessLargeHierarchyChangeAsync(List<Guid> affectedOrgIds)
         {
             _logger.LogInformation("Processing large hierarchy change affecting {Count} organizations", affectedOrgIds.Count);
-            
+
             // 배치로 처리
             const int batchSize = 20;
             for (int i = 0; i < affectedOrgIds.Count; i += batchSize)
@@ -640,13 +643,13 @@ namespace AuthHive.Auth.Organization.Handlers
                 // 순환 참조 체크 - 자신의 자손이 부모가 되는 경우 확인
                 var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId);
                 var ancestors = await _hierarchyRepository.GetAncestorsAsync(organizationId);
-                
+
                 var hasCycle = descendants.Any(d => ancestors.Any(a => a.Id == d.Id));
-                
+
                 if (hasCycle)
                 {
                     _logger.LogError("Hierarchy integrity check failed - cycle detected for Organization={OrganizationId}", organizationId);
-                    await _eventBus.PublishAsync(new HierarchyIntegrityIssueDetectedEvent
+                    await _eventBus.PublishAsync(new HierarchyIntegrityIssueDetectedEvent(organizationId)
                     {
                         OrganizationId = organizationId
                     });
@@ -662,7 +665,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             _logger.LogInformation("Enabling policy inheritance: Org={OrganizationId}, Type={PolicyType}, Items={Count}",
                 orgId, policyType, items.Count);
-            
+
             // 정책 상속 활성화 로직
             await Task.CompletedTask;
         }
@@ -671,7 +674,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             _logger.LogInformation("Disabling policy inheritance: Org={OrganizationId}, Type={PolicyType}",
                 orgId, policyType);
-            
+
             // 정책 상속 비활성화 로직
             await Task.CompletedTask;
         }
@@ -684,26 +687,26 @@ namespace AuthHive.Auth.Organization.Handlers
                 // 현재 조직의 정책 가져오기
                 var orgPolicyType = Enum.Parse<OrganizationPolicyType>(policyType);
                 var orgPolicies = await _policyRepository.GetByTypeAsync(orgId, orgPolicyType);
-                
+
                 // 상위 조직들의 정책과 충돌 확인
                 var ancestors = await _hierarchyRepository.GetAncestorsAsync(orgId);
                 var conflicts = new List<Guid>();
-                
+
                 foreach (var ancestor in ancestors)
                 {
                     var ancestorPolicies = await _policyRepository.GetByTypeAsync(ancestor.Id, orgPolicyType);
                     // 동일 우선순위나 규칙 충돌 확인
-                    if (ancestorPolicies.Any(ap => orgPolicies.Any(op => 
-                        op.Priority == ap.Priority || 
+                    if (ancestorPolicies.Any(ap => orgPolicies.Any(op =>
+                        op.Priority == ap.Priority ||
                         (op.PolicyName == ap.PolicyName && op.PolicyRules != ap.PolicyRules))))
                     {
                         conflicts.Add(ancestor.Id);
                     }
                 }
-                
+
                 if (conflicts.Any())
                 {
-                    await _eventBus.PublishAsync(new PolicyConflictInHierarchyDetectedEvent
+                    await _eventBus.PublishAsync(new PolicyConflictInHierarchyDetectedEvent(orgId)
                     {
                         OrganizationId = orgId,
                         PolicyType = policyType,
@@ -721,7 +724,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             // GetChildrenAsync with recursive=false to get direct children only
             var descendants = await _hierarchyRepository.GetChildrenAsync(removedOrgId, recursive: false);
-            
+
             if (descendants.Any())
             {
                 if (parentId.HasValue)
@@ -760,7 +763,7 @@ namespace AuthHive.Auth.Organization.Handlers
 
         private async Task NotifyMaxDepthReachedAsync(Guid orgId, int maxAllowed, int attempted)
         {
-            await _eventBus.PublishAsync(new MaxDepthReachedNotification
+            await _eventBus.PublishAsync(new MaxDepthReachedNotification(orgId)
             {
                 OrganizationId = orgId,
                 MaxAllowedDepth = maxAllowed,
@@ -780,7 +783,7 @@ namespace AuthHive.Auth.Organization.Handlers
 
         private async Task SuggestPlanUpgradeAsync(Guid orgId, string currentPlan)
         {
-            await _eventBus.PublishAsync(new PlanUpgradeSuggestionEvent
+            await _eventBus.PublishAsync(new PlanUpgradeSuggestionEvent(orgId)
             {
                 OrganizationId = orgId,
                 CurrentPlan = currentPlan,
@@ -791,58 +794,4 @@ namespace AuthHive.Auth.Organization.Handlers
         #endregion
     }
 
-    #region Domain Event Classes
-
-    internal class InheritPolicyCommand : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid SourceOrganizationId { get; set; }
-        public Guid TargetOrganizationId { get; set; }
-        public Guid PolicyId { get; set; }
-    }
-
-    internal class PermissionRecalculationNeededEvent : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public string Reason { get; set; } = string.Empty;
-    }
-
-    internal class HierarchyIntegrityIssueDetectedEvent : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-    }
-
-    internal class PolicyConflictInHierarchyDetectedEvent : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public string PolicyType { get; set; } = string.Empty;
-        public List<Guid> ConflictingOrganizations { get; set; } = new();
-    }
-
-    internal class MaxDepthReachedNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public int MaxAllowedDepth { get; set; }
-        public int AttemptedDepth { get; set; }
-    }
-
-    internal class PlanUpgradeSuggestionEvent : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public string CurrentPlan { get; set; } = string.Empty;
-        public string Reason { get; set; } = string.Empty;
-    }
-
-    #endregion
 }

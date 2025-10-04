@@ -438,6 +438,7 @@ namespace AuthHive.Auth.Session.Handlers
     internal class TerminateSessionCommand : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId => SessionId;
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid SessionId { get; set; }
         public SessionEndReason Reason { get; set; }
@@ -447,6 +448,7 @@ namespace AuthHive.Auth.Session.Handlers
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
+        public Guid AggregateId => SessionId;
         public Guid SessionId { get; set; }
         public Guid UserId { get; set; }
     }

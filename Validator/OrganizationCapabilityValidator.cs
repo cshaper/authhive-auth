@@ -17,6 +17,7 @@ using ValidationResult = AuthHive.Core.Models.Common.Validation.ValidationResult
 using ValidationError = AuthHive.Core.Models.Common.Validation.ValidationError;
 using static AuthHive.Core.Constants.Common.OrganizationConstants;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Models.Organization.Events;
 
 namespace AuthHive.Auth.Services.Validators
 {
@@ -41,7 +42,7 @@ namespace AuthHive.Auth.Services.Validators
         // [WHY]  기술적으로 또는 정책적으로 동시에 존재할 수 없는 기능들의 조합을 막기 위함입니다.
         private static readonly Dictionary<string, HashSet<string>> ConflictingCapabilities = new()
         {
-            [FeatureCapabilityCodes.SingleSignOn] = new() {FeatureCapabilityCodes.BasicAuthentication },
+            [FeatureCapabilityCodes.SingleSignOn] = new() { FeatureCapabilityCodes.BasicAuthentication },
             [FeatureCapabilityCodes.AdvancedSecurity] = new() { FeatureCapabilityCodes.BasicSecurity },
             [FeatureCapabilityCodes.CustomBranding] = new() { FeatureCapabilityCodes.WhiteLabel }
         };
@@ -54,7 +55,7 @@ namespace AuthHive.Auth.Services.Validators
             [FeatureCapabilityCodes.AdvancedAnalytics] = new() { FeatureCapabilityCodes.BasicAnalytics },
             [FeatureCapabilityCodes.EnterpriseSupport] = new() { FeatureCapabilityCodes.PremiumSupport }
         };
-        
+
         public OrganizationCapabilityValidator(
             IOrganizationCapabilityAssignmentRepository assignmentRepository,
             IPlanService planService,
@@ -90,7 +91,7 @@ namespace AuthHive.Auth.Services.Validators
                 var existingCapCode = existingCap.Code;
                 if (ConflictingCapabilities.TryGetValue(newCapabilityCode, out var conflicts) && conflicts.Contains(existingCapCode))
                     errors.Add(new ValidationError { Field = "Capability", Message = $"Capability '{newCapability.Name}' conflicts with '{existingCap.Name}'.", ErrorCode = "CAPABILITY_CONFLICT" });
-                
+
                 if (ConflictingCapabilities.TryGetValue(existingCapCode, out var reverseConflicts) && reverseConflicts.Contains(newCapabilityCode))
                     errors.Add(new ValidationError { Field = "Capability", Message = $"Cannot add '{newCapability.Name}' because it conflicts with the already active '{existingCap.Name}'.", ErrorCode = "CAPABILITY_CONFLICT" });
             }
@@ -104,10 +105,10 @@ namespace AuthHive.Auth.Services.Validators
                         errors.Add(new ValidationError { Field = "Dependency", Message = $"To use '{newCapability.Name}', the '{requiredCapCode}' capability must be enabled first.", ErrorCode = "MISSING_DEPENDENCY" });
                 }
             }
-            
+
             return await Task.FromResult(new ValidationResult { IsValid = !errors.Any(), Errors = errors });
         }
-        
+
         /// <summary>
         /// [WHEN] 특정 기능에 대한 설정을 저장하거나 업데이트할 때 호출됩니다.
         /// [WHY]  기능이 동작하는 데 필수적인 설정값이 누락되거나, 설정값의 형식이 잘못되는 것을 방지하기 위함입니다.
@@ -122,7 +123,7 @@ namespace AuthHive.Auth.Services.Validators
             {
                 if (capability.RequiresConfiguration)
                     return ValidationResult.Failure("Settings", $"Settings are required for the '{capability.Name}' capability.", "SETTINGS_REQUIRED");
-                
+
                 return ValidationResult.Success();
             }
 
@@ -152,7 +153,7 @@ namespace AuthHive.Auth.Services.Validators
             var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(organizationId);
             if (subscription == null)
                 return ValidationResult.Failure("Plan", "Active subscription not found.", "ACTIVE_SUBSCRIPTION_NOT_FOUND");
-            
+
             var planKey = subscription.PlanKey;
             if (planKey == PricingConstants.SubscriptionPlans.ENTERPRISE_KEY)
                 return ValidationResult.Success();
@@ -160,20 +161,20 @@ namespace AuthHive.Auth.Services.Validators
             if (!IsCapabilityAllowedForPlan(capability.Code, planKey))
             {
                 var requiredPlan = GetMinimumPlanForCapability(capability.Code);
-                await _eventBus.PublishAsync(new CapabilityPlanLimitEvent
-                {
-                    OrganizationId = organizationId,
-                    CapabilityCode = capability.Code,
-                    CurrentPlan = planKey,
-                    RequiredPlan = requiredPlan
-                });
-                
+                await _eventBus.PublishAsync(new CapabilityPlanLimitEvent(
+                  organizationId: organizationId,
+                  capabilityCode: capability.Code,
+                  currentPlan: planKey,
+                  requiredPlan: requiredPlan,
+                  triggeredBy: null  // 또는 적절한 사용자 ID
+              ));
+
                 return ValidationResult.Failure("PlanLimit", $"The '{capability.Name}' capability requires the '{requiredPlan}' plan or higher.", "PLAN_INSUFFICIENT");
             }
 
             return ValidationResult.Success();
         }
-        
+
         /// <summary>
         /// [WHEN] 하위 조직이 상위 조직으로부터 기능을 상속받는 시점에 호출됩니다.
         /// [WHY]  상속이 불가능한 기능이 전파되거나, 상위 조직에 없는 기능이 하위로 상속되는 잘못된 상황을 막기 위함입니다.
@@ -209,12 +210,12 @@ namespace AuthHive.Auth.Services.Validators
 
             if (!parentHasCapability)
                 return ValidationResult.Failure("ParentCapability", "Cannot inherit capability because the parent organization does not have it enabled.", "PARENT_MISSING_CAPABILITY");
-            
+
             return await ValidatePlanLimitsAsync(childOrganizationId, capability);
         }
 
         #region Private Helper Methods
-        
+
         private bool IsCapabilityAllowedForPlan(string capabilityCode, string planKey)
         {
             return planKey switch
@@ -232,25 +233,15 @@ namespace AuthHive.Auth.Services.Validators
                 return PricingConstants.SubscriptionPlans.BUSINESS_KEY;
             if (capabilityCode == FeatureCapabilityCodes.SingleSignOn)
                 return PricingConstants.SubscriptionPlans.PRO_KEY;
-            
+
             return PricingConstants.SubscriptionPlans.BASIC_KEY;
         }
-        
+
         #endregion
 
         #region Helper Classes & Events
-        
-        private class CachedBoolValue { public bool Value { get; set; } }
 
-        private class CapabilityPlanLimitEvent : IDomainEvent
-        {
-            public Guid EventId { get; set; } = Guid.NewGuid();
-            public Guid OrganizationId { get; set; }
-            public string CapabilityCode { get; set; } = string.Empty;
-            public string CurrentPlan { get; set; } = string.Empty;
-            public string RequiredPlan { get; set; } = string.Empty;
-            public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        }
+        private class CachedBoolValue { public bool Value { get; set; } }
 
         #endregion
     }

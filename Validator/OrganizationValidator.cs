@@ -12,6 +12,7 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Validator;
 using AuthHive.Core.Models.Common.Validation;
+using AuthHive.Core.Models.Organization.Events;
 using AuthHive.Core.Models.Organization.Requests;
 using Microsoft.Extensions.Logging;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
@@ -66,7 +67,7 @@ namespace AuthHive.Auth.Services.Validators
             // 1. 기본 필드 검증
             if (string.IsNullOrWhiteSpace(request.Name))
                 errors.Add(new ValidationError { Field = "Name", Message = "조직명은 필수입니다.", ErrorCode = "NAME_REQUIRED" });
-            
+
             if (request.Name?.Length > 100)
                 errors.Add(new ValidationError { Field = "Name", Message = "조직명은 100자 이하여야 합니다.", ErrorCode = "NAME_TOO_LONG" });
 
@@ -111,7 +112,7 @@ namespace AuthHive.Auth.Services.Validators
         public async Task<ValidationResult> ValidateUpdateAsync(Guid organizationId, UpdateOrganizationRequest request)
         {
             var errors = new List<ValidationError>();
-            
+
             var organization = await _organizationRepository.GetByIdAsync(organizationId);
             if (organization == null)
             {
@@ -138,10 +139,10 @@ namespace AuthHive.Auth.Services.Validators
             {
                 errors.Add(new ValidationError { Field = "Region", Message = "지역 코드는 ISO 3166-1 alpha-2 형식이어야 합니다.", ErrorCode = ValidationErrorCodes.InvalidFormat });
             }
-            
+
             return new ValidationResult { IsValid = !errors.Any(), Errors = errors };
         }
-        
+
         /// <summary>
         /// 조직 삭제 가능 여부 검증
         /// </summary>
@@ -162,7 +163,7 @@ namespace AuthHive.Auth.Services.Validators
                 errors.Add(new ValidationError { Field = "Hierarchy", Message = $"하위 조직({children.Count()})이 존재하여 삭제할 수 없습니다.", ErrorCode = "HAS_CHILD_ORGANIZATIONS" });
 
             // TODO: 활성 멤버십 확인 로직 추가
-            
+
             // 활성 구독 확인
             var activeSubscription = await _planService.GetCurrentSubscriptionForOrgAsync(organizationId);
             if (activeSubscription != null)
@@ -197,7 +198,7 @@ namespace AuthHive.Auth.Services.Validators
             if (!string.IsNullOrWhiteSpace(entity.OrganizationKey) && !System.Text.RegularExpressions.Regex.IsMatch(entity.OrganizationKey, @"^[a-z0-9-]+$"))
                 errors.Add(new ValidationError { Field = "OrganizationKey", Message = "조직 키는 영문 소문자, 숫자, 하이픈만 사용 가능합니다.", ErrorCode = ValidationErrorCodes.InvalidFormat });
 
-            if(errors.Any()) return new ValidationResult { IsValid = false, Errors = errors };
+            if (errors.Any()) return new ValidationResult { IsValid = false, Errors = errors };
 
 
             // 플랜별 제한사항 검증
@@ -242,7 +243,7 @@ namespace AuthHive.Auth.Services.Validators
 
                 if (organizationKey.Length < 3 || organizationKey.Length > 50)
                     errors.Add(new ValidationError { Field = "OrganizationKey", Message = "조직 키는 3자 이상 50자 이하여야 합니다.", ErrorCode = "KEY_INVALID_LENGTH" });
-                
+
                 var reservedKeys = new[] { "admin", "api", "www", "app", "auth", "system", "root", "super" };
                 if (reservedKeys.Contains(organizationKey.ToLower()))
                     errors.Add(new ValidationError { Field = "OrganizationKey", Message = "예약된 조직 키는 사용할 수 없습니다.", ErrorCode = "KEY_RESERVED" });
@@ -266,7 +267,7 @@ namespace AuthHive.Auth.Services.Validators
             var errors = new List<ValidationError>();
 
             if (!newParentId.HasValue) return new ValidationResult { IsValid = true };
-            
+
             if (organizationId == newParentId.Value)
                 errors.Add(new ValidationError { Field = "ParentOrganizationId", Message = "조직은 자기 자신을 상위 조직으로 설정할 수 없습니다.", ErrorCode = "SELF_PARENT" });
 
@@ -278,14 +279,14 @@ namespace AuthHive.Auth.Services.Validators
             {
                 if (await _hierarchyRepository.WouldCreateCycleAsync(organizationId, newParentId.Value))
                     errors.Add(new ValidationError { Field = "Hierarchy", Message = "순환 참조가 발생합니다. 하위 조직을 상위로 설정할 수 없습니다.", ErrorCode = "CIRCULAR_REFERENCE" });
-                
+
                 var depthValidation = await ValidateHierarchyDepthAsync(organizationId);
                 if (!depthValidation.IsValid) errors.AddRange(depthValidation.Errors);
             }
 
             return new ValidationResult { IsValid = !errors.Any(), Errors = errors };
         }
-        
+
         /// <summary>
         /// 조직 상태 변경 검증
         /// </summary>
@@ -303,16 +304,22 @@ namespace AuthHive.Auth.Services.Validators
             };
 
             if (!validTransitions.ContainsKey(currentStatus) || !validTransitions[currentStatus].Contains(newStatus))
-                errors.Add(new ValidationError { Field = "Status", Message = $"'{currentStatus}'에서 '{newStatus}'로의 상태 변경은 허용되지 않습니다.", ErrorCode = "INVALID_STATUS_TRANSITION" });
+                errors.Add(new ValidationError { Field = "Status", Message = $"Transitioning from '{currentStatus}' to '{newStatus}' is not allowed.", ErrorCode = "INVALID_STATUS_TRANSITION" });
 
             if (newStatus == OrganizationStatus.Suspended)
             {
-                await _eventBus.PublishAsync(new OrganizationSuspendedEvent { EventId = Guid.NewGuid(), OrganizationId = organizationId, PreviousStatus = currentStatus, OccurredAt = DateTime.UtcNow });
+                // ✅ FIXED: Switched from object initializer to the correct constructor call.
+                var suspendedEvent = new OrganizationSuspendedEvent(
+                    organizationId: organizationId,
+                    previousStatus: currentStatus,
+                    reason: "Organization status was changed to Suspended.",
+                    triggeredBy: null // Or pass the user's ConnectedId if available in this context
+                );
+                await _eventBus.PublishAsync(suspendedEvent);
             }
 
             return new ValidationResult { IsValid = !errors.Any(), Errors = errors };
         }
-
         /// <summary>
         /// 조직 타입 변경 검증
         /// </summary>
@@ -331,7 +338,7 @@ namespace AuthHive.Auth.Services.Validators
 
             return Task.FromResult(new ValidationResult { IsValid = !errors.Any(), Errors = errors });
         }
-        
+
         /// <summary>
         /// 하위 조직 생성 가능 여부 검증
         /// </summary>
@@ -354,7 +361,7 @@ namespace AuthHive.Auth.Services.Validators
             {
                 var planKey = planSubscription.PlanKey;
                 var orgLimit = GetOrganizationLimitByPlan(planKey);
-                
+
                 if (orgLimit != -1)
                 {
                     var children = await _hierarchyRepository.GetChildrenAsync(parentOrganizationId);
@@ -368,7 +375,7 @@ namespace AuthHive.Auth.Services.Validators
 
             return new ValidationResult { IsValid = !errors.Any(), Errors = errors };
         }
-        
+
         /// <summary>
         /// 조직 계층 깊이 검증
         /// </summary>
@@ -377,7 +384,7 @@ namespace AuthHive.Auth.Services.Validators
             var errors = new List<ValidationError>();
 
             var depth = await _hierarchyRepository.GetDepthLevelAsync(organizationId);
-            
+
             var organization = await _organizationRepository.GetByIdAsync(organizationId);
             if (organization != null)
             {
@@ -386,7 +393,7 @@ namespace AuthHive.Auth.Services.Validators
                 {
                     var planKey = planSubscription.PlanKey;
                     var depthLimit = GetOrganizationDepthLimitByPlan(planKey);
-                    
+
                     if (depthLimit != -1 && depth >= depthLimit)
                         errors.Add(new ValidationError { Field = "HierarchyDepth", Message = $"플랜({planKey})의 계층 깊이 제한({depthLimit})에 도달했습니다.", ErrorCode = "HIERARCHY_DEPTH_LIMIT" });
                 }
@@ -408,7 +415,7 @@ namespace AuthHive.Auth.Services.Validators
             {
                 var planKey = planSubscription.PlanKey;
                 var orgLimit = GetOrganizationLimitByPlan(planKey);
-                
+
                 if (orgLimit != -1)
                 {
                     var descendants = await _organizationRepository.GetDescendantsAsync(organizationId);
@@ -435,16 +442,6 @@ namespace AuthHive.Auth.Services.Validators
         // 캐시 로직이 복잡하지 않다면 이 클래스는 필요 없을 수 있습니다.
         // 현재 ValidateOrganizationKeyAsync 에서는 사용하지 않도록 수정했습니다.
         private class CachedBoolValue { public bool Value { get; set; } }
-        #endregion
-
-        #region Event Classes (Should be moved to Core.Events)
-        private class OrganizationSuspendedEvent : IDomainEvent
-        {
-            public Guid EventId { get; set; }
-            public Guid OrganizationId { get; set; }
-            public OrganizationStatus PreviousStatus { get; set; }
-            public DateTime OccurredAt { get; set; }
-        }
         #endregion
     }
 }

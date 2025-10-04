@@ -343,14 +343,50 @@ namespace AuthHive.Auth.Services.Organization
                 }
                 await _unitOfWork.CommitTransactionAsync();
 
-                // 6. 상태 변경 이벤트 발행하여 다른 서비스에 알림
-                var statusChangedEvent = new OrganizationStatusChangedEvent(
-                    organizationId,
-                    oldStatus,
-                    newStatus,
-                    changedByConnectedId,
-                    reason);
-                await _eventBus.PublishAsync(statusChangedEvent);
+                // 6. 상태별로 적절한 이벤트 발행
+                // 6. 상태별로 적절한 이벤트 발행
+                switch (newStatus)
+                {
+                    case OrganizationStatus.Active:
+                        var activatedEvent = new OrganizationActivatedEvent(
+                            organizationId,
+                            oldStatus,
+                            reason ?? "Organization activated",
+                            changedByConnectedId);
+                        await _eventBus.PublishAsync(activatedEvent);
+                        break;
+
+                    case OrganizationStatus.Suspended:
+                        var suspendedEvent = new OrganizationSuspendedEvent(
+                            organizationId,
+                            oldStatus,
+                            reason ?? "Organization suspended",
+                            changedByConnectedId);
+                        await _eventBus.PublishAsync(suspendedEvent);
+                        break;
+
+                    case OrganizationStatus.Terminated:
+                        var deletedEvent = new OrganizationDeletedEvent(
+                            organizationId,
+                            reason ?? "Organization terminated",
+                            true,  // isSoftDelete = true (소프트 삭제)
+                            changedByConnectedId);
+                        await _eventBus.PublishAsync(deletedEvent);
+                        break;
+
+                    case OrganizationStatus.Inactive:
+                        var deactivatedEvent = new OrganizationDeactivatedEvent(
+                            organizationId,
+                            oldStatus,
+                            reason ?? "Organization deactivated",
+                            changedByConnectedId);
+                        await _eventBus.PublishAsync(deactivatedEvent);
+                        break;
+
+                    default:
+                        _logger.LogWarning("No specific event defined for status {Status}", newStatus);
+                        break;
+                }
 
                 _logger.LogInformation("Successfully changed organization {OrganizationId} status from {OldStatus} to {NewStatus} and published event.",
                     organizationId, oldStatus, newStatus);

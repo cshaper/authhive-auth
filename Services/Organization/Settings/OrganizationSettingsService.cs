@@ -54,7 +54,7 @@ public class OrganizationSettingsService : IOrganizationSettingsService
     {
         var setting = await GetSettingAsync(organizationId, category, settingKey, connectedId);
         if (setting?.SettingValue == null) return null;
-        
+
         try
         {
             if (setting.SettingValue is T value) return value;
@@ -92,7 +92,7 @@ public class OrganizationSettingsService : IOrganizationSettingsService
     {
         var entities = await _queryRepository.GetAllSettingsAsync(organizationId);
         var dtos = _mapper.Map<List<OrganizationSettingsDto>>(entities);
-        
+
         var response = new OrganizationSettingsListResponse
         {
             OrganizationId = organizationId,
@@ -140,9 +140,9 @@ public class OrganizationSettingsService : IOrganizationSettingsService
         var entities = _mapper.Map<IEnumerable<Core.Entities.Organization.OrganizationSettings>>(request.Settings);
         var resultEntities = await _repository.BulkUpsertAsync(entities, connectedId);
         var dtos = _mapper.Map<List<OrganizationSettingsDto>>(resultEntities);
-        
-        return new BulkUpdateOrganizationSettingsResponse 
-        { 
+
+        return new BulkUpdateOrganizationSettingsResponse
+        {
             UpdatedSettings = dtos,
             SuccessfullyUpdated = dtos.Count,
             TotalRequested = request.Settings.Count(),
@@ -167,16 +167,21 @@ public class OrganizationSettingsService : IOrganizationSettingsService
         return Task.FromResult(new InheritOrganizationSettingsResponse());
     }
 
-    public async Task<PropagateOrganizationSettingsResponse> PropagateToChildrenAsync(PropagateOrganizationSettingsRequest request, Guid connectedId)
+    public async Task<PropagateOrganizationSettingsResponse> PropagateToChildrenAsync(
+        PropagateOrganizationSettingsRequest request,
+        Guid connectedId)
     {
         var affectedCount = await _commandRepository.PropagateSettingsToChildrenAsync(
-            request.ParentOrganizationId, 
-            request.SettingKeys, 
+            request.ParentOrganizationId,
+            request.SettingKeys,
             request.ForceOverride);
-        
+
         return new PropagateOrganizationSettingsResponse
         {
-            SettingsPropagated = affectedCount
+            IsSuccess = affectedCount > 0,
+            PropagatedSettingsCount = affectedCount,
+            AffectedOrganizationsCount = affectedCount > 0 ? 1 : 0, // 또는 실제 영향받은 조직 수
+            Message = $"{affectedCount}개의 설정이 하위 조직에 전파되었습니다."
         };
     }
 
@@ -190,7 +195,7 @@ public class OrganizationSettingsService : IOrganizationSettingsService
             SettingValue = request.NewValue,
             IsInherited = false
         };
-        
+
         var result = await _repository.UpsertSettingAsync(entity, connectedId);
         return _mapper.Map<OrganizationSettingsDto>(result);
     }

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Constants.Auth;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Entities.Business.Platform;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -80,7 +81,6 @@ namespace AuthHive.Auth.Repositories
                 p => p.IsEnabled
             );
         }
-
         /// <summary>
         /// 유효 기간 내 정책 조회
         /// 사용 시점: 특정 시점의 정책 적용 확인, 감사 로그
@@ -483,7 +483,7 @@ namespace AuthHive.Auth.Repositories
         }
 
         #endregion
-               #region New Method Implementation
+        #region New Method Implementation
 
         /// <summary>
         /// 지정된 조직과 정책 유형 내에서 특정 우선순위가 이미 사용 중인지 확인합니다.

@@ -8,6 +8,7 @@ using AuthHive.Core.Entities.System;
 using Microsoft.AspNetCore.Http;
 using System.Linq.Expressions;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
+using AuthHive.Core.Entities.Business.Platform;
 namespace AuthHive.Auth.Data.Context
 {
     public class AuthDbContext : DbContext
@@ -50,6 +51,7 @@ namespace AuthHive.Auth.Data.Context
         #endregion
 
         #region Organization 도메인
+        public DbSet<OrganizationPlan> OrganizationPlans { get; set; }
         public DbSet<OrganizationEntity> Organizations { get; set; }
         public DbSet<OrganizationMembership> OrganizationMemberships { get; set; }
         public DbSet<OrganizationMemberProfile> OrganizationMemberProfiles { get; set; }
@@ -205,6 +207,95 @@ namespace AuthHive.Auth.Data.Context
                 entity.HasIndex(u => u.Username).IsUnique().HasFilter("username IS NOT NULL");
             });
 
+            modelBuilder.Entity<OrganizationPlan>(entity =>
+            {
+                // Table name is already set by the [Table] attribute, but this is explicit.
+                entity.ToTable("OrganizationPlans");
+
+                // Primary Key is inherited from BaseEntity, so it's already configured.
+                entity.HasKey(e => e.Id);
+
+                // --- Indexes (for query performance) ---
+
+                // Create a unique index on PlanKey to prevent duplicate plan identifiers.
+                // This is critical for the business logic.
+                entity.HasIndex(e => e.PlanKey)
+                      .IsUnique();
+
+                // Create an index on PlanType for faster filtering by plan type.
+                entity.HasIndex(e => e.PlanType);
+                // Create a composite index for filtering and sorting on the pricing page.
+                entity.HasIndex(e => new { e.IsAvailable, e.DisplayOrder });
+                // --- Property Configurations ---
+                entity.Property(e => e.PlanKey)
+                      .IsRequired()
+                      .HasMaxLength(50);
+
+                entity.Property(e => e.PlanName)
+                      .IsRequired()
+                      .HasMaxLength(100);
+
+                entity.Property(e => e.MonthlyPrice)
+                      .HasColumnType("decimal(18,2)")
+                      .IsRequired();
+
+                entity.Property(e => e.YearlyPrice)
+                      .HasColumnType("decimal(18,2)");
+
+                entity.Property(e => e.ExcessMAURate)
+                      .HasColumnType("decimal(18,4)")
+                      .IsRequired();
+
+                entity.Property(e => e.ExcessStorageRate)
+                      .HasColumnType("decimal(18,4)")
+                      .IsRequired();
+
+                entity.Property(e => e.RateLimitHandling)
+                      .IsRequired()
+                      .HasMaxLength(50);
+
+                    // --- Default Values ---
+
+                entity.Property(e => e.SignupBonusPoints)
+                      .IsRequired()
+                      .HasDefaultValue(0);
+
+                entity.Property(e => e.TrialDays)
+                      .IsRequired()
+                      .HasDefaultValue(0);
+
+                entity.Property(e => e.DisplayOrder)
+                      .IsRequired()
+                      .HasDefaultValue(0);
+
+                entity.Property(e => e.IsAvailable)
+                      .IsRequired()
+                      .HasDefaultValue(true);
+
+                entity.Property(e => e.IsRecommended)
+                      .IsRequired()
+                      .HasDefaultValue(false);
+
+                    // --- Relationships ---
+
+                    // Defines the one-to-many relationship between OrganizationPlan and PlanFeature.
+                entity.HasMany(p => p.Features)
+                      .WithOne(f => f.Plan)
+                      .HasForeignKey(f => f.PlanId)
+                      .OnDelete(DeleteBehavior.Cascade); // If a plan is deleted, its features are also deleted.
+
+                    // Defines the one-to-many relationship between OrganizationPlan and PlanSubscription.
+                entity.HasMany(p => p.Subscriptions)
+                      .WithOne(s => s.Plan)
+                      .HasForeignKey(s => s.PlanId)
+                      .OnDelete(DeleteBehavior.Restrict); // Prevent deleting a plan if it has active subscriptions.
+
+                    // Note: For PostgreSQL, the [Column(TypeName = "jsonb")] attribute is often sufficient.
+                    // If you need more specific JSON handling, you can add it here.
+                    // entity.Property(e => e.Configuration).HasColumnType("jsonb");
+                    // entity.Property(e => e.Metadata).HasColumnType("jsonb");
+                });
+                
             modelBuilder.Entity<UserProfile>(entity =>
             {
                 entity.ToTable("user_profiles");

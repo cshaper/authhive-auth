@@ -65,7 +65,7 @@ namespace AuthHive.Auth.Services.Validators
             if (!duplicateCheckResult.IsValid)
                 errors.AddRange(duplicateCheckResult.Errors);
 
-            var memberLimitResult = await ValidateMemberLimitAsync(membership.OrganizationId);
+            var memberLimitResult = await ValidateMemberLimitInternalAsync(membership.OrganizationId, connectedId);
             if (!memberLimitResult.IsValid)
                 errors.AddRange(memberLimitResult.Errors);
 
@@ -184,8 +184,8 @@ namespace AuthHive.Auth.Services.Validators
 
         /// <summary>
         /// [WHEN] 관리자가 조직 멤버의 세부 권한 레벨(0-100)을 조정하려고 할 때 호출됩니다.
-        /// [WHY]  유효하지 않은 레벨(예: 101)이 설정되는 것을 막고, 낮은 등급의 관리자가 자신보다 높은 등급의 권한을 다른 멤버에게 부여하는 것을 방지하기 위함입니다.
-        /// [HOW]  액세스 레벨이 유효한 범위(0-100) 내에 있는지 확인하고, 높은 수준의 레벨을 부여하려는 경우 변경을 시도하는 사용자가 'Owner'인지 검사합니다.
+        /// [WHY]  유효하지 않은 레벨(예: 101)이 설정되는 것을 막고, 낮은 등급의 관리자가 자신보다 높은 등급의 권한을 다른 멤버에게 부여하는 것을 방지하기 위함입니다.
+        /// [HOW]  액세스 레벨이 유효한 범위(0-100) 내에 있는지 확인하고, 높은 수준의 레벨을 부여하려는 경우 변경을 시도하는 사용자가 'Owner'인지 검사합니다.
         /// [SCENARIO] 조직의 'Admin'이 다른 멤버의 액세스 레벨을 최상위 등급인 95로 설정하려고 시도하면, 이 검증이 실패하여 'Owner만 높은 레벨을 부여할 수 있다'는 오류를 반환합니다.
         /// </summary>
         public async Task<ValidationResult> ValidateAccessLevelChangeAsync(OrganizationMembership membership, int newAccessLevel, Guid connectedId)
@@ -268,7 +268,7 @@ namespace AuthHive.Auth.Services.Validators
             }
 
             // 멤버 수 제한 확인
-            var memberLimitResult = await ValidateMemberLimitAsync(organizationId);
+            var memberLimitResult = await ValidateMemberLimitInternalAsync(organizationId, invitedByConnectedId);
             if (!memberLimitResult.IsValid)
                 errors.AddRange(memberLimitResult.Errors);
 
@@ -322,7 +322,7 @@ namespace AuthHive.Auth.Services.Validators
             }
 
             // 멤버 수 제한 확인
-            var memberLimitResult = await ValidateMemberLimitAsync(organizationId, memberships.Count);
+            var memberLimitResult = await ValidateMemberLimitInternalAsync(organizationId, connectedId, memberships.Count);
             if (!memberLimitResult.IsValid)
                 errors.AddRange(memberLimitResult.Errors);
 
@@ -427,9 +427,17 @@ namespace AuthHive.Auth.Services.Validators
         }
 
         /// <summary>
-        /// 최대 멤버 수 제한 검증
+        /// 최대 멤버 수 제한 검증 (인터페이스 구현용)
         /// </summary>
-        public async Task<ValidationResult> ValidateMemberLimitAsync(Guid organizationId, int additionalMembers = 1)
+        public Task<ValidationResult> ValidateMemberLimitAsync(Guid organizationId, int additionalMembers)
+        {
+            return ValidateMemberLimitInternalAsync(organizationId, null, additionalMembers);
+        }
+
+        /// <summary>
+        /// 최대 멤버 수 제한 검증 (내부 로직용)
+        /// </summary>
+        private async Task<ValidationResult> ValidateMemberLimitInternalAsync(Guid organizationId, Guid? triggeredById, int additionalMembers = 1)
         {
             var subscription = await _planService.GetCurrentSubscriptionForOrgAsync(organizationId);
             var planKey = subscription?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
@@ -439,14 +447,14 @@ namespace AuthHive.Auth.Services.Validators
                 var currentCount = await _membershipRepository.GetMemberCountAsync(organizationId);
                 if ((currentCount + additionalMembers) > limit)
                 {
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    { 
-                        OrganizationId = organizationId, 
-                        PlanKey = planKey, 
-                        LimitType = PlanLimitType.MemberCount,
-                        CurrentValue = currentCount, 
-                        MaxValue = limit 
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        organizationId,
+                        planKey,
+                        PlanLimitType.MemberCount,
+                        currentCount,
+                        limit,
+                        triggeredById
+                    ));
                     return ValidationResult.Failure(new ValidationError { Field = "MemberCount", Message = $"Member limit ({limit}) for the current plan has been exceeded.", ErrorCode = "MEMBER_LIMIT_EXCEEDED" });
                 }
             }
@@ -563,3 +571,4 @@ namespace AuthHive.Auth.Services.Validators
         }
     }
 }
+

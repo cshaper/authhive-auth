@@ -145,14 +145,13 @@ namespace AuthHive.Auth.Validators
                     if (memberLimit > 0 && memberCount >= memberLimit)
                     {
                         // 이벤트 발생 추가
-                        await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                        {
-                            OrganizationId = entity.OrganizationId,
-                            PlanKey = planKey,
-                            LimitType = PlanLimitType.MemberCount,
-                            CurrentValue = memberCount,
-                            MaxValue = memberLimit
-                        });
+                        await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+      entity.OrganizationId,
+      planKey,
+      PlanLimitType.MemberCount,
+      memberCount,
+      memberLimit
+  ));
 
                         result.AddError("OrganizationId",
                             $"Organization member limit ({memberLimit}) exceeded",
@@ -259,14 +258,13 @@ namespace AuthHive.Auth.Validators
                 if (memberLimit > 0 && memberCount >= memberLimit)
                 {
                     // Fire event for plan limit reached
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = entity.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.MemberCount,
-                        CurrentValue = memberCount,
-                        MaxValue = memberLimit
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                    entity.OrganizationId,
+                    planKey,
+                    PlanLimitType.MemberCount,
+                    memberCount,
+                    memberLimit
+                ));
 
                     result.AddError("OrganizationId",
                         $"Organization member limit ({memberLimit}) exceeded",
@@ -281,14 +279,13 @@ namespace AuthHive.Auth.Validators
                 if (maxOrganizations > 0 && userOrgCount >= maxOrganizations)
                 {
                     // Fire event for user organization limit
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                    {
-                        OrganizationId = entity.OrganizationId,
-                        PlanKey = planKey,
-                        LimitType = PlanLimitType.OrganizationMemberCount,
-                        CurrentValue = userOrgCount,
-                        MaxValue = maxOrganizations
-                    });
+                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                        entity.OrganizationId,
+                        planKey,
+                        PlanLimitType.MemberCount,
+                        memberCount,
+                        memberLimit
+                    ));
 
                     result.AddWarning($"User organization limit ({maxOrganizations}) reached");
                 }
@@ -326,15 +323,13 @@ namespace AuthHive.Auth.Validators
 
                         if (roleCount >= roleLimit)
                         {
-                            await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                            {
-                                OrganizationId = entity.OrganizationId,
-                                PlanKey = planKey,
-                                LimitType = PlanLimitType.RoleCount,
-                                CurrentValue = roleCount,
-                                MaxValue = roleLimit
-                            });
-
+                            await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                                entity.OrganizationId,
+                                planKey,
+                                PlanLimitType.MemberCount,
+                                memberCount,
+                                memberLimit
+                            ));
                             result.AddError("RoleLimit",
                                 $"Organization role limit ({roleLimit}) exceeded",
                                 "ROLE_LIMIT_EXCEEDED");
@@ -355,14 +350,13 @@ namespace AuthHive.Auth.Validators
 
                     if (currentApiRate >= apiRateLimit)
                     {
-                        await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                        {
-                            OrganizationId = entity.OrganizationId,
-                            PlanKey = planKey,
-                            LimitType = PlanLimitType.ApiRateLimit,
-                            CurrentValue = currentApiRate,
-                            MaxValue = apiRateLimit
-                        });
+                        await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                         entity.OrganizationId,
+                         planKey,
+                         PlanLimitType.MemberCount,
+                         memberCount,
+                         memberLimit
+                     ));
 
                         result.AddError("ApiRateLimit",
                             $"API rate limit ({apiRateLimit} requests/minute) exceeded",
@@ -387,15 +381,13 @@ namespace AuthHive.Auth.Validators
 
                         if (storageUsedGB >= storageLimitGB)
                         {
-                            await _eventBus.PublishAsync(new PlanLimitReachedEvent
-                            {
-                                OrganizationId = entity.OrganizationId,
-                                PlanKey = planKey,
-                                LimitType = PlanLimitType.StorageLimits,
-                                CurrentValue = (int)storageUsedGB,
-                                MaxValue = storageLimitGB
-                            });
-
+                            await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                      entity.OrganizationId,
+                      planKey,
+                      PlanLimitType.MemberCount,
+                      memberCount,
+                      memberLimit
+                  ));
                             result.AddError("StorageLimit",
                                 $"Storage limit ({storageLimitGB}GB) exceeded",
                                 "STORAGE_LIMIT_EXCEEDED");

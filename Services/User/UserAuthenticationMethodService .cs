@@ -58,6 +58,7 @@ namespace AuthHive.Auth.Services.User
         private readonly AuthenticationSettings _settings;
         private readonly ISecurityAnalyzer _securityAnalyzer;
         private readonly IAuditService _auditService;
+        private readonly IEventBus _eventBus;
         private readonly IEventHandler<UserEmailVerifiedEvent> _emailVerifiedEventHandler;
         private readonly IEventHandler<TwoFactorStatusChangedEvent> _twoFactorEventHandler;
         private readonly IEventHandler<UserLoggedInEvent> _loginEventHandler;
@@ -76,6 +77,7 @@ namespace AuthHive.Auth.Services.User
             IDistributedCache distributedCache,
             IMemoryCache memoryCache,
             IUnitOfWork unitOfWork,
+            IEventBus eventBus,
             ILogger<UserAuthenticationMethodService> logger,
             IHttpContextAccessor httpContextAccessor,
             IOptions<AuthenticationSettings> settings,
@@ -94,6 +96,7 @@ namespace AuthHive.Auth.Services.User
             _distributedCache = distributedCache ?? throw new ArgumentNullException(nameof(distributedCache));
             _memoryCache = memoryCache ?? throw new ArgumentNullException(nameof(memoryCache));
             _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
+            _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _httpContextAccessor = httpContextAccessor ?? throw new ArgumentNullException(nameof(httpContextAccessor));
             _settings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
@@ -218,12 +221,7 @@ namespace AuthHive.Auth.Services.User
                     }));
 
                 // 13. 이벤트 발행
-                await _emailVerifiedEventHandler.HandleAsync(new UserEmailVerifiedEvent
-                {
-                    UserId = user.Id,
-                    Email = user.Email,
-                    VerifiedAt = user.EmailVerifiedAt.Value
-                });
+                await _eventBus.PublishAsync(new UserEmailVerifiedEvent(user.Id));
 
                 // 14. 환영 이메일 발송
                 await SendWelcomeEmailAsync(user);
@@ -482,6 +480,7 @@ namespace AuthHive.Auth.Services.User
                     enabled ? "TwoFactorEnabled" : "TwoFactorDisabled",
                     true);
 
+
                 // 8. 감사 로그
                 await _auditService.LogSecurityEventAsync(
                     enabled ? "TWO_FACTOR_ENABLED" : "TWO_FACTOR_DISABLED",
@@ -491,14 +490,15 @@ namespace AuthHive.Auth.Services.User
                     new Dictionary<string, object> { ["ipAddress"] = GetClientIpAddress(), ["userAgent"] = GetUserAgent() });
 
                 // 9. 이벤트 발행
-                await _twoFactorEventHandler.HandleAsync(new TwoFactorStatusChangedEvent
-                {
-                    UserId = user.Id,
-                    Enabled = enabled,
-                    ChangedAt = DateTime.UtcNow
-                });
-
+                await _eventBus.PublishAsync(new TwoFactorStatusChangedEvent(
+                    userId: user.Id,           // user.Id 사용
+                    isEnabled: enabled,        // enabled 변수 사용
+                    method: "totp",           // method가 정의되지 않았다면 기본값 사용
+                    organizationId: null,      // 필요시 조직 ID 추가
+                    triggeredBy: null         // 필요시 현재 사용자의 ConnectedId 추가
+                ));
                 return result;
+
             }
             catch (Exception ex)
             {
@@ -1077,14 +1077,4 @@ namespace AuthHive.Auth.Services.User
         #endregion
     }
 
-    #region Supporting Classes
-
-
-
-    #endregion
-
-    #region Extension Methods for AuthenticationAttemptLog
-
-
-    #endregion
 }

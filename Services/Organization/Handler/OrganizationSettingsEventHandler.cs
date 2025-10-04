@@ -14,6 +14,8 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Handler;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Models.Organization.Commands;
+using AuthHive.Core.Models.Organization.Events;
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Organization.Handlers
@@ -35,7 +37,7 @@ namespace AuthHive.Auth.Organization.Handlers
         private const string SETTINGS_CACHE_PREFIX = "org:settings";
         private const string BRANDING_CACHE_PREFIX = "org:branding";
         private const string SECURITY_CACHE_PREFIX = "org:security";
-        
+
         // 감사 액션 상수
         private const string SETTINGS_CHANGED = "ORGANIZATION_SETTINGS_CHANGED";
         private const string BRANDING_UPDATED = "ORGANIZATION_BRANDING_UPDATED";
@@ -122,7 +124,8 @@ namespace AuthHive.Auth.Organization.Handlers
 
                 if (criticalChanges.Any())
                 {
-                    await NotifyCriticalSettingsChangeAsync(args.OrganizationId, criticalChanges);
+                    // ✅ FIXED: Pass the required 'modifiedBy' argument.
+                    await NotifyCriticalSettingsChangeAsync(args.OrganizationId, criticalChanges, args.ModifiedByConnectedId);
                 }
 
                 _logger.LogInformation("Successfully processed settings changed event for Organization {OrganizationId}",
@@ -217,11 +220,12 @@ namespace AuthHive.Auth.Organization.Handlers
 
                 // 2. 보안 관련 캐시 무효화
                 await InvalidateSecurityCacheAsync(args.OrganizationId);
-                
+
                 // 3. 모든 사용자 세션 무효화 (필요한 경우)
                 if (RequiresSessionInvalidation(args.PolicyType, args.NewPolicy))
                 {
-                    await InvalidateAllUserSessionsAsync(args.OrganizationId);
+                    // ✅ FIXED: Pass the user who triggered the change.
+                    await InvalidateAllUserSessionsAsync(args.OrganizationId, args.ChangedByConnectedId);
                 }
 
                 // 4. 사용자 액션이 필요한 경우 알림
@@ -230,7 +234,9 @@ namespace AuthHive.Auth.Organization.Handlers
                     await NotifyUsersAboutSecurityPolicyChangeAsync(
                         args.OrganizationId,
                         args.PolicyType,
-                        args.NewPolicy
+                        args.NewPolicy,
+                        args.RequiresUserAction, // <-- FIXED: Added the missing argument
+                        args.ChangedByConnectedId // <-- FIXED: Added the user who triggered the event
                     );
                 }
 
@@ -323,7 +329,13 @@ namespace AuthHive.Auth.Organization.Handlers
                 await ValidateImportedSettingsAsync(args.OrganizationId);
 
                 // 4. 관련 서비스에 설정 변경 알림
-                await NotifyServicesAboutSettingsImportAsync(args.OrganizationId);
+                // 4. 관련 서비스에 설정 변경 알림
+                await NotifyServicesAboutSettingsImportAsync(
+                    args.OrganizationId,
+                    args.SettingsImported,      // <-- FIXED: Added imported count
+                    args.SettingsSkipped,       // <-- FIXED: Added skipped count
+                    args.ImportedByConnectedId  // <-- FIXED: Added the user who triggered the event
+                );
 
                 _logger.LogInformation("Successfully processed settings import for Organization {OrganizationId}",
                     args.OrganizationId);
@@ -382,8 +394,12 @@ namespace AuthHive.Auth.Organization.Handlers
                 await EnsureDefaultSettingsAsync(args.OrganizationId, args.ResetCategory);
 
                 // 5. 사용자에게 초기화 알림
-                await NotifyUsersAboutSettingsResetAsync(args.OrganizationId, args.ResetCategory);
-
+                await NotifyUsersAboutSettingsResetAsync(
+                    args.OrganizationId,
+                    args.SettingsResetCount,      // <-- FIXED: Added the count of reset settings
+                    args.ResetCategory,
+                    args.ResetByConnectedId       // <-- FIXED: Added the user who triggered the event
+                );
                 _logger.LogWarning("Successfully processed settings reset for Organization {OrganizationId}",
                     args.OrganizationId);
             }
@@ -467,19 +483,17 @@ namespace AuthHive.Auth.Organization.Handlers
             return criticalKeys.Any(k => settingKey.StartsWith(k, StringComparison.OrdinalIgnoreCase));
         }
 
-        private async Task NotifyCriticalSettingsChangeAsync(Guid organizationId, List<SettingChange> criticalChanges)
+        private async Task NotifyCriticalSettingsChangeAsync(Guid organizationId, List<SettingChange> criticalChanges, Guid modifiedBy)
         {
             // 중요 설정 변경 알림 발송
-            await _eventBus.PublishAsync(new CriticalSettingsChangedNotification
-            {
-                OrganizationId = organizationId,
-                Changes = criticalChanges
-            });
+            // ✅ 수정된 부분: 불필요하고 오류를 유발하는 객체 초기화 블록 {...}을 제거했습니다.
+            // 모든 값은 생성자를 통해 올바르게 전달됩니다.
+            var notification = new CriticalSettingsChangedNotification(organizationId, criticalChanges, modifiedBy);
+            await _eventBus.PublishAsync(notification);
 
             _logger.LogWarning("Critical settings changed for Organization {OrganizationId}: {Settings}",
                 organizationId, string.Join(", ", criticalChanges.Select(c => c.Key)));
         }
-
         private async Task InvalidateCdnCacheAsync(string logoUrl)
         {
             // CDN 캐시 무효화 로직
@@ -494,10 +508,10 @@ namespace AuthHive.Auth.Organization.Handlers
             // 계층 구조에서 하위 조직이 있는지 확인
             var org = await _organizationRepository.GetByIdAsync(organizationId);
             if (org == null) return false;
-            
+
             // 하위 조직이 있는지 확인 (ParentOrganizationId로 판단)
             var hasChildren = await _organizationRepository.HasChildrenAsync(organizationId);
-            
+
             // 정책 상속 모드를 확인하여 브랜딩 전파 여부 결정
             return hasChildren && org.PolicyInheritanceMode == PolicyInheritanceMode.Cascade;
         }
@@ -526,30 +540,36 @@ namespace AuthHive.Auth.Organization.Handlers
             return sessionInvalidatingPolicies.Contains(policyType, StringComparer.OrdinalIgnoreCase);
         }
 
-        private async Task InvalidateAllUserSessionsAsync(Guid organizationId)
+        private async Task InvalidateAllUserSessionsAsync(Guid organizationId, Guid triggeredBy)
         {
             _logger.LogWarning("Invalidating all user sessions for Organization {OrganizationId}", organizationId);
-            // 세션 무효화 로직 구현
-            await _eventBus.PublishAsync(new InvalidateOrganizationSessionsCommand
-            {
-                OrganizationId = organizationId,
-                Reason = "Security policy change"
-            });
+
+            // ✅ FIXED: Use the new constructor for the command.
+            var command = new InvalidateOrganizationSessionsCommand(
+                organizationId,
+                "Security policy change",
+                triggeredBy
+            );
+            await _eventBus.PublishAsync(command);
         }
 
+
         private async Task NotifyUsersAboutSecurityPolicyChangeAsync(
-            Guid organizationId,
-            string policyType,
-            Dictionary<string, object> newPolicy)
+             Guid organizationId,
+             string policyType,
+             Dictionary<string, object> newPolicy,
+             bool requiresUserAction,
+             Guid triggeredBy)
         {
-            // 사용자 알림 발송
-            await _eventBus.PublishAsync(new SecurityPolicyChangeNotification
-            {
-                OrganizationId = organizationId,
-                PolicyType = policyType,
-                NewPolicy = newPolicy,
-                RequiresUserAction = true
-            });
+            // ✅ FIXED: Use the new constructor for the notification.
+            var notification = new SecurityPolicyChangeNotification(
+                organizationId,
+                policyType,
+                newPolicy,
+                requiresUserAction,
+                triggeredBy
+            );
+            await _eventBus.PublishAsync(notification);
         }
 
         private async Task ValidateComplianceAsync(
@@ -580,14 +600,18 @@ namespace AuthHive.Auth.Organization.Handlers
             await Task.CompletedTask;
         }
 
-        private async Task NotifyServicesAboutSettingsImportAsync(Guid organizationId)
+        private async Task NotifyServicesAboutSettingsImportAsync(Guid organizationId, int importedCount, int skippedCount, Guid triggeredBy)
         {
-            // 관련 서비스에 설정 가져오기 알림
-            await _eventBus.PublishAsync(new SettingsImportedNotification
-            {
-                OrganizationId = organizationId
-            });
+            // ✅ FIXED: Use the new constructor for the notification.
+            var notification = new SettingsImportedNotification(
+                organizationId,
+                importedCount,
+                skippedCount,
+                triggeredBy
+            );
+            await _eventBus.PublishAsync(notification);
         }
+
 
         private async Task StoreBackupDataAsync(
             Guid organizationId,
@@ -609,79 +633,22 @@ namespace AuthHive.Auth.Organization.Handlers
             // 기본 설정 적용 로직
             await Task.CompletedTask;
         }
-
-        private async Task NotifyUsersAboutSettingsResetAsync(Guid organizationId, string? category)
+        private async Task NotifyUsersAboutSettingsResetAsync(Guid organizationId, int resetCount, string? category, Guid triggeredBy)
         {
-            // 설정 초기화 사용자 알림
-            await _eventBus.PublishAsync(new SettingsResetNotification
-            {
-                OrganizationId = organizationId,
-                Category = category
-            });
+            // ✅ FIXED: Use the new constructor for the notification.
+            var notification = new SettingsResetNotification(
+                organizationId,
+                resetCount,
+                category,
+                triggeredBy
+            );
+            await _eventBus.PublishAsync(notification);
         }
+
 
         #endregion
     }
 
-    #region Domain Event Classes
-
-    /// <summary>
-    /// 중요 설정 변경 알림 이벤트
-    /// </summary>
-    internal class CriticalSettingsChangedNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public List<SettingChange> Changes { get; set; } = new();
-    }
-
-    /// <summary>
-    /// 조직 세션 무효화 명령 이벤트
-    /// </summary>
-    internal class InvalidateOrganizationSessionsCommand : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public string Reason { get; set; } = string.Empty;
-    }
-
-    /// <summary>
-    /// 보안 정책 변경 알림 이벤트
-    /// </summary>
-    internal class SecurityPolicyChangeNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public string PolicyType { get; set; } = string.Empty;
-        public Dictionary<string, object> NewPolicy { get; set; } = new();
-        public bool RequiresUserAction { get; set; }
-    }
-
-    /// <summary>
-    /// 설정 가져오기 완료 알림 이벤트
-    /// </summary>
-    internal class SettingsImportedNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-    }
-
-    /// <summary>
-    /// 설정 초기화 알림 이벤트
-    /// </summary>
-    internal class SettingsResetNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid OrganizationId { get; set; }
-        public string? Category { get; set; }
-    }
-
-    #endregion
 
     #region Extension Methods
 

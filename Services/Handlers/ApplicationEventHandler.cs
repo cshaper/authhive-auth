@@ -915,6 +915,7 @@ namespace AuthHive.Auth.Handlers
     internal class ApplicationDeactivatedNotification : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public DateTime DeactivatedAt { get; set; }
@@ -923,6 +924,7 @@ namespace AuthHive.Auth.Handlers
     internal class ApiQuotaExceededEvent : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public string QuotaType { get; set; } = string.Empty;
@@ -932,6 +934,7 @@ namespace AuthHive.Auth.Handlers
     internal class StorageCleanupSuggestionEvent : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public decimal CurrentUsageGB { get; set; }
@@ -941,6 +944,7 @@ namespace AuthHive.Auth.Handlers
     internal class UsageResetNotification : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; } 
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public string ResetType { get; set; } = string.Empty;
@@ -950,6 +954,7 @@ namespace AuthHive.Auth.Handlers
     internal class ResourceQuotaReducedWarning : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public string ResourceType { get; set; } = string.Empty;
@@ -959,6 +964,7 @@ namespace AuthHive.Auth.Handlers
     internal class UsageWarningNotification : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public long CurrentUsage { get; set; }
@@ -970,6 +976,7 @@ namespace AuthHive.Auth.Handlers
     internal class InsufficientPointsAlert : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public Guid ConnectedId { get; set; }
@@ -991,6 +998,7 @@ namespace AuthHive.Auth.Handlers
     internal class ApplicationSuspendedNotification : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public DateTime SuspendedAt { get; set; }
@@ -1000,6 +1008,7 @@ namespace AuthHive.Auth.Handlers
     internal class ApplicationActivatedNotification : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public DateTime ActivatedAt { get; set; }

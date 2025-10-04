@@ -416,7 +416,7 @@ namespace AuthHive.Auth.Services.Organization
                {
                    Id = created.Id,
                    Name = created.Name,
-                   OrganizationCode = created.OrganizationKey,
+                   OrganizationId = created.OrganizationKey,
                    IsSuccess = true,
                    Message = "Organization created successfully",
                    CreatedAt = created.CreatedAt,
