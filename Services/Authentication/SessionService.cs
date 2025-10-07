@@ -361,7 +361,7 @@ namespace AuthHive.Auth.Services.Session
                     SessionType = request.SessionType,
                     Level = request.Level,
                     Status = request.InitialStatus,
-                    IPAddress = request.IPAddress,
+                    IpAddress = request.IpAddress,
                     UserAgent = request.UserAgent,
                     ExpiresAt = request.ExpiresAt,
                     LastActivityAt = DateTime.UtcNow,
@@ -390,7 +390,7 @@ namespace AuthHive.Auth.Services.Session
                     Id = Guid.NewGuid(),
                     SessionId = session.Id,
                     ActivityType = SessionActivityType.Login, // Created가 없으므로 Login 사용
-                    Details = $"Session created from IP: {request.IPAddress}",
+                    Details = $"Session created from IP: {request.IpAddress}",
                     OccurredAt = DateTime.UtcNow
                 };
                 await _activityLogRepository.AddAsync(activityLog);
@@ -407,7 +407,7 @@ namespace AuthHive.Auth.Services.Session
                     SessionType = session.SessionType,
                     Level = session.Level,
                     Status = session.Status,
-                    IPAddress = session.IPAddress,
+                    IpAddress = session.IpAddress,
                     UserAgent = session.UserAgent,
                     DeviceInfo = request.DeviceInfo != null ? request.DeviceInfo.ToString() : null, // object를 string으로 변환
                     ExpiresAt = session.ExpiresAt,
@@ -632,9 +632,9 @@ namespace AuthHive.Auth.Services.Session
                 }
 
                 // IP 주소 필터
-                if (!string.IsNullOrWhiteSpace(request.IPAddress))
+                if (!string.IsNullOrWhiteSpace(request.IpAddress))
                 {
-                    query = query.Where(s => s.IPAddress != null && s.IPAddress.Contains(request.IPAddress));
+                    query = query.Where(s => s.IpAddress != null && s.IpAddress.Contains(request.IpAddress));
                 }
 
                 // 디바이스 타입 필터
@@ -830,7 +830,7 @@ namespace AuthHive.Auth.Services.Session
                     OrganizationName = s.Organization?.Name ?? string.Empty,
                     SessionType = s.SessionType,
                     Status = s.Status,
-                    IPAddress = s.IPAddress,
+                    IpAddress = s.IpAddress,
                     Browser = s.Browser,
                     OperatingSystem = s.OperatingSystem,
                     Location = s.Location,
@@ -918,7 +918,7 @@ namespace AuthHive.Auth.Services.Session
                 OrganizationName = session.Organization?.Name ?? string.Empty,
                 SessionType = session.SessionType,
                 Status = session.Status,
-                IPAddress = session.IPAddress,
+                IpAddress = session.IpAddress,
                 Browser = session.Browser,
                 OperatingSystem = session.OperatingSystem,
                 Location = session.Location,
@@ -1215,7 +1215,7 @@ namespace AuthHive.Auth.Services.Session
                     ApplicationId = session.ApplicationId,
                     ActivityType = activityType,
                     Details = details ?? $"Activity: {activityType}",
-                    IPAddress = session.IPAddress,
+                    IpAddress = session.IpAddress,
                     UserAgent = session.UserAgent,
                     OccurredAt = now,
                     CreatedAt = now
@@ -1490,7 +1490,7 @@ namespace AuthHive.Auth.Services.Session
                     OrganizationName = s.Organization?.Name ?? string.Empty,
                     SessionType = s.SessionType,
                     Status = s.Status,
-                    IPAddress = s.IPAddress,
+                    IpAddress = s.IpAddress,
                     Browser = s.Browser,
                     OperatingSystem = s.OperatingSystem,
                     Location = s.Location,
@@ -1736,7 +1736,7 @@ namespace AuthHive.Auth.Services.Session
                 Status = session.Status,
                 Client = new ClientInfo
                 {
-                    IPAddress = session.IPAddress,
+                    IpAddress = session.IpAddress,
                     UserAgent = session.UserAgent,
                     DeviceInfo = session.DeviceInfo,
                     OperatingSystem = session.OperatingSystem,

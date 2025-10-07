@@ -11,7 +11,7 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 
-namespace AuthHive.Auth.Services.Auth
+namespace AuthHive.Auth.Services.Authentication
 {
     /// <summary>
     /// ConnectedId 컨텍스트 통계 서비스 구현체

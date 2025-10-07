@@ -29,6 +29,8 @@ using AuthHive.Core.Interfaces.Infra.UserExperience;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using AuthHive.Core.Models.External;
 using AuthHive.Core.Models.Business.Events;
+using AuthHive.Core.Models.Auth.Authentication.Common;
+using AuthHive.Core.Models.Infra.Security;
 
 namespace AuthHive.Auth.Validator
 {
@@ -306,28 +308,31 @@ namespace AuthHive.Auth.Validator
                     }
 
                     var riskAssessment = await AssessPermissionRiskAsync(request.InitialPermissionIds);
-                    if (riskAssessment.IsSuccess && riskAssessment.Data?.Level == RiskLevel.Critical)
+                    if (riskAssessment.IsSuccess && riskAssessment.Data?.RiskLevel == "Critical")
                     {
                         _logger.LogWarning(
                             "Critical risk permissions detected in new role: {Risks}",
-                            string.Join(", ", riskAssessment.Data.Risks));
+                            string.Join(", ", riskAssessment.Data.RiskFactors.Select(r => r.Description)));
 
                         await _eventBus.PublishAsync(new DangerousPermissionCombinationEvent(Guid.Empty) // RoleId is not known yet
                         {
-                           // OrganizationId is inherited from BaseEvent's aggregateId
+                            // OrganizationId is inherited from BaseEvent's aggregateId
                             PermissionIds = request.InitialPermissionIds,
                             RiskLevel = RiskLevel.Critical,
-                            RiskDetails = riskAssessment.Data.Risks,
+                            // FIX: Use .Select() to create a new list of strings from the descriptions 
+                            // of each RiskFactor object. Using .ToList() ensures the result is a List<string>.
+                            RiskDetails = riskAssessment.Data.RiskFactors.Select(rf => rf.Description).ToList(),
                             AssignedBy = createdByConnectedId
                         });
 
                         if (request.OrganizationId == CommonConstants.SystemConstants.AUTHHIVE_ORGANIZATION_ID)
                         {
+
                             await SendCriticalSecurityAlertAsync(
                                 request.OrganizationId,
                                 createdByConnectedId,
                                 "Critical permission combination in new role",
-                                riskAssessment.Data.Risks);
+                                riskAssessment.Data.RiskFactors.Select(rf => rf.Description).ToList());
                         }
                     }
                 }
@@ -833,20 +838,27 @@ namespace AuthHive.Auth.Validator
                 }
 
                 var riskAssessment = await AssessPermissionRiskAsync(permissionIds);
-                if (riskAssessment.IsSuccess && riskAssessment.Data?.Level >= RiskLevel.High)
+                if (riskAssessment.IsSuccess &&
+                    (riskAssessment.Data?.RiskLevel == "High" || riskAssessment.Data?.RiskLevel == "Critical"))
                 {
+                    // FIX: Use .RiskFactors and LINQ's .Select() to get the description from each object
                     _logger.LogWarning(
                         "High risk permission combination for role {RoleId}: {Risks}",
-                        roleId, string.Join(", ", riskAssessment.Data.Risks));
-
-                    if (riskAssessment.Data.Level == RiskLevel.Critical)
+                        roleId,
+                        string.Join(", ", riskAssessment.Data.RiskFactors.Select(rf => rf.Description)));
+                    // FIX: The condition now checks the 'RiskLevel' string property.
+                    if (riskAssessment.Data.RiskLevel == "Critical")
                     {
                         await _eventBus.PublishAsync(new DangerousPermissionCombinationEvent(roleId)
                         {
-                           // OrganizationId is inherited
                             PermissionIds = permissionIds,
+
+                            // FIX: The enum is replaced with a simple string assignment.
                             RiskLevel = RiskLevel.Critical,
-                            RiskDetails = riskAssessment.Data.Risks,
+
+                            // FIX: Use .Select() to create a list of strings from the RiskFactors.
+                            RiskDetails = riskAssessment.Data.RiskFactors.Select(rf => rf.Description).ToList(),
+
                             AssignedBy = assignedByConnectedId
                         });
 
@@ -856,9 +868,12 @@ namespace AuthHive.Auth.Validator
                                 role.OrganizationId,
                                 assignedByConnectedId,
                                 "Critical permission combination detected",
-                                riskAssessment.Data.Risks);
+
+                                // FIX: Apply the same .Select() logic here.
+                                riskAssessment.Data.RiskFactors.Select(rf => rf.Description).ToList());
                         }
                     }
+
                 }
 
                 await _auditService.LogActionAsync(
@@ -872,7 +887,8 @@ namespace AuthHive.Auth.Validator
                     {
                         RoleId = roleId,
                         PermissionCount = permissionIds.Count,
-                        RiskLevel = riskAssessment.Data?.Level.ToString()
+
+                        RiskLevel = riskAssessment.Data?.RiskLevel
                     }));
 
                 await _unitOfWork.CommitTransactionAsync();
@@ -895,61 +911,73 @@ namespace AuthHive.Auth.Validator
         {
             try
             {
+                // FIX: Initialize the new RiskAssessment model
                 var assessment = new RiskAssessment
                 {
-                    Level = RiskLevel.Low,
-                    Risks = new List<string>(),
-                    Recommendations = new List<string>(),
-                    RiskScores = new Dictionary<string, int>()
+                    AssessmentId = Guid.NewGuid(),
+                    RiskLevel = "Low",
+                    RiskFactors = new List<RiskFactor>(),
+                    RecommendedActions = new List<string>(),
+                    RiskScore = 0.0,
+                    AssessedAt = _dateTimeProvider.UtcNow
                 };
 
-                var permissions = await _permissionRepository.FindAsync(p => permissionIds.Contains(p.Id));
-                var permissionScopes = permissions.Select(p => p.PermissionScope).ToHashSet();
+                if (permissionIds == null || !permissionIds.Any())
+                    return ServiceResult<RiskAssessment>.Success(assessment);
 
+                var rolePermissions = await _permissionRepository.FindAsync(rp => permissionIds.Contains(rp.PermissionId));
+                var permissions = rolePermissions.Select(rp => rp.Permission).Where(p => p != null).ToList();
+                var permissionScopes = permissions.Select(p => p.Scope).ToHashSet();
+                double totalScore = 0;
 
-                foreach (var combo in _dangerousPermissionCombos)
+                // Check for dangerous combinations
+                var dangerousCombos = new List<(string P1, string P2, string Desc, double Score)>
                 {
-                    if (permissionScopes.Contains(combo.Perm1) && permissionScopes.Contains(combo.Perm2))
+                    ("DELETE_ALL", "BYPASS_AUDIT", "Can delete data without an audit trail", 0.9),
+                    ("MANAGE_BILLING", "EXPORT_DATA", "Can export sensitive financial data", 0.8)
+                };
+
+                foreach (var combo in dangerousCombos)
+                {
+                    if (permissionScopes.Contains(combo.P1) && permissionScopes.Contains(combo.P2))
                     {
-                        assessment.Risks.Add(combo.Risk);
-                        assessment.RiskScores[$"{combo.Perm1}+{combo.Perm2}"] = 10;
-                        assessment.Level = RiskLevel.High;
+                        assessment.RiskFactors.Add(new RiskFactor { Description = combo.Desc, Score = combo.Score });
+                        totalScore += combo.Score;
                     }
                 }
 
+                // Check for broad permissions
                 if (permissionScopes.Any(p => p.EndsWith("_ALL")))
                 {
-                    assessment.Risks.Add("Broad access permissions detected");
-                    assessment.RiskScores["BROAD_ACCESS"] = 7;
-                    if (assessment.Level < RiskLevel.Medium)
-                        assessment.Level = RiskLevel.Medium;
+                    assessment.RiskFactors.Add(new RiskFactor { Description = "Broad data access permissions detected", Score = 0.5 });
+                    totalScore += 0.5;
                 }
 
+                // Check for system-level permissions
                 if (permissionScopes.Any(p => p.StartsWith("SYSTEM_")))
                 {
-                    assessment.Risks.Add("System-level permissions detected");
-                    assessment.RiskScores["SYSTEM_ACCESS"] = 9;
-                    assessment.Level = RiskLevel.Critical;
+                    assessment.RiskFactors.Add(new RiskFactor { Description = "System-level permissions detected", Score = 0.95 });
+                    totalScore += 0.95;
                 }
 
-                switch (assessment.Level)
+                // Normalize and set final score and level
+                assessment.RiskScore = Math.Min(totalScore, 1.0); // Cap score at 1.0
+
+                if (assessment.RiskScore >= 0.9)
                 {
-                    case RiskLevel.Critical:
-                        assessment.Recommendations.Add("Requires approval from organization owner");
-                        assessment.Recommendations.Add("Enable audit logging for all actions");
-                        assessment.Recommendations.Add("Consider time-based access restrictions");
-                        break;
-                    case RiskLevel.High:
-                        assessment.Recommendations.Add("Review permission necessity");
-                        assessment.Recommendations.Add("Enable activity monitoring");
-                        break;
-                    case RiskLevel.Medium:
-                        assessment.Recommendations.Add("Document permission usage");
-                        assessment.Recommendations.Add("Regular permission audits recommended");
-                        break;
-                    default:
-                        assessment.Recommendations.Add("Standard monitoring sufficient");
-                        break;
+                    assessment.RiskLevel = "Critical";
+                    assessment.RecommendedActions.Add("Requires secondary approval from an organization owner.");
+                    assessment.IsBlocked = true;
+                }
+                else if (assessment.RiskScore >= 0.7)
+                {
+                    assessment.RiskLevel = "High";
+                    assessment.RecommendedActions.Add("Review permission necessity and enable activity monitoring.");
+                }
+                else if (assessment.RiskScore >= 0.4)
+                {
+                    assessment.RiskLevel = "Medium";
+                    assessment.RecommendedActions.Add("Regular permission audits are recommended for this role.");
                 }
 
                 return ServiceResult<RiskAssessment>.Success(assessment);
@@ -957,12 +985,9 @@ namespace AuthHive.Auth.Validator
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error assessing permission risk");
-                return ServiceResult<RiskAssessment>.Failure(
-                    "Failed to assess permission risk",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<RiskAssessment>.Failure("Failed to assess permission risk");
             }
         }
-
         #endregion
 
         #region Role Hierarchy Validation
@@ -1435,7 +1460,7 @@ namespace AuthHive.Auth.Validator
                 {
                     await _eventBus.PublishAsync(new ComplianceRoleChangeEvent(roleId)
                     {
-                       // OrganizationId is inherited
+                        // OrganizationId is inherited
                         ComplianceStandard = $"{planKey}_PLAN_POLICY",
                         ChangeType = "PolicyViolation",
                         ChangeReason = string.Join("; ", errors),
@@ -1828,7 +1853,7 @@ namespace AuthHive.Auth.Validator
                     conflicts.Add($"Cannot assign mutually exclusive role '{newRole.Name}' because user already has exclusive role(s): {conflictDetails}");
                 }
             }
-            
+
             return conflicts;
         }
 

@@ -595,7 +595,7 @@ namespace AuthHive.Auth.Services.Organization
                     result.AnonymizedFields = new List<string>
                     {
                         "Email", "PhoneNumber", "FirstName", "LastName",
-                        "Address", "DateOfBirth", "IPAddress"
+                        "Address", "DateOfBirth", "IpAddress"
                     };
                     result.IsSuccess = true;
                     result.CompletedAt = DateTime.UtcNow;

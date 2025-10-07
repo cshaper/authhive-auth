@@ -177,7 +177,7 @@ namespace AuthHive.Auth.Handlers.User
 
                 var loginMetadata = new Dictionary<string, object>
                 {
-                    ["ip"] = @event.IPAddress ?? "unknown",
+                    ["ip"] = @event.IpAddress ?? "unknown",
                     ["method"] = @event.AuthenticationMethod ?? "standard",
                     ["2fa"] = @event.TwoFactorUsed,
                     ["first_login"] = @event.IsFirstLogin,

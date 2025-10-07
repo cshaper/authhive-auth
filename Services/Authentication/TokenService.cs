@@ -18,6 +18,9 @@ using System;
 using System.Threading.Tasks;
 using System.Linq;
 using ConnectedIdEntity = AuthHive.Core.Entities.Auth.ConnectedId;
+using AuthHive.Auth.Providers;
+using AuthHive.Core.Helpers.Security;
+using AuthHive.Core.Interfaces.Base;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -36,22 +39,29 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IOAuthClientRepository _clientRepository;
         private readonly ISessionRepository _sessionRepository;
         private readonly ILogger<TokenService> _logger;
+        
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly PasetoTokenProvider _pasetoTokenProvider;
 
         public TokenService(
             ITokenProvider tokenProvider,
             IAccessTokenRepository accessTokenRepository,
             IRefreshTokenRepository refreshTokenRepository,
+            PasetoTokenProvider pasetoTokenProvider,
             IConnectedIdRepository connectedIdRepository,
             IOAuthClientRepository clientRepository,
             ISessionRepository sessionRepository,
+            IUnitOfWork unitOfWork,
             ILogger<TokenService> logger)
         {
             _tokenProvider = tokenProvider;
             _accessTokenRepository = accessTokenRepository;
             _refreshTokenRepository = refreshTokenRepository;
+            _pasetoTokenProvider = pasetoTokenProvider;
             _connectedIdRepository = connectedIdRepository;
             _clientRepository = clientRepository;
             _sessionRepository = sessionRepository;
+            _unitOfWork = unitOfWork;
             _logger = logger;
         }
 
@@ -153,7 +163,7 @@ namespace AuthHive.Auth.Services.Authentication
                     ExpiresAt = accessTokenResult.Data.ExpiresAt,
                     IsActive = true,
                     GrantType = OAuthGrantType.ResourceOwnerPassword,
-                    IPAddress = sessionDto.IPAddress ?? string.Empty,
+                    IpAddress = sessionDto.IpAddress ?? string.Empty,
                     UserAgent = sessionDto.UserAgent ?? string.Empty
                 };
 
@@ -172,7 +182,7 @@ namespace AuthHive.Auth.Services.Authentication
                     IsActive = true,
                     Scopes = "[\"read\",\"write\"]",
                     SessionId = sessionDto.Id,
-                    IPAddress = sessionDto.IPAddress ?? string.Empty,
+                    IpAddress = sessionDto.IpAddress ?? string.Empty,
                     UserAgent = sessionDto.UserAgent ?? string.Empty
                 };
 
@@ -223,7 +233,7 @@ namespace AuthHive.Auth.Services.Authentication
                     UserId = session.UserId,
                     ConnectedId = session.ConnectedId,
                     OrganizationId = session.OrganizationId,
-                    IPAddress = session.IPAddress,
+                    IpAddress = session.IpAddress,
                     UserAgent = session.UserAgent,
                     ExpiresAt = session.ExpiresAt,
                     Status = session.Status,
@@ -354,6 +364,74 @@ namespace AuthHive.Auth.Services.Authentication
                 return ServiceResult<int>.Failure($"Failed to revoke tokens: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// 새로운 세션 ID를 기반으로 액세스 토큰과 리프레시 토큰을 생성합니다.
+        /// 인증 오케스트레이션 서비스에서 사용되는 핵심 메서드입니다.
+        /// </summary>
+        /// <summary>
+        /// 새로운 세션 ID를 기반으로 액세스 토큰과 리프레시 토큰을 생성합니다.
+        /// 인증 오케스트레이션 서비스에서 사용되는 핵심 메서드입니다.
+        /// </summary>
+        public async Task<ServiceResult<TokenIssueResponse>> GenerateTokensAsync(Guid sessionId)
+        {
+            try
+            {
+                var session = await _sessionRepository.GetByIdAsync(sessionId);
+                // FIX 1: Use the 'Status' enum to check if the session is active.
+                if (session == null || session.Status != SessionStatus.Active)
+                {
+                    return ServiceResult<TokenIssueResponse>.Failure("Session is not valid or has expired.", "INVALID_SESSION");
+                }
+
+                // A session for a human user MUST have a UserId and ConnectedId.
+                if (session.UserId == Guid.Empty || !session.ConnectedId.HasValue)
+                {
+                    return ServiceResult<TokenIssueResponse>.Failure("Session is missing required user context.", "INVALID_CONTEXT");
+                }
+
+                // FIX 2: Await the result from the provider and access its properties.
+                var accessTokenResult = await _tokenProvider.GenerateAccessTokenAsync(session.UserId, session.ConnectedId.Value);
+                if (!accessTokenResult.IsSuccess || accessTokenResult.Data == null)
+                    return ServiceResult<TokenIssueResponse>.Failure(accessTokenResult.ErrorMessage ?? "Access token generation failed.");
+
+                var refreshTokenResult = await _tokenProvider.GenerateRefreshTokenAsync(session.UserId);
+                if (!refreshTokenResult.IsSuccess || string.IsNullOrEmpty(refreshTokenResult.Data))
+                    return ServiceResult<TokenIssueResponse>.Failure(refreshTokenResult.ErrorMessage ?? "Refresh token generation failed.");
+
+                var refreshTokenValue = refreshTokenResult.Data;
+                var refreshTokenEntity = new RefreshToken
+                {
+                    SessionId = sessionId,
+                    ConnectedId = session.ConnectedId.Value,
+                    TokenValue = refreshTokenValue, // FIX 3: Use the correct 'TokenValue' property.
+                    TokenHash = HashHelper.ComputeSha256Hash(refreshTokenValue),
+                    ExpiresAt = DateTime.UtcNow.AddDays(30), // This should ideally be configurable
+                    IsActive = true
+                };
+
+                await _refreshTokenRepository.AddAsync(refreshTokenEntity);
+                await _unitOfWork.SaveChangesAsync();
+
+                _logger.LogInformation("Successfully generated new tokens for SessionId: {SessionId}", sessionId);
+
+                var response = new TokenIssueResponse
+                {
+                    AccessToken = accessTokenResult.Data.AccessToken,
+                    RefreshToken = refreshTokenEntity.TokenValue, // FIX 3: Use 'TokenValue' here as well.
+                    ExpiresAt = accessTokenResult.Data.ExpiresAt
+                };
+
+                return ServiceResult<TokenIssueResponse>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to generate tokens for SessionId: {SessionId}", sessionId);
+                return ServiceResult<TokenIssueResponse>.Failure("An internal error occurred while issuing tokens.", "TOKEN_GENERATION_FAILED");
+            }
+        }
+
+
         #region Private Helper Methods
 
         /// <summary>

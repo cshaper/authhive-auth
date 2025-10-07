@@ -552,7 +552,7 @@ namespace AuthHive.Auth.Providers
                 ApplicationId = request.ApplicationId,
                 SessionType = SessionType.Web,
                 Level = organizationId.HasValue ? SessionLevel.Organization : SessionLevel.Global,
-                IPAddress = request.IpAddress,
+                IpAddress = request.IpAddress,
                 UserAgent = request.UserAgent,
                 DeviceInfo = request.DeviceInfo,
                 Browser = request.DeviceInfo?.Browser,

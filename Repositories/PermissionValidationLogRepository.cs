@@ -678,7 +678,7 @@ namespace AuthHive.Auth.Repositories
             var startDate = DateTime.UtcNow.AddDays(-period);
 
             var failures = await Query()
-                .Where(log => log.IPAddress == ipAddress &&
+                .Where(log => log.IpAddress == ipAddress &&
                              log.Timestamp >= startDate &&
                              !log.IsAllowed)
                 .ToListAsync();

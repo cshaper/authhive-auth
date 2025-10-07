@@ -409,7 +409,7 @@ namespace AuthHive.Auth.Providers.Authentication
                     ConnectedId = connectedIdValue,
                     OrganizationId = organizationId,
                     SessionType = SessionType.Web,
-                    IPAddress = request.IpAddress,
+                    IpAddress = request.IpAddress,
                     UserAgent = request.UserAgent,
                     DeviceInfo = request.DeviceInfo?.DeviceId,
                     OperatingSystem = request.DeviceInfo?.OperatingSystem,

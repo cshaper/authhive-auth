@@ -114,7 +114,15 @@ namespace AuthHive.Auth.Validators
                 }
 
                 // User existence check
-                var user = await SafeGetUserAsync(entity.UserId);
+                User? user = null;
+
+                // FIX: UserId가 null이 아닌 경우에만 사용자 정보를 조회합니다.
+                if (entity.UserId.HasValue)
+                {
+                    user = await SafeGetUserAsync(entity.UserId.Value);
+                }
+
+
                 if (user == null || user.IsDeleted)
                 {
                     result.AddError("UserId", "Invalid user", "INVALID_USER");
@@ -128,10 +136,17 @@ namespace AuthHive.Auth.Validators
                 }
 
                 // Duplicate membership validation
-                var existing = await SafeGetByUserAndOrganizationAsync(entity.UserId, entity.OrganizationId);
-                if (existing != null && !existing.IsDeleted)
+                // First, check if a UserId exists before trying to find a duplicate.
+                if (entity.UserId.HasValue)
                 {
-                    result.AddError("UserId", "User is already a member of this organization", "DUPLICATE_MEMBERSHIP");
+                    // If it exists, pass the definite value using .Value
+                    var existing = await SafeGetByUserAndOrganizationAsync(entity.UserId.Value, entity.OrganizationId);
+
+                    if (existing != null && !existing.IsDeleted)
+                    {
+                        // This block now only runs for human users
+                        result.AddError("UserId", "User is already an active member of this organization.", "ALREADY_MEMBER");
+                    }
                 }
 
                 // Plan-based member limit validation
@@ -271,132 +286,136 @@ namespace AuthHive.Auth.Validators
                         "MEMBER_LIMIT_EXCEEDED");
                 }
 
-                // User organization count limit validation
-                var userOrgs = await SafeGetByUserAsync(entity.UserId);
-                var userOrgCount = userOrgs.Count(o => !o.IsDeleted);
-                var maxOrganizations = GetMaxOrganizationsFromPlan(planKey);
-
-                if (maxOrganizations > 0 && userOrgCount >= maxOrganizations)
+                // Fix - Add null check
+                if (entity.UserId.HasValue)
                 {
-                    // Fire event for user organization limit
-                    await _eventBus.PublishAsync(new PlanLimitReachedEvent(
-                        entity.OrganizationId,
-                        planKey,
-                        PlanLimitType.MemberCount,
-                        memberCount,
-                        memberLimit
-                    ));
+                    var userOrgs = await SafeGetByUserAsync(entity.UserId.Value);
+                    var userOrgCount = userOrgs.Count(o => !o.IsDeleted);
+                    var maxOrganizations = GetMaxOrganizationsFromPlan(planKey);
 
-                    result.AddWarning($"User organization limit ({maxOrganizations}) reached");
-                }
-
-                // Check role limits based on membership type
-                if (entity.MembershipType >= MembershipType.Admin)
-                {
-                    var adminCount = userOrgs.Count(o =>
-                        !o.IsDeleted &&
-                        o.MembershipType >= MembershipType.Admin);
-
-                    // Basic plan has limited admin roles
-                    if (planKey == PricingConstants.SubscriptionPlans.BASIC_KEY && adminCount > 2)
+                    if (maxOrganizations > 0 && userOrgCount >= maxOrganizations)
                     {
-                        result.AddWarning("Basic plan supports limited admin roles");
-                    }
-                }
-
-                // Check role count limits for the organization using existing service method
-                var rolesSearchRequest = new SearchRolesRequest
-                {
-                    OrganizationId = entity.OrganizationId,
-                    PageSize = 1000  // Get count without loading all data
-                };
-
-                var rolesResult = await _roleService.GetRolesAsync(rolesSearchRequest);
-                if (rolesResult.IsSuccess && rolesResult.Data != null)
-                {
-                    var roleCount = rolesResult.Data.TotalCount;
-                    var roleLimit = PricingConstants.SubscriptionPlans.RoleLimits[planKey];
-
-                    if (roleLimit > 0 && roleCount >= roleLimit * 0.9) // 90% warning threshold
-                    {
-                        result.AddWarning($"Organization approaching role limit ({roleCount}/{roleLimit})");
-
-                        if (roleCount >= roleLimit)
-                        {
-                            await _eventBus.PublishAsync(new PlanLimitReachedEvent(
-                                entity.OrganizationId,
-                                planKey,
-                                PlanLimitType.MemberCount,
-                                memberCount,
-                                memberLimit
-                            ));
-                            result.AddError("RoleLimit",
-                                $"Organization role limit ({roleLimit}) exceeded",
-                                "ROLE_LIMIT_EXCEEDED");
-                        }
-                    }
-                }
-
-                // Check API rate limits for the organization
-                var currentApiRate = await GetCurrentApiRateForOrganization(entity.OrganizationId);
-                var apiRateLimit = PricingConstants.SubscriptionPlans.ApiRateLimits[planKey];
-
-                if (apiRateLimit > 0)
-                {
-                    if (currentApiRate >= apiRateLimit * 0.8) // 80% threshold warning
-                    {
-                        result.AddWarning($"Organization approaching API rate limit ({currentApiRate}/{apiRateLimit} requests per minute)");
-                    }
-
-                    if (currentApiRate >= apiRateLimit)
-                    {
+                        // Fire event for user organization limit
                         await _eventBus.PublishAsync(new PlanLimitReachedEvent(
-                         entity.OrganizationId,
-                         planKey,
-                         PlanLimitType.MemberCount,
-                         memberCount,
-                         memberLimit
-                     ));
+                            entity.OrganizationId,
+                            planKey,
+                            PlanLimitType.MemberCount,
+                            memberCount,
+                            memberLimit
+                        ));
 
-                        result.AddError("ApiRateLimit",
-                            $"API rate limit ({apiRateLimit} requests/minute) exceeded",
-                            "API_RATE_LIMIT_EXCEEDED");
+                        result.AddWarning($"User organization limit ({maxOrganizations}) reached");
                     }
-                }
 
-                // Validate storage limits if applicable
-                if (entity.OrganizationId != Guid.Empty)
-                {
-                    var storageUsedGB = await GetOrganizationStorageUsageGB(entity.OrganizationId);
-                    var storageLimitGB = PricingConstants.SubscriptionPlans.StorageLimits[planKey];
 
-                    if (storageLimitGB > 0)
+                    // Check role limits based on membership type
+                    if (entity.MembershipType >= MembershipType.Admin)
                     {
-                        var usagePercentage = (storageUsedGB * 100m / storageLimitGB);
+                        var adminCount = userOrgs.Count(o =>
+                            !o.IsDeleted &&
+                            o.MembershipType >= MembershipType.Admin);
 
-                        if (usagePercentage >= 90) // 90% threshold warning
+                        // Basic plan has limited admin roles
+                        if (planKey == PricingConstants.SubscriptionPlans.BASIC_KEY && adminCount > 2)
                         {
-                            result.AddWarning($"Organization storage usage at {usagePercentage:F1}% of limit");
+                            result.AddWarning("Basic plan supports limited admin roles");
+                        }
+                    }
+
+                    // Check role count limits for the organization using existing service method
+                    var rolesSearchRequest = new SearchRolesRequest
+                    {
+                        OrganizationId = entity.OrganizationId,
+                        PageSize = 1000  // Get count without loading all data
+                    };
+
+                    var rolesResult = await _roleService.GetRolesAsync(rolesSearchRequest);
+                    if (rolesResult.IsSuccess && rolesResult.Data != null)
+                    {
+                        var roleCount = rolesResult.Data.TotalCount;
+                        var roleLimit = PricingConstants.SubscriptionPlans.RoleLimits[planKey];
+
+                        if (roleLimit > 0 && roleCount >= roleLimit * 0.9) // 90% warning threshold
+                        {
+                            result.AddWarning($"Organization approaching role limit ({roleCount}/{roleLimit})");
+
+                            if (roleCount >= roleLimit)
+                            {
+                                await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                                    entity.OrganizationId,
+                                    planKey,
+                                    PlanLimitType.MemberCount,
+                                    memberCount,
+                                    memberLimit
+                                ));
+                                result.AddError("RoleLimit",
+                                    $"Organization role limit ({roleLimit}) exceeded",
+                                    "ROLE_LIMIT_EXCEEDED");
+                            }
+                        }
+                    }
+
+                    // Check API rate limits for the organization
+                    var currentApiRate = await GetCurrentApiRateForOrganization(entity.OrganizationId);
+                    var apiRateLimit = PricingConstants.SubscriptionPlans.ApiRateLimits[planKey];
+
+                    if (apiRateLimit > 0)
+                    {
+                        if (currentApiRate >= apiRateLimit * 0.8) // 80% threshold warning
+                        {
+                            result.AddWarning($"Organization approaching API rate limit ({currentApiRate}/{apiRateLimit} requests per minute)");
                         }
 
-                        if (storageUsedGB >= storageLimitGB)
+                        if (currentApiRate >= apiRateLimit)
                         {
                             await _eventBus.PublishAsync(new PlanLimitReachedEvent(
-                      entity.OrganizationId,
-                      planKey,
-                      PlanLimitType.MemberCount,
-                      memberCount,
-                      memberLimit
-                  ));
-                            result.AddError("StorageLimit",
-                                $"Storage limit ({storageLimitGB}GB) exceeded",
-                                "STORAGE_LIMIT_EXCEEDED");
+                             entity.OrganizationId,
+                             planKey,
+                             PlanLimitType.MemberCount,
+                             memberCount,
+                             memberLimit
+                         ));
+
+                            result.AddError("ApiRateLimit",
+                                $"API rate limit ({apiRateLimit} requests/minute) exceeded",
+                                "API_RATE_LIMIT_EXCEEDED");
                         }
                     }
-                }
 
-                // Log validation for audit
-                await LogValidationAsync("BUSINESS_RULES", entity, result);
+                    // Validate storage limits if applicable
+                    if (entity.OrganizationId != Guid.Empty)
+                    {
+                        var storageUsedGB = await GetOrganizationStorageUsageGB(entity.OrganizationId);
+                        var storageLimitGB = PricingConstants.SubscriptionPlans.StorageLimits[planKey];
+
+                        if (storageLimitGB > 0)
+                        {
+                            var usagePercentage = (storageUsedGB * 100m / storageLimitGB);
+
+                            if (usagePercentage >= 90) // 90% threshold warning
+                            {
+                                result.AddWarning($"Organization storage usage at {usagePercentage:F1}% of limit");
+                            }
+
+                            if (storageUsedGB >= storageLimitGB)
+                            {
+                                await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                          entity.OrganizationId,
+                          planKey,
+                          PlanLimitType.MemberCount,
+                          memberCount,
+                          memberLimit
+                      ));
+                                result.AddError("StorageLimit",
+                                    $"Storage limit ({storageLimitGB}GB) exceeded",
+                                    "STORAGE_LIMIT_EXCEEDED");
+                            }
+                        }
+                    }
+
+                    // Log validation for audit
+                    await LogValidationAsync("BUSINESS_RULES", entity, result);
+                }
             }
             catch (Exception ex)
             {
@@ -693,52 +712,6 @@ namespace AuthHive.Auth.Validators
             return ServiceResult.Success("Invitation accept allowed");
         }
 
-        public async Task<ServiceResult> ValidateInvitationCancelAsync(
-            Guid invitationId,
-            Guid cancelledByConnectedId)
-        {
-            var canceller = await _connectedIdRepository.GetByIdAsync(cancelledByConnectedId);
-            if (canceller == null || canceller.MembershipType < MembershipType.Admin)
-            {
-                return ServiceResult.Failure("No cancel permission", "NO_CANCEL_PERMISSION");
-            }
-
-            return ServiceResult.Success("Invitation cancel allowed");
-        }
-
-        public async Task<ServiceResult> ValidateStatusTransitionAsync(
-            Guid connectedId,
-            ConnectedIdStatus currentStatus,
-            ConnectedIdStatus newStatus,
-            Guid changedByConnectedId)
-        {
-            var validTransitions = new Dictionary<ConnectedIdStatus, List<ConnectedIdStatus>>
-            {
-                [ConnectedIdStatus.Pending] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Rejected },
-                [ConnectedIdStatus.Active] = new() { ConnectedIdStatus.Inactive, ConnectedIdStatus.Suspended, ConnectedIdStatus.Deleted },
-                [ConnectedIdStatus.Inactive] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Deleted },
-                [ConnectedIdStatus.Suspended] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Deleted },
-                [ConnectedIdStatus.Rejected] = new() { ConnectedIdStatus.Deleted },
-                [ConnectedIdStatus.Deleted] = new()
-            };
-
-            if (!validTransitions.ContainsKey(currentStatus) ||
-                !validTransitions[currentStatus].Contains(newStatus))
-            {
-                return ServiceResult.Failure(
-                    $"Cannot transition from '{currentStatus}' to '{newStatus}'",
-                    "INVALID_TRANSITION");
-            }
-
-            var changer = await _connectedIdRepository.GetByIdAsync(changedByConnectedId);
-            if (changer == null || changer.MembershipType < MembershipType.Admin)
-            {
-                return ServiceResult.Failure("Status change permission denied", "INSUFFICIENT_PERMISSION");
-            }
-
-            return ServiceResult.Success("Status transition allowed");
-        }
-
         public async Task<ServiceResult> ValidateActivationAsync(Guid connectedId)
         {
             var entity = await _connectedIdRepository.GetByIdAsync(connectedId);
@@ -752,7 +725,13 @@ namespace AuthHive.Auth.Validators
                 return ServiceResult.Failure("Cannot activate suspended status", "SUSPENDED");
             }
 
-            var user = await SafeGetUserAsync(entity.UserId);
+            // FIX: UserId가 null이 아닌 경우에만 사용자 정보를 조회
+            if (!entity.UserId.HasValue)
+            {
+                return ServiceResult.Failure("User ID is missing", "INVALID_USER_ID");
+            }
+
+            var user = await SafeGetUserAsync(entity.UserId.Value);
             if (user == null || user.IsDeleted || user.Status != UserStatus.Active)
             {
                 return ServiceResult.Failure("User is inactive", "USER_INACTIVE");
@@ -1117,6 +1096,7 @@ namespace AuthHive.Auth.Validators
             }
         }
 
+
         #endregion
 
         #region Helper Methods
@@ -1438,15 +1418,53 @@ namespace AuthHive.Auth.Validators
             throw new NotImplementedException();
         }
 
-        Task<ServiceResult> IConnectedIdValidator.ValidateInvitationCancelAsync(Guid invitationId, Guid cancelledByConnectedId)
+        public async Task<ServiceResult> ValidateInvitationCancelAsync(
+            Guid invitationId,
+            Guid cancelledByConnectedId)
         {
-            throw new NotImplementedException();
+            var canceller = await _connectedIdRepository.GetByIdAsync(cancelledByConnectedId);
+            if (canceller == null || canceller.MembershipType < MembershipType.Admin)
+            {
+                return ServiceResult.Failure("No cancel permission", "NO_CANCEL_PERMISSION");
+            }
+
+            return ServiceResult.Success("Invitation cancel allowed");
         }
 
-        Task<ServiceResult> IConnectedIdValidator.ValidateStatusTransitionAsync(Guid connectedId, ConnectedIdStatus currentStatus, ConnectedIdStatus newStatus, Guid changedByConnectedId)
+
+        public async Task<ServiceResult> ValidateStatusTransitionAsync(
+            Guid connectedId,
+            ConnectedIdStatus currentStatus,
+            ConnectedIdStatus newStatus,
+            Guid changedByConnectedId)
         {
-            throw new NotImplementedException();
+            var validTransitions = new Dictionary<ConnectedIdStatus, List<ConnectedIdStatus>>
+            {
+                [ConnectedIdStatus.Pending] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Rejected },
+                [ConnectedIdStatus.Active] = new() { ConnectedIdStatus.Inactive, ConnectedIdStatus.Suspended, ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Inactive] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Suspended] = new() { ConnectedIdStatus.Active, ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Rejected] = new() { ConnectedIdStatus.Deleted },
+                [ConnectedIdStatus.Deleted] = new()
+            };
+
+            if (!validTransitions.ContainsKey(currentStatus) ||
+                !validTransitions[currentStatus].Contains(newStatus))
+            {
+                return ServiceResult.Failure(
+                    $"Cannot transition from '{currentStatus}' to '{newStatus}'",
+                    "INVALID_TRANSITION");
+            }
+
+            var changer = await _connectedIdRepository.GetByIdAsync(changedByConnectedId);
+            if (changer == null || changer.MembershipType < MembershipType.Admin)
+            {
+                return ServiceResult.Failure("Status change permission denied", "INSUFFICIENT_PERMISSION");
+            }
+
+            return ServiceResult.Success("Status transition allowed");
         }
+
 
         Task<ServiceResult> IConnectedIdValidator.ValidateActivationAsync(Guid connectedId)
         {

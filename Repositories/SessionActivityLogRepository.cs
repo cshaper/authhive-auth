@@ -299,7 +299,7 @@ namespace AuthHive.Auth.Repositories
                 ActivityType = SessionActivityType.Login,
                 Category = ActivityCategory.Authentication,
                 Description = isSuccess ? "User logged in successfully" : "Login attempt failed",
-                IPAddress = ipAddress,
+                IpAddress = ipAddress,
                 UserAgent = userAgent,
                 IsSuccess = isSuccess,
                 FailureReason = failureReason,
@@ -449,7 +449,7 @@ namespace AuthHive.Auth.Repositories
             DateTime? startDate = null,
             DateTime? endDate = null)
         {
-            var query = Query().Where(l => l.IPAddress == ipAddress);
+            var query = Query().Where(l => l.IpAddress == ipAddress);
 
             if (startDate.HasValue)
                 query = query.Where(l => l.OccurredAt >= startDate.Value);

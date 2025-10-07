@@ -142,7 +142,7 @@ namespace AuthHive.Auth.Services.Audit
                     Action = request.Action,
                     ResourceType = request.ResourceType,
                     ResourceId = request.ResourceId,
-                    IPAddress = request.IPAddress,
+                    IpAddress = request.IpAddress,
                     UserAgent = request.UserAgent,
                     RequestId = request.RequestId ?? Guid.NewGuid().ToString(),
                     Success = request.Success,
@@ -351,7 +351,7 @@ namespace AuthHive.Auth.Services.Audit
                     Action = auditLog.Action,
                     ResourceType = auditLog.ResourceType,
                     ResourceId = auditLog.ResourceId,
-                    IPAddress = auditLog.IPAddress,
+                    IpAddress = auditLog.IpAddress,
                     UserAgent = auditLog.UserAgent,
                     RequestId = auditLog.RequestId,
                     Success = auditLog.Success,
@@ -845,7 +845,7 @@ namespace AuthHive.Auth.Services.Audit
                     Action = "user.login.attempt",
                     ResourceType = "Authentication",
                     ResourceId = username,
-                    IPAddress = ipAddress,
+                    IpAddress = ipAddress,
                     UserAgent = userAgent,
                     Success = success,
                     ErrorMessage = errorMessage,
@@ -1429,7 +1429,7 @@ namespace AuthHive.Auth.Services.Audit
                 Action = entity.Action,
                 ResourceType = entity.ResourceType,
                 ResourceId = entity.ResourceId,
-                IPAddress = entity.IPAddress,
+                IpAddress = entity.IpAddress,
                 UserAgent = entity.UserAgent,
                 RequestId = entity.RequestId,
                 Success = entity.Success,
@@ -1619,7 +1619,7 @@ namespace AuthHive.Auth.Services.Audit
                 query = query.Where(a => a.ResourceId == username);
 
             if (!string.IsNullOrEmpty(ipAddress))
-                query = query.Where(a => a.IPAddress == ipAddress);
+                query = query.Where(a => a.IpAddress == ipAddress);
 
             return await query.CountAsync();
         }

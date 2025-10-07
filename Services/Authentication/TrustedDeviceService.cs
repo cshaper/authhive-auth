@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Models.Common;
@@ -12,136 +11,335 @@ using AuthHive.Core.Models.Auth.Authentication.Requests;
 using AuthHive.Core.Entities.Auth;
 using System.Text.Json;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Constants.Business;
+using AuthHive.Core.Constants.Auth;
+using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Models.Business.Events;
+using AuthHive.Core.Models.Auth.Authentication.Events;
 
 namespace AuthHive.Auth.Services
 {
     /// <summary>
-    /// 신뢰할 수 있는 장치 관리 서비스 구현체 - AuthHive v15
+    /// 신뢰할 수 있는 장치 관리 서비스 구현체 - AuthHive v16
     /// MFA에서 사용되는 핵심 서비스입니다.
+    /// AuthConstants와 PricingConstants의 모든 제한사항을 엄격히 적용합니다.
     /// </summary>
     public class TrustedDeviceService : ITrustedDeviceService
     {
         private readonly ITrustedDeviceRepository _repository;
         private readonly IUnitOfWork _unitOfWork;
         private readonly ILogger<TrustedDeviceService> _logger;
-        private readonly IMemoryCache _cache;
-        private readonly TimeSpan _cacheExpiration = TimeSpan.FromMinutes(5);
+        private readonly ICacheService _cacheService;
+        private readonly IEventBus _eventBus;
+        private readonly IAuditService _auditService;
+        private readonly IDateTimeProvider _dateTimeProvider;
+        private readonly IOrganizationSettingsRepository _orgSettingsRepository;
+        private readonly IOrganizationRepository _organizationRepository;
+        private readonly IUserRepository _userRepository;
 
-        // 기본 설정값
-        private const int DEFAULT_MAX_DEVICES_PER_USER = 10;
-        private const int DEFAULT_EXPIRATION_DAYS = 90;
-        private const int DEFAULT_TRUST_LEVEL = 1;
-        private const int MIN_TRUST_LEVEL = 1;
-        private const int MAX_TRUST_LEVEL = 3;
+        // 캐시 키 패턴 - AuthConstants.CacheKeys 사용
+        private readonly TimeSpan _cacheExpiration = TimeSpan.FromSeconds(AuthConstants.CacheKeys.SecurityCacheTTL);
 
         public TrustedDeviceService(
             ITrustedDeviceRepository repository,
             ILogger<TrustedDeviceService> logger,
             IUnitOfWork unitOfWork,
-            IMemoryCache cache)
+            ICacheService cacheService,
+            IEventBus eventBus,
+            IAuditService auditService,
+            IDateTimeProvider dateTimeProvider,
+            IOrganizationSettingsRepository orgSettingsRepository,
+            IOrganizationRepository organizationRepository,
+            IUserRepository userRepository)
         {
             _repository = repository ?? throw new ArgumentNullException(nameof(repository));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-
-            _unitOfWork = unitOfWork;
-            _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+            _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
+            _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService));
+            _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
+            _auditService = auditService ?? throw new ArgumentNullException(nameof(auditService));
+            _dateTimeProvider = dateTimeProvider ?? throw new ArgumentNullException(nameof(dateTimeProvider));
+            _orgSettingsRepository = orgSettingsRepository ?? throw new ArgumentNullException(nameof(orgSettingsRepository));
+            _organizationRepository = organizationRepository ?? throw new ArgumentNullException(nameof(organizationRepository));
+            _userRepository = userRepository ?? throw new ArgumentNullException(nameof(userRepository));
         }
 
         #region 장치 등록 및 관리
 
         /// <summary>
         /// 신뢰할 수 있는 장치 등록
+        /// AuthConstants.Security와 PricingConstants의 플랜별 제한사항을 엄격히 검증합니다.
         /// </summary>
-        public async Task<ServiceResult<TrustedDeviceDto>> RegisterTrustedDeviceAsync(Guid userId, TrustedDeviceRequest request)
+        public async Task<ServiceResult<TrustedDeviceDto>> RegisterTrustedDeviceAsync(
+            Guid userId,
+            TrustedDeviceRequest request)
         {
             try
             {
                 // 입력 검증
                 if (string.IsNullOrWhiteSpace(request.DeviceId))
-                    return ServiceResult<TrustedDeviceDto>.Failure("DeviceId is required", "INVALID_DEVICE_ID");
-
-                if (string.IsNullOrWhiteSpace(request.DeviceFingerprint))
-                    return ServiceResult<TrustedDeviceDto>.Failure("Device fingerprint is required", "INVALID_FINGERPRINT");
-
-                // 장치 개수 제한 확인
-                var currentDeviceCount = await _repository.GetTrustedDeviceCountAsync(userId, onlyActive: true);
-                if (currentDeviceCount >= DEFAULT_MAX_DEVICES_PER_USER)
                 {
                     return ServiceResult<TrustedDeviceDto>.Failure(
-                        $"Maximum number of trusted devices ({DEFAULT_MAX_DEVICES_PER_USER}) reached",
-                        "MAX_DEVICES_REACHED");
+                        "DeviceId is required",
+                        AuthConstants.ErrorCodes.INVALID_REQUEST);
+                }
+
+                if (string.IsNullOrWhiteSpace(request.DeviceFingerprint))
+                {
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        "Device fingerprint is required",
+                        AuthConstants.ErrorCodes.INVALID_REQUEST);
+                }
+
+                // 지문 길이 검증
+                if (request.DeviceFingerprint.Length > AuthConstants.Security.DeviceFingerprintLength)
+                {
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        $"Device fingerprint exceeds maximum length ({AuthConstants.Security.DeviceFingerprintLength})",
+                        AuthConstants.ErrorCodes.INVALID_REQUEST);
+                }
+
+                // 사용자의 조직 및 플랜 정보 가져오기
+                var user = await _userRepository.GetByIdAsync(userId);
+                if (user == null)
+                {
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        "User not found",
+                        AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                }
+
+                if (!user.OrganizationId.HasValue)
+                {
+                    // 사용자에게 조직이 할당되지 않은 경우의 예외 처리 로직
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        "User is not associated with an organization.",
+                        AuthConstants.ErrorCodes.InvalidCredentials);
+                }
+
+                var organization = await _organizationRepository.GetByIdAsync(user.OrganizationId.Value);
+                if (organization == null)
+                {
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        "Organization not found",
+                        AuthConstants.ErrorCodes.InvalidCredentials);
+                }
+
+                // 플랜별 장치 제한 가져오기
+                var maxDevicesPerUser = await GetMaxDevicesPerUserAsync(organization.PricingTier);
+
+                // 현재 장치 수 확인
+                var currentDeviceCount = await _repository.GetTrustedDeviceCountAsync(userId, onlyActive: true);
+
+                // Rate Limiting 체크
+                var rateLimitKey = string.Format(AuthConstants.CacheKeys.FailedAttemptsPattern, $"device_register:{userId}");
+                var attempts = await GetRateLimitCountAsync(rateLimitKey);
+
+                if (attempts > AuthConstants.OAuth.MaxFailedAttemptsBeforeBlock)
+                {
+                    await _auditService.LogSecurityEventAsync(
+                        "DEVICE_REGISTRATION_RATE_LIMIT",
+                        AuditEventSeverity.Warning,
+                        "Too many device registration attempts",
+                        userId,
+                        new Dictionary<string, object>
+                        {
+                            ["attempts"] = attempts,
+                            ["ipAddress"] = request.IpAddress ?? CommonDefaults.DefaultLocalIpV4
+                        });
+
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        "Too many registration attempts. Please try again later.",
+                        AuthConstants.ErrorCodes.RateLimitExceeded);
+                }
+
+                // PricingConstants와 AuthConstants 기반 제한 검증
+                if (currentDeviceCount >= maxDevicesPerUser)
+                {
+                    var errorMessage = $"Maximum number of trusted devices ({maxDevicesPerUser}) exceeded for {organization.PricingTier} plan.";
+
+                    var limitEvent = new PlanLimitReachedEvent(
+                        organizationId: organization.Id,
+                        planKey: organization.PricingTier,
+                        limitType: PlanLimitType.TrustedDevice,
+                        currentValue: currentDeviceCount,
+                        maxValue: maxDevicesPerUser,
+                        triggeredBy: userId
+                    );
+
+                    limitEvent.RecommendedPlan = GetRequiredPlanForDeviceCount(currentDeviceCount + 1);
+                    await _eventBus.PublishAsync(limitEvent);
+
+                    return ServiceResult<TrustedDeviceDto>.Failure(errorMessage, "PLAN_LIMIT_EXCEEDED");
                 }
 
                 // 중복 장치 ID 확인
                 var isDuplicate = await _repository.IsDeviceIdDuplicateAsync(request.DeviceId, userId);
                 if (isDuplicate)
                 {
+                    await IncrementRateLimitAsync(rateLimitKey);
+
+                    // 감사로그: 단순 검증 실패
+                    await _auditService.LogActionAsync(
+                        userId,
+                        "DEVICE_REGISTRATION_FAILED",
+                        AuditActionType.Create,
+                        "TrustedDevice",
+                        request.DeviceId,
+                        false,
+                        JsonSerializer.Serialize(new { Error = "Duplicate device ID detected" }));
+
                     return ServiceResult<TrustedDeviceDto>.Failure(
                         "Device with this ID already exists",
-                        "DUPLICATE_DEVICE_ID");
+                        AuthConstants.ErrorCodes.InvalidCredentials);
                 }
 
-                // 신뢰할 수 있는 장치 엔티티 생성
-                var trustedDevice = new TrustedDevice
-                {
-                    Id = Guid.NewGuid(),
-                    UserId = userId,
-                    DeviceId = request.DeviceId,
-                    DeviceName = request.DeviceName ?? $"Device {DateTime.UtcNow:yyyy-MM-dd}",
-                    DeviceType = request.DeviceType ?? "Unknown",
-                    DeviceFingerprint = request.DeviceFingerprint,
-                    TrustedAt = DateTime.UtcNow,
-                    IsActive = true,
-                    IpAddress = request.IpAddress,
-                    UserAgent = request.UserAgent
-                };
+                // 트랜잭션 시작
+                await _unitOfWork.BeginTransactionAsync();
 
-                // 만료일 설정
-                var expirationDays = request.TrustDurationDays ?? DEFAULT_EXPIRATION_DAYS;
-                if (expirationDays > 0)
+                try
                 {
-                    trustedDevice.SetExpiration(DateTime.UtcNow.AddDays(expirationDays));
+                    // 신뢰할 수 있는 장치 엔티티 생성
+                    var trustedDevice = new TrustedDevice
+                    {
+                        Id = Guid.NewGuid(),
+                        UserId = userId,
+                        DeviceId = request.DeviceId,
+                        DeviceName = request.DeviceName ?? $"Device {_dateTimeProvider.UtcNow:yyyy-MM-dd}",
+                        DeviceType = request.DeviceType ?? CommonDefaults.UnknownDeviceType,
+                        DeviceFingerprint = request.DeviceFingerprint,
+                        TrustedAt = _dateTimeProvider.UtcNow,
+                        IsActive = true,
+                        IpAddress = request.IpAddress ?? CommonDefaults.DefaultLocalIpV4,
+                        UserAgent = request.UserAgent ?? CommonDefaults.UnknownUserAgent,
+                        OrganizationId = organization.Id
+                    };
+
+                    // 플랜별 만료일 설정 (AuthConstants.Security.TrustedDeviceLifetime 기반)
+                    var expirationDays = GetDeviceExpirationDaysAsync(organization.PricingTier, request.TrustDurationDays);
+                    if (expirationDays > 0)
+                    {
+                        trustedDevice.SetExpiration(_dateTimeProvider.UtcNow.AddDays(expirationDays));
+                    }
+
+                    // UserAgent 파싱
+                    if (!string.IsNullOrEmpty(request.UserAgent))
+                    {
+                        ParseUserAgent(request.UserAgent, out string? browser, out string? os);
+                        trustedDevice.Browser = browser;
+                        trustedDevice.OperatingSystem = os;
+                    }
+
+                    // 플랜별 신뢰 레벨 설정 (TrustLevel enum 사용)
+                    var trustLevel = GetPlanBasedTrustLevel(organization.PricingTier);
+                    var metadata = new Dictionary<string, object>
+                    {
+                        ["trustLevel"] = trustLevel,
+                        ["registeredAt"] = _dateTimeProvider.UtcNow,
+                        ["registrationIp"] = request.IpAddress ?? CommonDefaults.DefaultLocalIpV4,
+                        ["planType"] = organization.PricingTier,
+                        ["organizationId"] = organization.Id,
+                        ["authenticationStrength"] = GetAuthenticationStrength(request.AuthMethod)
+                    };
+
+                    trustedDevice.Metadata = JsonSerializer.Serialize(metadata);
+
+                    // 저장
+                    await _repository.AddAsync(trustedDevice);
+                    await _unitOfWork.SaveChangesAsync();
+
+                    // 트랜잭션 커밋
+                    await _unitOfWork.CommitTransactionAsync();
+
+                    // Rate Limit 성공 시 초기화
+                    await ClearRateLimitAsync(rateLimitKey);
+
+                    // 캐시 무효화
+                    await InvalidateUserDeviceCacheAsync(userId);
+
+                    // 이벤트 발행: 새 장치 등록됨
+                    // 이벤트 발행: 새 장치 등록됨
+                    await _eventBus.PublishAsync(new TrustedDeviceRegisteredEvent(
+                        userId: userId,
+                        deviceId: trustedDevice.Id,
+                        deviceName: trustedDevice.DeviceName,
+                        deviceType: trustedDevice.DeviceType,
+                        deviceFingerprint: trustedDevice.DeviceFingerprint,
+                        expiresAt: trustedDevice.ExpiresAt,
+                        ipAddress: request.IpAddress ?? CommonDefaults.DefaultLocalIpV4,
+                        planType: organization.PricingTier,
+                        currentDeviceCount: currentDeviceCount + 1,
+                        maxDeviceLimit: maxDevicesPerUser,
+                        organizationId: organization.Id,
+                        triggeredBy: userId
+                    ));
+                    // 사용량이 80% 도달 시 경고 이벤트
+                    var usagePercentage = (decimal)(currentDeviceCount + 1) / maxDevicesPerUser * 100;
+                    if (usagePercentage >= 80)
+                    {
+                        await _eventBus.PublishAsync(new UsageWarningEvent(
+                       organizationId: organization.Id,
+                       resourceType: "TrustedDevices",
+                       currentUsage: currentDeviceCount + 1,
+                       maxLimit: maxDevicesPerUser,
+                       usagePercentage: usagePercentage,
+                       warningLevel: usagePercentage >= 90 ? "CRITICAL" : "WARNING",
+                       triggeredBy: userId
+                   ));
+                    }
+
+                    // 감사로그: 성공
+                    await _auditService.LogActionAsync(
+                        userId,
+                        AuthConstants.Events.DeviceTrusted,
+                        AuditActionType.Create,
+                        "TrustedDevice",
+                        trustedDevice.Id.ToString(),
+                        true,
+                        JsonSerializer.Serialize(new
+                        {
+                            DeviceId = trustedDevice.DeviceId,
+                            DeviceType = trustedDevice.DeviceType,
+                            PlanType = organization.PricingTier,
+                            DeviceCount = $"{currentDeviceCount + 1}/{maxDevicesPerUser}"
+                        }));
+
+                    _logger.LogInformation(
+                        "Trusted device registered successfully for user {UserId}: {DeviceId} (Plan: {PlanType}, Devices: {Current}/{Max})",
+                        userId, trustedDevice.DeviceId, organization.PricingTier, currentDeviceCount + 1, maxDevicesPerUser);
+
+                    return ServiceResult<TrustedDeviceDto>.Success(MapToDto(trustedDevice));
                 }
-
-                // UserAgent 파싱하여 브라우저와 OS 정보 추출
-                if (!string.IsNullOrEmpty(request.UserAgent))
+                catch
                 {
-                    ParseUserAgent(request.UserAgent, out string? browser, out string? os);
-                    trustedDevice.Browser = browser;
-                    trustedDevice.OperatingSystem = os;
+                    await _unitOfWork.RollbackTransactionAsync();
+                    throw;
                 }
-
-                // 메타데이터에 초기 신뢰 레벨 설정
-                var metadata = new Dictionary<string, object>
-                {
-                    ["trustLevel"] = DEFAULT_TRUST_LEVEL,
-                    ["registeredAt"] = DateTime.UtcNow,
-                    ["registrationIp"] = request.IpAddress ?? "Unknown"
-                };
-                trustedDevice.Metadata = JsonSerializer.Serialize(metadata);
-
-                // 저장
-                await _repository.AddAsync(trustedDevice);
-                await _unitOfWork.SaveChangesAsync();
-
-                // 감사 로그
-                await AuditActionAsync(
-                    "DEVICE_REGISTERED",
-                    $"New trusted device registered: {trustedDevice.DeviceName}",
-                    userId);
-
-                _logger.LogInformation(
-                    "Trusted device registered successfully for user {UserId}: {DeviceId}",
-                    userId, trustedDevice.DeviceId);
-
-                return ServiceResult<TrustedDeviceDto>.Success(MapToDto(trustedDevice));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error registering trusted device for user {UserId}", userId);
+
+                // 보안 이벤트
+                await _auditService.LogSecurityEventAsync(
+                    AuthConstants.Events.SuspiciousActivity,
+                    AuditEventSeverity.Warning,
+                    "Failed to register trusted device",
+                    userId,
+                    new Dictionary<string, object>
+                    {
+                        ["error"] = ex.Message,
+                        ["deviceId"] = request.DeviceId
+                    });
+
                 return ServiceResult<TrustedDeviceDto>.Failure(
                     "Failed to register trusted device",
-                    "REGISTRATION_ERROR");
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -155,32 +353,35 @@ namespace AuthHive.Auth.Services
                 var device = await _repository.GetByDeviceIdAsync(deviceId, userId);
                 if (device == null)
                 {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
+                    return ServiceResult.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
-                await _repository.DeleteAsync(device);
+                device.Deactivate();
+                await _repository.UpdateAsync(device);
                 await _unitOfWork.SaveChangesAsync();
 
                 // 캐시 무효화
-                InvalidateDeviceCache(userId, deviceId);
+                await InvalidateUserDeviceCacheAsync(userId);
 
                 // 감사 로그
-                await AuditActionAsync(
+                await _auditService.LogActionAsync(
+                    userId,
                     "DEVICE_REMOVED",
-                    $"Trusted device removed: {device.DeviceName}",
-                    userId);
-
-                _logger.LogInformation(
-                    "Trusted device removed for user {UserId}: {DeviceId}",
-                    userId, deviceId);
+                    AuditActionType.Delete,
+                    "TrustedDevice",
+                    deviceId,
+                    true);
 
                 return ServiceResult.Success("Device removed successfully");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error removing trusted device {DeviceId} for user {UserId}",
-                    deviceId, userId);
-                return ServiceResult.Failure("Failed to remove device", "REMOVAL_ERROR");
+                _logger.LogError(ex, "Error removing trusted device {DeviceId} for user {UserId}", deviceId, userId);
+                return ServiceResult.Failure(
+                    "Failed to remove device",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -192,35 +393,37 @@ namespace AuthHive.Auth.Services
             try
             {
                 var device = await _repository.GetByIdAsync(id);
-                if (device == null)
+                if (device == null || device.UserId != userId)
                 {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
+                    return ServiceResult.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
-                // 소유권 확인
-                if (device.UserId != userId)
-                {
-                    return ServiceResult.Failure("Unauthorized access to device", "UNAUTHORIZED");
-                }
-
-                await _repository.DeleteAsync(device);
+                device.Deactivate();
+                await _repository.UpdateAsync(device);
                 await _unitOfWork.SaveChangesAsync();
 
                 // 캐시 무효화
-                InvalidateDeviceCache(userId, device.DeviceId);
+                await InvalidateUserDeviceCacheAsync(userId);
 
                 // 감사 로그
-                await AuditActionAsync(
+                await _auditService.LogActionAsync(
+                    userId,
                     "DEVICE_REMOVED_BY_ID",
-                    $"Trusted device removed by ID: {device.DeviceName}",
-                    userId);
+                    AuditActionType.Delete,
+                    "TrustedDevice",
+                    id.ToString(),
+                    true);
 
                 return ServiceResult.Success("Device removed successfully");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error removing trusted device {Id} for user {UserId}", id, userId);
-                return ServiceResult.Failure("Failed to remove device", "REMOVAL_ERROR");
+                return ServiceResult.Failure(
+                    "Failed to remove device",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -231,40 +434,29 @@ namespace AuthHive.Auth.Services
         {
             try
             {
-                var devices = await _repository.GetByUserIdAsync(userId, includeInactive: true);
-                var deviceList = devices.ToList();
-
-                if (!deviceList.Any())
-                {
-                    return ServiceResult<int>.Success(0, "No devices to remove");
-                }
-
-                await _repository.DeleteRangeAsync(deviceList);
-                await _unitOfWork.SaveChangesAsync();
+                var count = await _repository.DeactivateAllUserDevicesAsync(userId, "User requested removal of all devices");
 
                 // 캐시 무효화
-                foreach (var device in deviceList)
-                {
-                    InvalidateDeviceCache(userId, device.DeviceId);
-                }
+                await InvalidateUserDeviceCacheAsync(userId);
 
                 // 감사 로그
-                await AuditActionAsync(
+                await _auditService.LogActionAsync(
+                    userId,
                     "ALL_DEVICES_REMOVED",
-                    $"All {deviceList.Count} trusted devices removed",
-                    userId);
+                    AuditActionType.Delete,
+                    "TrustedDevice",
+                    "ALL",
+                    true,
+                    JsonSerializer.Serialize(new { Count = count }));
 
-                _logger.LogInformation(
-                    "All {Count} trusted devices removed for user {UserId}",
-                    deviceList.Count, userId);
-
-                return ServiceResult<int>.Success(deviceList.Count,
-                    $"Successfully removed {deviceList.Count} devices");
+                return ServiceResult<int>.Success(count, $"Removed {count} devices");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error removing all trusted devices for user {UserId}", userId);
-                return ServiceResult<int>.Failure("Failed to remove devices", "REMOVAL_ERROR");
+                return ServiceResult<int>.Failure(
+                    "Failed to remove devices",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -280,48 +472,35 @@ namespace AuthHive.Auth.Services
             try
             {
                 var devices = await _repository.GetByUserIdAsync(userId, includeInactive: false);
-                var deviceDtos = devices.Select(MapToDto).ToList();
+                var dtos = devices.Select(MapToDto);
 
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(
-                    deviceDtos,
-                    $"Found {deviceDtos.Count} trusted devices");
+                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting trusted devices for user {UserId}", userId);
                 return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure(
-                    "Failed to retrieve devices",
-                    "RETRIEVAL_ERROR");
+                    "Failed to get devices",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
         /// 장치가 신뢰할 수 있는지 검증 (MFA 핵심 메서드)
         /// </summary>
-        public async Task<ServiceResult<bool>> IsDeviceTrustedAsync(
-            Guid userId, string deviceId, string fingerprint)
+        public async Task<ServiceResult<bool>> IsDeviceTrustedAsync(Guid userId, string deviceId, string fingerprint)
         {
             try
             {
-                var cacheKey = GetDeviceTrustCacheKey(userId, deviceId, fingerprint);
-                
-                // 캐시 확인
-                if (_cache.TryGetValue<bool>(cacheKey, out var cachedResult))
-                {
-                    return ServiceResult<bool>.Success(cachedResult);
-                }
-
                 var isTrusted = await _repository.IsDeviceTrustedAsync(deviceId, fingerprint, userId);
-
-                // 캐시 저장
-                _cache.Set(cacheKey, isTrusted, _cacheExpiration);
-
                 return ServiceResult<bool>.Success(isTrusted);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error verifying device trust for user {UserId}", userId);
-                return ServiceResult<bool>.Failure("Failed to verify device", "VERIFICATION_ERROR");
+                _logger.LogError(ex, "Error checking if device is trusted for user {UserId}", userId);
+                return ServiceResult<bool>.Failure(
+                    "Failed to check device trust status",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -335,71 +514,60 @@ namespace AuthHive.Auth.Services
             try
             {
                 var device = await _repository.GetByDeviceIdAsync(deviceId, userId);
-                
-                var result = new TrustedDeviceVerificationResult
-                {
-                    IsValid = false,
-                    IsTrusted = false,
-                    TrustLevel = 0
-                };
-
                 if (device == null)
                 {
-                    result.ValidationMessage = "Device not found";
-                    return ServiceResult<TrustedDeviceVerificationResult>.Success(result);
+                    return ServiceResult<TrustedDeviceVerificationResult>.Success(new TrustedDeviceVerificationResult
+                    {
+                        IsTrusted = false,
+                        Reason = "Device not found"
+                    });
                 }
 
-                // 지문 검증
                 if (device.DeviceFingerprint != fingerprint)
                 {
-                    result.ValidationMessage = "Device fingerprint mismatch";
-                    
-                    // 보안 이벤트 로그
-                    await LogSecurityEventAsync(
-                        "FINGERPRINT_MISMATCH",
-                        $"Fingerprint mismatch for device {deviceId}",
+                    // 의심스러운 활동 로깅
+                    await _auditService.LogSecurityEventAsync(
+                        "DEVICE_FINGERPRINT_MISMATCH",
+                        AuditEventSeverity.Warning,
+                        "Device fingerprint mismatch detected",
                         userId,
-                        ipAddress,
-                        SecurityEventSeverity.Warning);
-                    
-                    return ServiceResult<TrustedDeviceVerificationResult>.Success(result);
-                }
+                        new Dictionary<string, object>
+                        {
+                            ["deviceId"] = deviceId,
+                            ["ipAddress"] = ipAddress ?? "unknown"
+                        });
 
-                // 장치 상태 검증
-                result.IsValid = device.IsValid;
-                result.IsTrusted = device.IsActive && !device.IsExpired;
-                result.LastUsedAt = device.LastUsedAt;
-                result.Device = MapToDto(device);
-
-                // 신뢰 레벨 추출
-                if (!string.IsNullOrEmpty(device.Metadata))
-                {
-                    var metadata = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(device.Metadata);
-                    if (metadata != null && metadata.TryGetValue("trustLevel", out var trustLevel))
+                    return ServiceResult<TrustedDeviceVerificationResult>.Success(new TrustedDeviceVerificationResult
                     {
-                        result.TrustLevel = trustLevel.GetInt32();
-                    }
+                        IsTrusted = false,
+                        Reason = "Device fingerprint mismatch"
+                    });
                 }
 
-                // 검증 성공 시 사용 정보 업데이트
-                if (result.IsTrusted)
+                if (!device.IsValid)
                 {
-                    await _repository.UpdateLastUsedAsync(deviceId, userId, ipAddress, userAgent, location);
-                    result.ValidationMessage = "Device verified successfully";
-                }
-                else
-                {
-                    result.ValidationMessage = device.IsExpired ? "Device expired" : "Device inactive";
+                    return ServiceResult<TrustedDeviceVerificationResult>.Success(new TrustedDeviceVerificationResult
+                    {
+                        IsTrusted = false,
+                        Reason = device.IsExpired ? "Device expired" : "Device inactive"
+                    });
                 }
 
-                return ServiceResult<TrustedDeviceVerificationResult>.Success(result);
+                // 사용 정보 업데이트
+                await _repository.UpdateLastUsedAsync(deviceId, userId, ipAddress, userAgent, location);
+
+                return ServiceResult<TrustedDeviceVerificationResult>.Success(new TrustedDeviceVerificationResult
+                {
+                    IsTrusted = true,
+                    Device = MapToDto(device)
+                });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error verifying and updating device for user {UserId}", userId);
+                _logger.LogError(ex, "Error verifying device for user {UserId}", userId);
                 return ServiceResult<TrustedDeviceVerificationResult>.Failure(
                     "Failed to verify device",
-                    "VERIFICATION_ERROR");
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -411,26 +579,21 @@ namespace AuthHive.Auth.Services
             try
             {
                 var device = await _repository.GetByIdAsync(id);
-                
-                if (device == null)
+                if (device == null || device.UserId != userId)
                 {
-                    return ServiceResult<TrustedDeviceDto>.NotFound("Device not found");
-                }
-
-                // 소유권 확인
-                if (device.UserId != userId)
-                {
-                    return ServiceResult<TrustedDeviceDto>.Unauthorized("Access denied");
+                    return ServiceResult<TrustedDeviceDto>.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
                 return ServiceResult<TrustedDeviceDto>.Success(MapToDto(device));
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting device {Id} for user {UserId}", id, userId);
+                _logger.LogError(ex, "Error getting trusted device {Id} for user {UserId}", id, userId);
                 return ServiceResult<TrustedDeviceDto>.Failure(
-                    "Failed to retrieve device",
-                    "RETRIEVAL_ERROR");
+                    "Failed to get device",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -441,46 +604,41 @@ namespace AuthHive.Auth.Services
         /// <summary>
         /// 장치 활성화/비활성화
         /// </summary>
-        public async Task<ServiceResult> UpdateDeviceStatusAsync(
-            Guid id, Guid userId, bool isActive, string? reason = null)
+        public async Task<ServiceResult> UpdateDeviceStatusAsync(Guid id, Guid userId, bool isActive, string? reason = null)
         {
             try
             {
                 var device = await _repository.GetByIdAsync(id);
-                
-                if (device == null)
+                if (device == null || device.UserId != userId)
                 {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
+                    return ServiceResult.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
-                // 소유권 확인
-                if (device.UserId != userId)
-                {
-                    return ServiceResult.Failure("Unauthorized access", "UNAUTHORIZED");
-                }
-
-                var success = await _repository.UpdateActiveStatusAsync(id, isActive, reason);
-                
-                if (!success)
-                {
-                    return ServiceResult.Failure("Failed to update device status", "UPDATE_ERROR");
-                }
+                await _repository.UpdateActiveStatusAsync(id, isActive, reason);
 
                 // 캐시 무효화
-                InvalidateDeviceCache(userId, device.DeviceId);
+                await InvalidateUserDeviceCacheAsync(userId);
 
                 // 감사 로그
-                await AuditActionAsync(
+                await _auditService.LogActionAsync(
+                    userId,
                     isActive ? "DEVICE_ACTIVATED" : "DEVICE_DEACTIVATED",
-                    $"Device {device.DeviceName} status changed to {(isActive ? "active" : "inactive")}",
-                    userId);
+                    AuditActionType.Update,
+                    "TrustedDevice",
+                    id.ToString(),
+                    true,
+                    reason);
 
-                return ServiceResult.Success($"Device {(isActive ? "activated" : "deactivated")} successfully");
+                return ServiceResult.Success("Device status updated successfully");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error updating device status for {Id}", id);
-                return ServiceResult.Failure("Failed to update device status", "UPDATE_ERROR");
+                return ServiceResult.Failure(
+                    "Failed to update device status",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -491,105 +649,78 @@ namespace AuthHive.Auth.Services
         {
             try
             {
-                // 신뢰 레벨 검증
-                if (trustLevel < MIN_TRUST_LEVEL || trustLevel > MAX_TRUST_LEVEL)
+                var device = await _repository.GetByIdAsync(id);
+                if (device == null || device.UserId != userId)
                 {
                     return ServiceResult.Failure(
-                        $"Trust level must be between {MIN_TRUST_LEVEL} and {MAX_TRUST_LEVEL}",
-                        "INVALID_TRUST_LEVEL");
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
-                var device = await _repository.GetByIdAsync(id);
-                
-                if (device == null)
-                {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
-                }
-
-                // 소유권 확인
-                if (device.UserId != userId)
-                {
-                    return ServiceResult.Failure("Unauthorized access", "UNAUTHORIZED");
-                }
-
-                var success = await _repository.UpdateTrustLevelAsync(id, trustLevel);
-                
-                if (!success)
-                {
-                    return ServiceResult.Failure("Failed to update trust level", "UPDATE_ERROR");
-                }
+                await _repository.UpdateTrustLevelAsync(id, trustLevel);
 
                 // 캐시 무효화
-                InvalidateDeviceCache(userId, device.DeviceId);
+                await InvalidateUserDeviceCacheAsync(userId);
 
                 // 감사 로그
-                await AuditActionAsync(
-                    "TRUST_LEVEL_CHANGED",
-                    $"Device {device.DeviceName} trust level changed to {trustLevel}",
-                    userId);
+                await _auditService.LogActionAsync(
+                    userId,
+                    "DEVICE_TRUST_LEVEL_UPDATED",
+                    AuditActionType.Update,
+                    "TrustedDevice",
+                    id.ToString(),
+                    true,
+                    JsonSerializer.Serialize(new { TrustLevel = trustLevel }));
 
-                return ServiceResult.Success($"Trust level updated to {trustLevel}");
+                return ServiceResult.Success("Trust level updated successfully");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error updating trust level for device {Id}", id);
-                return ServiceResult.Failure("Failed to update trust level", "UPDATE_ERROR");
+                return ServiceResult.Failure(
+                    "Failed to update trust level",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
         /// 장치 만료일 설정
         /// </summary>
-        public async Task<ServiceResult> SetDeviceExpirationAsync(
-            Guid id, Guid userId, DateTime? expiresAt)
+        public async Task<ServiceResult> SetDeviceExpirationAsync(Guid id, Guid userId, DateTime? expiresAt)
         {
             try
             {
                 var device = await _repository.GetByIdAsync(id);
-                
-                if (device == null)
+                if (device == null || device.UserId != userId)
                 {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
+                    return ServiceResult.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
-                // 소유권 확인
-                if (device.UserId != userId)
-                {
-                    return ServiceResult.Failure("Unauthorized access", "UNAUTHORIZED");
-                }
-
-                // 과거 날짜 검증
-                if (expiresAt.HasValue && expiresAt.Value <= DateTime.UtcNow)
-                {
-                    return ServiceResult.Failure("Expiration date must be in the future", "INVALID_DATE");
-                }
-
-                var success = await _repository.SetExpirationAsync(id, expiresAt);
-                
-                if (!success)
-                {
-                    return ServiceResult.Failure("Failed to set expiration", "UPDATE_ERROR");
-                }
+                await _repository.SetExpirationAsync(id, expiresAt);
 
                 // 캐시 무효화
-                InvalidateDeviceCache(userId, device.DeviceId);
+                await InvalidateUserDeviceCacheAsync(userId);
 
                 // 감사 로그
-                var expirationMsg = expiresAt.HasValue
-                    ? $"expires at {expiresAt.Value:yyyy-MM-dd HH:mm}"
-                    : "never expires";
-                    
-                await AuditActionAsync(
-                    "EXPIRATION_SET",
-                    $"Device {device.DeviceName} {expirationMsg}",
-                    userId);
+                await _auditService.LogActionAsync(
+                    userId,
+                    "DEVICE_EXPIRATION_SET",
+                    AuditActionType.Update,
+                    "TrustedDevice",
+                    id.ToString(),
+                    true,
+                    JsonSerializer.Serialize(new { ExpiresAt = expiresAt }));
 
-                return ServiceResult.Success($"Expiration date updated successfully");
+                return ServiceResult.Success("Device expiration updated successfully");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error setting expiration for device {Id}", id);
-                return ServiceResult.Failure("Failed to set expiration", "UPDATE_ERROR");
+                _logger.LogError(ex, "Error setting device expiration for {Id}", id);
+                return ServiceResult.Failure(
+                    "Failed to set device expiration",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -600,46 +731,39 @@ namespace AuthHive.Auth.Services
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(deviceName))
-                {
-                    return ServiceResult.Failure("Device name cannot be empty", "INVALID_NAME");
-                }
-
                 var device = await _repository.GetByIdAsync(id);
-                
-                if (device == null)
+                if (device == null || device.UserId != userId)
                 {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
+                    return ServiceResult.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
 
-                // 소유권 확인
-                if (device.UserId != userId)
-                {
-                    return ServiceResult.Failure("Unauthorized access", "UNAUTHORIZED");
-                }
-
-                var oldName = device.DeviceName;
                 device.DeviceName = deviceName;
-                
                 await _repository.UpdateAsync(device);
                 await _unitOfWork.SaveChangesAsync();
 
+                // 캐시 무효화
+                await InvalidateUserDeviceCacheAsync(userId);
+
                 // 감사 로그
-                await TrackChangeAsync(
-                    "TrustedDevice",
-                    id,
-                    "NAME_CHANGED",
-                    oldName,
-                    deviceName,
+                await _auditService.LogActionAsync(
                     userId,
-                    "Device name updated");
+                    "DEVICE_NAME_UPDATED",
+                    AuditActionType.Update,
+                    "TrustedDevice",
+                    id.ToString(),
+                    true,
+                    JsonSerializer.Serialize(new { DeviceName = deviceName }));
 
                 return ServiceResult.Success("Device name updated successfully");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error updating device name for {Id}", id);
-                return ServiceResult.Failure("Failed to update device name", "UPDATE_ERROR");
+                return ServiceResult.Failure(
+                    "Failed to update device name",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -650,123 +774,73 @@ namespace AuthHive.Auth.Services
         /// <summary>
         /// 조직의 모든 신뢰할 수 있는 장치 조회 (관리자용)
         /// </summary>
-        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetOrganizationDevicesAsync(
-            Guid organizationId, bool includeInactive = false)
+        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetOrganizationDevicesAsync(Guid organizationId, bool includeInactive = false)
         {
             try
             {
                 var devices = await _repository.GetByOrganizationIdAsync(organizationId, includeInactive);
-                var deviceDtos = devices.Select(MapToDto).ToList();
+                var dtos = devices.Select(MapToDto);
 
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(
-                    deviceDtos,
-                    $"Found {deviceDtos.Count} devices in organization");
+                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting organization devices for {OrganizationId}", organizationId);
                 return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure(
-                    "Failed to retrieve organization devices",
-                    "RETRIEVAL_ERROR");
+                    "Failed to get organization devices",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
         /// 의심스러운 장치 활동 감지
         /// </summary>
-        public async Task<ServiceResult<IEnumerable<SuspiciousDeviceReport>>> DetectSuspiciousDevicesAsync(
-            Guid organizationId, int days = 30)
+        public async Task<ServiceResult<IEnumerable<SuspiciousDeviceReport>>> DetectSuspiciousDevicesAsync(Guid organizationId, int days = 30)
         {
             try
             {
-                var fromDate = DateTime.UtcNow.AddDays(-days);
-                var toDate = DateTime.UtcNow;
-                
-                var reports = new List<SuspiciousDeviceReport>();
-                
-                // 조직의 모든 사용자 장치 통계 조회
-                var registrationStats = await _repository.GetDeviceRegistrationStatsAsync(
-                    organizationId, fromDate, toDate);
-                
-                // 비정상적으로 많은 장치를 등록한 사용자 찾기
-                foreach (var kvp in registrationStats.Where(x => x.Value > 5))
-                {
-                    var userDevices = await _repository.GetByUserIdAsync(kvp.Key, includeInactive: true);
-                    
-                    foreach (var device in userDevices)
+                var fromDate = _dateTimeProvider.UtcNow.AddDays(-days);
+                var toDate = _dateTimeProvider.UtcNow;
+
+                var devices = await _repository.GetRecentlyRegisteredDevicesAsync(organizationId, days * 24);
+
+                var suspiciousReports = new List<SuspiciousDeviceReport>();
+
+                // 동일 IP에서 여러 장치 등록 감지
+                var devicesByIp = devices.GroupBy(d => d.IpAddress)
+                    .Where(g => g.Count() > 3)
+                    .Select(g => new SuspiciousDeviceReport
                     {
-                        var suspiciousActivities = new List<string>();
-                        var riskScore = 0;
-                        
-                        // 다중 장치 등록
-                        if (kvp.Value > 5)
-                        {
-                            suspiciousActivities.Add($"User registered {kvp.Value} devices in {days} days");
-                            riskScore += 30;
-                        }
-                        
-                        // 짧은 시간 내 등록
-                        var recentDevices = userDevices
-                            .Where(d => Math.Abs((d.CreatedAt - device.CreatedAt).TotalHours) < 1)
-                            .Count();
-                        
-                        if (recentDevices > 2)
-                        {
-                            suspiciousActivities.Add($"{recentDevices} devices registered within 1 hour");
-                            riskScore += 40;
-                        }
-                        
-                        // 동일 IP에서 여러 사용자
-                        if (!string.IsNullOrEmpty(device.IpAddress))
-                        {
-                            var sameIpDevices = await _repository.GetDevicesByIpAddressAsync(
-                                device.IpAddress, organizationId, days);
-                            
-                            var uniqueUsers = sameIpDevices.Select(d => d.UserId).Distinct().Count();
-                            if (uniqueUsers > 3)
-                            {
-                                suspiciousActivities.Add($"{uniqueUsers} users from same IP");
-                                riskScore += 20;
-                            }
-                        }
-                        
-                        if (suspiciousActivities.Any())
-                        {
-                            reports.Add(new SuspiciousDeviceReport
-                            {
-                                Device = MapToDto(device),
-                                SuspiciousActivities = suspiciousActivities,
-                                RiskScore = Math.Min(riskScore, 100),
-                                DetectedAt = DateTime.UtcNow,
-                                RecommendedAction = riskScore > 60 
-                                    ? "Review and consider deactivation"
-                                    : "Monitor activity"
-                            });
-                        }
-                    }
-                }
-                
-                // 보안 이벤트 로그
-                if (reports.Any())
-                {
-                    await LogSecurityEventAsync(
-                        "SUSPICIOUS_DEVICES_DETECTED",
-                        $"Found {reports.Count} suspicious devices in organization",
-                        null,
-                        null,
-                        SecurityEventSeverity.Warning);
-                }
-                
-                return ServiceResult<IEnumerable<SuspiciousDeviceReport>>.Success(
-                    reports.OrderByDescending(r => r.RiskScore));
+                        Type = "MULTIPLE_DEVICES_SAME_IP",
+                        Description = $"Multiple devices ({g.Count()}) registered from same IP: {g.Key}",
+                        Devices = g.Select(MapToDto).ToList(),
+                        DetectedAt = _dateTimeProvider.UtcNow
+                    });
+
+                suspiciousReports.AddRange(devicesByIp);
+
+                // 짧은 시간 내 여러 장치 등록 감지
+                var devicesByUser = devices.GroupBy(d => d.UserId)
+                    .Where(g => g.Count() > 5)
+                    .Select(g => new SuspiciousDeviceReport
+                    {
+                        Type = "EXCESSIVE_DEVICE_REGISTRATION",
+                        Description = $"User registered {g.Count()} devices in {days} days",
+                        UserId = g.Key,
+                        Devices = g.Select(MapToDto).ToList(),
+                        DetectedAt = _dateTimeProvider.UtcNow
+                    });
+
+                suspiciousReports.AddRange(devicesByUser);
+
+                return ServiceResult<IEnumerable<SuspiciousDeviceReport>>.Success(suspiciousReports);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error detecting suspicious devices for organization {OrganizationId}",
-                    organizationId);
+                _logger.LogError(ex, "Error detecting suspicious devices for organization {OrganizationId}", organizationId);
                 return ServiceResult<IEnumerable<SuspiciousDeviceReport>>.Failure(
                     "Failed to detect suspicious devices",
-                    "DETECTION_ERROR");
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -778,64 +852,55 @@ namespace AuthHive.Auth.Services
             try
             {
                 var count = await _repository.CleanupExpiredDevicesAsync(organizationId);
-                
+
                 // 감사 로그
-                await AuditActionAsync(
+                await _auditService.LogActionAsync(
+                    null,
                     "EXPIRED_DEVICES_CLEANUP",
-                    $"Cleaned up {count} expired devices in organization",
-                    null);
-                
-                _logger.LogInformation(
-                    "Cleaned up {Count} expired devices for organization {OrganizationId}",
-                    count, organizationId);
-                
-                return ServiceResult<int>.Success(count,
-                    $"Successfully cleaned up {count} expired devices");
+                    AuditActionType.Delete,
+                    "TrustedDevice",
+                    "EXPIRED",
+                    true,
+                    JsonSerializer.Serialize(new { OrganizationId = organizationId, Count = count }));
+
+                return ServiceResult<int>.Success(count, $"Cleaned up {count} expired devices");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error cleaning up expired devices for organization {OrganizationId}",
-                    organizationId);
-                return ServiceResult<int>.Failure("Failed to cleanup expired devices", "CLEANUP_ERROR");
+                _logger.LogError(ex, "Error cleaning up expired devices for organization {OrganizationId}", organizationId);
+                return ServiceResult<int>.Failure(
+                    "Failed to cleanup expired devices",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
         /// 오래된 비활성 장치 삭제
         /// </summary>
-        public async Task<ServiceResult<int>> DeleteOldInactiveDevicesAsync(
-            Guid organizationId, int olderThanDays = 90)
+        public async Task<ServiceResult<int>> DeleteOldInactiveDevicesAsync(Guid organizationId, int olderThanDays = 90)
         {
             try
             {
-                if (olderThanDays < 30)
-                {
-                    return ServiceResult<int>.Failure(
-                        "Cannot delete devices newer than 30 days",
-                        "INVALID_PARAMETER");
-                }
-                
                 var count = await _repository.DeleteOldInactiveDevicesAsync(olderThanDays, organizationId);
-                
+
                 // 감사 로그
-                await AuditActionAsync(
+                await _auditService.LogActionAsync(
+                    null,
                     "OLD_DEVICES_DELETED",
-                    $"Deleted {count} inactive devices older than {olderThanDays} days",
-                    null);
-                
-                _logger.LogInformation(
-                    "Deleted {Count} old inactive devices for organization {OrganizationId}",
-                    count, organizationId);
-                
-                return ServiceResult<int>.Success(count,
-                    $"Successfully deleted {count} old inactive devices");
+                    AuditActionType.Delete,
+                    "TrustedDevice",
+                    "OLD",
+                    true,
+                    JsonSerializer.Serialize(new { OrganizationId = organizationId, OlderThanDays = olderThanDays, Count = count }));
+
+                return ServiceResult<int>.Success(count, $"Deleted {count} old inactive devices");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, 
-                    "Error deleting old inactive devices for organization {OrganizationId}",
-                    organizationId);
-                return ServiceResult<int>.Failure("Failed to delete old devices", "DELETION_ERROR");
+                _logger.LogError(ex, "Error deleting old inactive devices for organization {OrganizationId}", organizationId);
+                return ServiceResult<int>.Failure(
+                    "Failed to delete old devices",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -850,174 +915,184 @@ namespace AuthHive.Auth.Services
         {
             try
             {
+                // 1. 해당 유저의 모든 디바이스 정보를 가져옵니다.
                 var devices = await _repository.GetByUserIdAsync(userId, includeInactive: true);
-                var deviceList = devices.ToList();
-                
+
+                // '최근'의 기준을 정의합니다 (예: 30일 이내).
+                var recentDateThreshold = DateTime.UtcNow.AddDays(-30);
+
                 var stats = new TrustedDeviceStats
                 {
-                    TotalDevices = deviceList.Count,
-                    ActiveDevices = deviceList.Count(d => d.IsActive),
-                    ExpiredDevices = deviceList.Count(d => d.IsExpired),
-                    RecentlyUsedDevices = deviceList.Count(d => 
-                        d.LastUsedAt.HasValue && 
-                        d.LastUsedAt.Value > DateTime.UtcNow.AddDays(-7))
+                    // 2. 모델에 정의된 속성에 맞춰 통계를 계산합니다.
+                    TotalDevices = devices.Count(),
+                    ActiveDevices = devices.Count(d => d.IsActive),
+                    ExpiredDevices = devices.Count(d => d.ExpiresAt.HasValue && d.ExpiresAt.Value < DateTime.UtcNow),
+                    RecentlyUsedDevices = devices.Count(d => d.LastUsedAt is DateTime lastUsed && lastUsed >= recentDateThreshold),
+
+                    // DeviceType을 기준으로 그룹화하여 개수를 셉니다.
+                    DeviceTypeBreakdown = devices
+                        .GroupBy(d => d.DeviceType ?? "Unknown")
+                        .ToDictionary(g => g.Key, g => g.Count()),
+
+                    // Browser를 기준으로 그룹화하여 개수를 셉니다.
+                    BrowserBreakdown = devices
+                        .Where(d => !string.IsNullOrEmpty(d.Browser))
+                        .GroupBy(d => d.Browser!)
+                        .ToDictionary(g => g.Key, g => g.Count()),
+
+                    // TrustLevel이 TrustedDevice 엔티티에 int 타입으로 존재한다고 가정합니다.
+                    TrustLevelBreakdown = devices
+                        .GroupBy(d => d.TrustLevel)
+                        .ToDictionary(g => g.Key, g => g.Count())
                 };
-                
-                // 장치 유형별 분류
-                stats.DeviceTypeBreakdown = deviceList
-                    .GroupBy(d => d.DeviceType ?? "Unknown")
-                    .ToDictionary(g => g.Key, g => g.Count());
-                
-                // 브라우저별 분류
-                stats.BrowserBreakdown = deviceList
-                    .Where(d => !string.IsNullOrEmpty(d.Browser))
-                    .GroupBy(d => d.Browser!)
-                    .ToDictionary(g => g.Key, g => g.Count());
-                
-                // 신뢰 레벨별 분류
-                foreach (var device in deviceList)
-                {
-                    var trustLevel = GetTrustLevelFromMetadata(device.Metadata);
-                    if (!stats.TrustLevelBreakdown.ContainsKey(trustLevel))
-                    {
-                        stats.TrustLevelBreakdown[trustLevel] = 0;
-                    }
-                    stats.TrustLevelBreakdown[trustLevel]++;
-                }
-                
+
                 return ServiceResult<TrustedDeviceStats>.Success(stats);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting device stats for user {UserId}", userId);
                 return ServiceResult<TrustedDeviceStats>.Failure(
-                    "Failed to get device statistics",
-                    "STATS_ERROR");
+                    "Failed to get device stats",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
         /// 조직별 장치 통계
         /// </summary>
-        public async Task<ServiceResult<OrganizationDeviceStats>> GetOrganizationDeviceStatsAsync(
-            Guid organizationId)
+        public async Task<ServiceResult<OrganizationDeviceStats>> GetOrganizationDeviceStatsAsync(Guid organizationId)
         {
             try
             {
                 var devices = await _repository.GetByOrganizationIdAsync(organizationId, includeInactive: true);
-                var deviceList = devices.ToList();
-                
-                var userDeviceCounts = deviceList
-                    .GroupBy(d => d.UserId)
+
+                // --- (이전 계산 로직은 동일) ---
+                var distinctUserIds = devices.Select(d => d.UserId).Distinct().ToList();
+                int totalUserCount = distinctUserIds.Count;
+                int totalDeviceCount = devices.Count();
+
+                // --- RegistrationTrends 생성 로직 수정 ---
+
+                // 1. 최근 30일간의 등록 데이터를 날짜별로 그룹화합니다.
+                var startDate = DateTime.UtcNow.AddDays(-29).Date; // 30일 전 날짜
+                var endDate = DateTime.UtcNow.Date; // 오늘 날짜
+
+                var dailyRegistrations = devices
+                    .Where(d => d.TrustedAt.Date >= startDate)
+                    .GroupBy(d => d.TrustedAt.Date)
                     .ToDictionary(g => g.Key, g => g.Count());
-                
+
+                // 참고: DeactivatedCount를 계산하려면 TrustedDevice 엔티티에
+                // '비활성화된 날짜' (예: DeactivatedAt) 속성이 필요합니다.
+                // var dailyDeactivations = devices...
+
+                // 2. 최근 30일 전체에 대한 트렌드 리스트를 생성합니다. (등록이 없는 날도 포함)
+                var trends = new List<DeviceRegistrationTrend>();
+                for (var date = startDate; date <= endDate; date = date.AddDays(1))
+                {
+                    dailyRegistrations.TryGetValue(date, out int registeredCount);
+                    // dailyDeactivations.TryGetValue(date, out int deactivatedCount);
+
+                    trends.Add(new DeviceRegistrationTrend
+                    {
+                        Date = date,
+                        RegisteredCount = registeredCount,
+                        DeactivatedCount = 0 // 현재는 계산할 수 없으므로 0으로 설정
+                    });
+                }
+
                 var stats = new OrganizationDeviceStats
                 {
-                    TotalUsers = userDeviceCounts.Count,
-                    TotalDevices = deviceList.Count,
-                    ActiveDevices = deviceList.Count(d => d.IsActive),
-                    AverageDevicesPerUser = userDeviceCounts.Any() 
-                        ? userDeviceCounts.Values.Average() 
-                        : 0,
-                    UserDeviceCounts = userDeviceCounts
+                    TotalUsers = totalUserCount,
+                    TotalDevices = totalDeviceCount,
+                    ActiveDevices = devices.Count(d => d.IsActive),
+                    AverageDevicesPerUser = totalUserCount > 0 ? (double)totalDeviceCount / totalUserCount : 0,
+                    UserDeviceCounts = devices
+                        .GroupBy(d => d.UserId)
+                        .ToDictionary(g => g.Key, g => g.Count()),
+
+                    // 3. 위에서 생성한 트렌드 리스트를 할당합니다.
+                    RegistrationTrends = trends.OrderBy(t => t.Date).ToList()
                 };
-                
-                // 최근 30일간 등록 트렌드
-                var thirtyDaysAgo = DateTime.UtcNow.AddDays(-30);
-                var registrationTrends = deviceList
-                    .Where(d => d.CreatedAt >= thirtyDaysAgo)
-                    .GroupBy(d => d.CreatedAt.Date)
-                    .Select(g => new DeviceRegistrationTrend
-                    {
-                        Date = g.Key,
-                        RegisteredCount = g.Count(),
-                        DeactivatedCount = g.Count(d => !d.IsActive)
-                    })
-                    .OrderBy(t => t.Date)
-                    .ToList();
-                
-                stats.RegistrationTrends = registrationTrends;
-                
+
                 return ServiceResult<OrganizationDeviceStats>.Success(stats);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting organization device stats for {OrganizationId}",
-                    organizationId);
+                _logger.LogError(ex, "Error getting organization device stats for {OrganizationId}", organizationId);
                 return ServiceResult<OrganizationDeviceStats>.Failure(
-                    "Failed to get organization statistics",
-                    "STATS_ERROR");
+                    "Failed to get organization device stats",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
-
         /// <summary>
         /// 장치 사용 패턴 분석
         /// </summary>
-        public async Task<ServiceResult<DeviceUsagePattern>> AnalyzeUsagePatternAsync(
-            Guid userId, int days = 30)
+        /// <summary>
+        /// 사용자의 장치 사용 패턴을 분석합니다.
+        /// </summary>
+        public async Task<ServiceResult<DeviceUsagePattern>> AnalyzeUsagePatternAsync(Guid userId, int days = 30)
         {
             try
             {
-                var fromDate = DateTime.UtcNow.AddDays(-days);
+                var fromDate = _dateTimeProvider.UtcNow.AddDays(-days);
                 var devices = await _repository.GetByUserIdAsync(userId, includeInactive: false);
-                var deviceList = devices.ToList();
-                
-                var pattern = new DeviceUsagePattern();
-                
-                // 시간대별 사용 패턴 (실제 구현에서는 활동 로그 테이블 참조 필요)
-                // 여기서는 LastUsedAt 기준으로 간단히 구현
-                foreach (var device in deviceList.Where(d => d.LastUsedAt.HasValue))
+                var recentDevices = devices.Where(d => d.LastUsedAt >= fromDate).ToList();
+
+                if (!recentDevices.Any())
                 {
-                    var hour = device.LastUsedAt!.Value.Hour.ToString("00");
-                    if (!pattern.HourlyUsage.ContainsKey(hour))
-                    {
-                        pattern.HourlyUsage[hour] = 0;
-                    }
-                    pattern.HourlyUsage[hour]++;
-                    
-                    var dayOfWeek = device.LastUsedAt.Value.DayOfWeek.ToString();
-                    if (!pattern.DailyUsage.ContainsKey(dayOfWeek))
-                    {
-                        pattern.DailyUsage[dayOfWeek] = 0;
-                    }
-                    pattern.DailyUsage[dayOfWeek]++;
+                    // 분석할 데이터가 없으면 빈 패턴을 반환
+                    return ServiceResult<DeviceUsagePattern>.Success(new DeviceUsagePattern());
                 }
-                
-                // 자주 사용하는 위치
-                pattern.FrequentLocations = deviceList
-                    .Where(d => !string.IsNullOrEmpty(d.Location))
-                    .GroupBy(d => d.Location!)
-                    .OrderByDescending(g => g.Count())
-                    .Take(5)
-                    .Select(g => g.Key)
-                    .ToList();
-                
-                // 최근 IP 주소
-                pattern.RecentIpAddresses = deviceList
-                    .Where(d => !string.IsNullOrEmpty(d.IpAddress))
-                    .OrderByDescending(d => d.LastUsedAt ?? d.CreatedAt)
-                    .Select(d => d.IpAddress!)
-                    .Distinct()
-                    .Take(10)
-                    .ToList();
-                
-                // 의심스러운 패턴 감지
-                var suspiciousDevices = await _repository.GetSuspiciousDevicesAsync(
-                    userId, fromDate, DateTime.UtcNow);
-                
-                if (suspiciousDevices.Any())
+
+                var pattern = new DeviceUsagePattern
                 {
-                    pattern.HasSuspiciousPattern = true;
-                    pattern.PatternAlerts.Add($"Found {suspiciousDevices.Count()} suspicious device activities");
-                }
-                
-                // IP 변경이 잦은 경우
+                    // 시간대별 사용 분포 (마지막 사용 시각 기준)
+                    HourlyUsage = recentDevices
+                        .Where(d => d.LastUsedAt.HasValue)
+                        .GroupBy(d => d.LastUsedAt!.Value.ToString("HH")) // "00", "01", ..., "23"
+                        .ToDictionary(g => g.Key, g => g.Count()),
+
+                    // 요일별 사용 분포 (마지막 사용 시각 기준)
+                    DailyUsage = recentDevices
+                        .Where(d => d.LastUsedAt.HasValue)
+                        .GroupBy(d => d.LastUsedAt!.Value.DayOfWeek.ToString()) // "Monday", "Tuesday", ...
+                        .ToDictionary(g => g.Key, g => g.Count()),
+
+                    // 자주 사용된 위치 (상위 3개)
+                    FrequentLocations = recentDevices
+                        .Where(d => !string.IsNullOrEmpty(d.Location))
+                        .GroupBy(d => d.Location!)
+                        .OrderByDescending(g => g.Count())
+                        .Select(g => g.Key)
+                        .Take(3)
+                        .ToList(),
+
+                    // 최근 사용된 IP 주소 목록 (중복 제거)
+                    RecentIpAddresses = recentDevices
+                        .Where(d => !string.IsNullOrEmpty(d.IpAddress))
+                        .Select(d => d.IpAddress!)
+                        .Distinct()
+                        .ToList()
+                };
+
+                // 의심스러운 패턴 분석 로직 (예시)
+                var alerts = new List<string>();
                 if (pattern.RecentIpAddresses.Count > 5)
                 {
-                    pattern.HasSuspiciousPattern = true;
-                    pattern.PatternAlerts.Add("Frequent IP address changes detected");
+                    alerts.Add($"Too many unique IP addresses ({pattern.RecentIpAddresses.Count}) detected in the last {days} days.");
                 }
-                
+                if (pattern.FrequentLocations.Count > 3)
+                {
+                    alerts.Add($"Usage from multiple distinct locations ({pattern.FrequentLocations.Count}) detected.");
+                }
+
+                if (alerts.Any())
+                {
+                    pattern.HasSuspiciousPattern = true;
+                    pattern.PatternAlerts = alerts;
+                }
+
                 return ServiceResult<DeviceUsagePattern>.Success(pattern);
             }
             catch (Exception ex)
@@ -1025,7 +1100,7 @@ namespace AuthHive.Auth.Services
                 _logger.LogError(ex, "Error analyzing usage pattern for user {UserId}", userId);
                 return ServiceResult<DeviceUsagePattern>.Failure(
                     "Failed to analyze usage pattern",
-                    "ANALYSIS_ERROR");
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -1034,70 +1109,57 @@ namespace AuthHive.Auth.Services
         #region 배치 작업 및 유틸리티
 
         /// <summary>
-        /// 장치 정보 동기화
+        /// 장치 정보 동기화 (브라우저 정보 업데이트 등)
         /// </summary>
-        public async Task<ServiceResult> SyncDeviceInfoAsync(
-            Guid userId, string deviceId, DeviceInfoUpdate deviceInfo)
+        public async Task<ServiceResult> SyncDeviceInfoAsync(Guid userId, string deviceId, DeviceInfoUpdate deviceInfo)
         {
             try
             {
                 var device = await _repository.GetByDeviceIdAsync(deviceId, userId);
-                
                 if (device == null)
                 {
-                    return ServiceResult.Failure("Device not found", "DEVICE_NOT_FOUND");
+                    return ServiceResult.Failure(
+                        "Device not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
-                
-                // 정보 업데이트
-                if (!string.IsNullOrEmpty(deviceInfo.Browser))
-                    device.Browser = deviceInfo.Browser;
-                
-                if (!string.IsNullOrEmpty(deviceInfo.OperatingSystem))
-                    device.OperatingSystem = deviceInfo.OperatingSystem;
-                
+
                 if (!string.IsNullOrEmpty(deviceInfo.UserAgent))
-                    device.UserAgent = deviceInfo.UserAgent;
-                
-                if (!string.IsNullOrEmpty(deviceInfo.Location))
-                    device.Location = deviceInfo.Location;
-                
-                // 메타데이터 병합
-                if (deviceInfo.AdditionalMetadata != null && deviceInfo.AdditionalMetadata.Any())
                 {
-                    var metadata = string.IsNullOrEmpty(device.Metadata)
-                        ? new Dictionary<string, object>()
-                        : JsonSerializer.Deserialize<Dictionary<string, object>>(device.Metadata) ?? new();
-                    
-                    foreach (var kvp in deviceInfo.AdditionalMetadata)
-                    {
-                        metadata[kvp.Key] = kvp.Value;
-                    }
-                    
-                    metadata["lastSyncedAt"] = DateTime.UtcNow;
-                    device.Metadata = JsonSerializer.Serialize(metadata);
+                    ParseUserAgent(deviceInfo.UserAgent, out string? browser, out string? os);
+                    device.Browser = browser;
+                    device.OperatingSystem = os;
+                    device.UserAgent = deviceInfo.UserAgent;
                 }
-                
+
+                if (!string.IsNullOrEmpty(deviceInfo.IpAddress))
+                {
+                    device.IpAddress = deviceInfo.IpAddress;
+                }
+
+                if (!string.IsNullOrEmpty(deviceInfo.Location))
+                {
+                    device.Location = deviceInfo.Location;
+                }
+
                 await _repository.UpdateAsync(device);
                 await _unitOfWork.SaveChangesAsync();
-                
+
                 // 캐시 무효화
-                InvalidateDeviceCache(userId, deviceId);
-                
-                _logger.LogInformation(
-                    "Device info synced for user {UserId}, device {DeviceId}",
-                    userId, deviceId);
-                
-                return ServiceResult.Success("Device information synchronized successfully");
+                await InvalidateUserDeviceCacheAsync(userId);
+
+                return ServiceResult.Success("Device info synchronized successfully");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error syncing device info for {DeviceId}", deviceId);
-                return ServiceResult.Failure("Failed to sync device information", "SYNC_ERROR");
+                return ServiceResult.Failure(
+                    "Failed to sync device info",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 대량 장치 상태 변경
+        /// 대량 장치 상태 변경 (관리자용)
         /// </summary>
         public async Task<ServiceResult<BulkUpdateResult>> BulkUpdateDeviceStatusAsync(
             IEnumerable<Guid> deviceIds, Guid organizationId, bool isActive, string? reason = null)
@@ -1106,63 +1168,59 @@ namespace AuthHive.Auth.Services
             {
                 var result = new BulkUpdateResult
                 {
-                    TotalRequested = deviceIds.Count()
+                    TotalRequested = deviceIds.Count(),
+                    SuccessCount = 0,
+                    FailedCount = 0,
                 };
-                
+
                 foreach (var deviceId in deviceIds)
                 {
                     try
                     {
                         var device = await _repository.GetByIdAsync(deviceId);
-                        
-                        if (device == null)
+                        if (device != null && device.OrganizationId == organizationId)
                         {
-                            result.FailedCount++;
-                            result.Errors.Add($"Device {deviceId} not found");
-                            continue;
-                        }
-                        
-                        // 조직 확인 (실제 구현에서는 User 테이블과 조인 필요)
-                        // 여기서는 간단히 처리
-                        
-                        var success = await _repository.UpdateActiveStatusAsync(deviceId, isActive, reason);
-                        
-                        if (success)
-                        {
+                            await _repository.UpdateActiveStatusAsync(deviceId, isActive, reason);
                             result.SuccessCount++;
-                            result.ProcessedDeviceIds.Add(deviceId);
                         }
                         else
                         {
                             result.FailedCount++;
-                            result.Errors.Add($"Failed to update device {deviceId}");
+                            result.FailedIds.Add(deviceId);
                         }
                     }
-                    catch (Exception deviceEx)
+                    catch
                     {
                         result.FailedCount++;
-                        result.Errors.Add($"Error processing device {deviceId}: {deviceEx.Message}");
+                        result.FailedIds.Add(deviceId);
                     }
                 }
-                
+
                 // 감사 로그
-                await AuditActionAsync(
-                    "BULK_STATUS_UPDATE",
-                    $"Bulk updated {result.SuccessCount}/{result.TotalRequested} devices to {(isActive ? "active" : "inactive")}",
-                    null);
-                
-                _logger.LogInformation(
-                    "Bulk status update completed: {Success}/{Total} devices updated",
-                    result.SuccessCount, result.TotalRequested);
-                
-                return ServiceResult<BulkUpdateResult>.Success(result);
+                await _auditService.LogActionAsync(
+                    null,
+                    "BULK_DEVICE_STATUS_UPDATE",
+                    AuditActionType.Update,
+                    "TrustedDevice",
+                    "BULK",
+                    result.SuccessCount > 0,
+                    JsonSerializer.Serialize(new
+                    {
+                        OrganizationId = organizationId,
+                        IsActive = isActive,
+                        Reason = reason,
+                        Result = result
+                    }));
+
+                return ServiceResult<BulkUpdateResult>.Success(result,
+                    $"Updated {result.SuccessCount} devices, {result.FailedCount} failed");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error in bulk device status update");
+                _logger.LogError(ex, "Error in bulk device status update for organization {OrganizationId}", organizationId);
                 return ServiceResult<BulkUpdateResult>.Failure(
-                    "Failed to perform bulk update",
-                    "BULK_UPDATE_ERROR");
+                    "Failed to update devices",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -1173,29 +1231,38 @@ namespace AuthHive.Auth.Services
         {
             try
             {
-                // 실제 구현에서는 조직별 설정을 데이터베이스에서 조회
-                // 여기서는 기본값 반환
+                var organization = await _organizationRepository.GetByIdAsync(organizationId);
+                if (organization == null)
+                {
+                    return ServiceResult<DeviceValidationRules>.Failure(
+                        "Organization not found",
+                        AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
+                }
+
+                var maxDevicesPerUser = await GetMaxDevicesPerUserAsync(organization.PricingTier);
+                var expirationDays = GetDeviceExpirationDaysAsync(organization.PricingTier, null);
+
                 var rules = new DeviceValidationRules
                 {
-                    MaxDevicesPerUser = DEFAULT_MAX_DEVICES_PER_USER,
-                    DefaultExpirationDays = DEFAULT_EXPIRATION_DAYS,
-                    RequireLocationValidation = false,
-                    RequireIpValidation = true,
-                    AllowedDeviceTypes = new List<string> { "Desktop", "Mobile", "Tablet" },
-                    BlockedDeviceTypes = new List<string>(),
-                    MinTrustLevel = MIN_TRUST_LEVEL,
-                    MaxTrustLevel = MAX_TRUST_LEVEL
+                    MaxDevicesPerUser = maxDevicesPerUser,
+                    DefaultExpirationDays = expirationDays,
+                    RequireFingerprint = true,
+                    RequireUserAgent = false,
+                    RequireIpAddress = true,
+                    AllowedDeviceTypes = new List<string> { "Mobile", "Desktop", "Tablet", "Browser" },
+                    MinFingerprintLength = 32,
+                    MaxFingerprintLength = AuthConstants.Security.DeviceFingerprintLength,
+                    PlanType = organization.PricingTier
                 };
-                
-                return await Task.FromResult(ServiceResult<DeviceValidationRules>.Success(rules));
+
+                return ServiceResult<DeviceValidationRules>.Success(rules);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting validation rules for organization {OrganizationId}",
-                    organizationId);
+                _logger.LogError(ex, "Error getting validation rules for organization {OrganizationId}", organizationId);
                 return ServiceResult<DeviceValidationRules>.Failure(
                     "Failed to get validation rules",
-                    "RULES_ERROR");
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -1203,6 +1270,9 @@ namespace AuthHive.Auth.Services
 
         #region IAuditableService Implementation
 
+        /// <summary>
+        /// 엔티티 변경 이력 추적
+        /// </summary>
         public async Task TrackChangeAsync(
             string entityName,
             Guid entityId,
@@ -1212,14 +1282,24 @@ namespace AuthHive.Auth.Services
             Guid? connectedId = null,
             string? additionalInfo = null)
         {
-            // 실제 구현에서는 감사 로그 테이블에 저장
-            _logger.LogInformation(
-                "Audit: {EntityName}:{EntityId} - {Action} by {ConnectedId}",
-                entityName, entityId, action, connectedId);
-            
-            await Task.CompletedTask;
+            await _auditService.LogActionAsync(
+                connectedId,
+                action,
+                AuditActionType.Update,
+                entityName,
+                entityId.ToString(),
+                true,
+                JsonSerializer.Serialize(new
+                {
+                    OldValue = oldValue,
+                    NewValue = newValue,
+                    AdditionalInfo = additionalInfo
+                }));
         }
 
+        /// <summary>
+        /// 사용자 활동 로깅
+        /// </summary>
         public async Task LogActivityAsync(
             Guid connectedId,
             string activity,
@@ -1227,14 +1307,24 @@ namespace AuthHive.Auth.Services
             string? ipAddress = null,
             string? userAgent = null)
         {
-            // 실제 구현에서는 활동 로그 테이블에 저장
-            _logger.LogInformation(
-                "Activity: {ConnectedId} - {Activity}: {Details}",
-                connectedId, activity, details);
-            
-            await Task.CompletedTask;
+            await _auditService.LogActionAsync(
+                connectedId,
+                activity,
+                AuditActionType.View,
+                "UserActivity",
+                null,
+                true,
+                JsonSerializer.Serialize(new
+                {
+                    Details = details,
+                    IpAddress = ipAddress,
+                    UserAgent = userAgent
+                }));
         }
 
+        /// <summary>
+        /// 보안 이벤트 로깅
+        /// </summary>
         public async Task LogSecurityEventAsync(
             string eventType,
             string description,
@@ -1242,34 +1332,134 @@ namespace AuthHive.Auth.Services
             string? ipAddress = null,
             SecurityEventSeverity severity = SecurityEventSeverity.Info)
         {
-            // 실제 구현에서는 보안 이벤트 테이블에 저장
-            _logger.LogWarning(
-                "Security Event [{Severity}]: {EventType} - {Description} for {ConnectedId}",
-                severity, eventType, description, connectedId);
-            
-            await Task.CompletedTask;
+            var auditSeverity = severity switch
+            {
+                SecurityEventSeverity.Critical => AuditEventSeverity.Critical,
+                SecurityEventSeverity.Error => AuditEventSeverity.High,
+                SecurityEventSeverity.Warning => AuditEventSeverity.Medium,
+                _ => AuditEventSeverity.Low
+            };
+
+            await _auditService.LogSecurityEventAsync(
+                eventType,
+                auditSeverity,
+                description,
+                connectedId,
+                new Dictionary<string, object> { ["ipAddress"] = ipAddress ?? "unknown" });
         }
 
+        /// <summary>
+        /// 주요 감사 이벤트 기록
+        /// </summary>
         public async Task AuditActionAsync(
             string action,
             string description,
             Guid? connectedId = null)
         {
-            // 실제 구현에서는 감사 로그 테이블에 저장
-            _logger.LogInformation(
-                "Audit Action: {Action} - {Description} by {ConnectedId}",
-                action, description, connectedId);
-            
-            await Task.CompletedTask;
+            await _auditService.LogActionAsync(
+                connectedId,
+                action,
+                AuditActionType.Custom,
+                "TrustedDevice",
+                null,
+                true,
+                description);
         }
 
         #endregion
 
         #region Helper Methods
 
-        /// <summary>
-        /// 엔티티를 DTO로 매핑
-        /// </summary>
+        // ... (이전 헬퍼 메소드들 유지)
+        private async Task<int> GetMaxDevicesPerUserAsync(string planType)
+        {
+            var cacheKey = $"{AuthConstants.CacheKeys.OrganizationPrefix}plan_limits:{planType}:max_devices";
+
+            // string으로 캐시 조회
+            var cached = await _cacheService.GetAsync<string>(cacheKey);
+            if (!string.IsNullOrEmpty(cached) && int.TryParse(cached, out var cachedValue))
+                return cachedValue;
+
+            int maxDevices = planType switch
+            {
+                PricingConstants.SubscriptionPlans.BASIC_KEY => 3,
+                PricingConstants.SubscriptionPlans.PRO_KEY => 10,
+                PricingConstants.SubscriptionPlans.BUSINESS_KEY => 50,
+                PricingConstants.SubscriptionPlans.ENTERPRISE_KEY => AuthConstants.Security.MaxTrustedDevicesPerUser * 10,
+                _ => AuthConstants.Security.MaxTrustedDevicesPerUser
+            };
+
+            // string으로 캐시 저장
+            await _cacheService.SetAsync(cacheKey, maxDevices.ToString(),
+                TimeSpan.FromSeconds(AuthConstants.CacheKeys.SecurityCacheTTL));
+            return maxDevices;
+        }
+        private int GetDeviceExpirationDaysAsync(string planType, int? requestedDays)
+        {
+            var defaultDays = AuthConstants.Security.TrustedDeviceLifetime / (60 * 60 * 24);
+
+            if (requestedDays.HasValue)
+            {
+                var maxDays = planType switch
+                {
+                    PricingConstants.SubscriptionPlans.BASIC_KEY => defaultDays / 3,
+                    PricingConstants.SubscriptionPlans.PRO_KEY => defaultDays / 2,
+                    PricingConstants.SubscriptionPlans.BUSINESS_KEY => defaultDays,
+                    PricingConstants.SubscriptionPlans.ENTERPRISE_KEY => defaultDays * 3,
+                    _ => defaultDays
+                };
+                return Math.Min(requestedDays.Value, maxDays);
+            }
+
+            return planType switch
+            {
+                PricingConstants.SubscriptionPlans.BASIC_KEY => defaultDays / 3,
+                PricingConstants.SubscriptionPlans.PRO_KEY => defaultDays / 2,
+                PricingConstants.SubscriptionPlans.BUSINESS_KEY => defaultDays,
+                PricingConstants.SubscriptionPlans.ENTERPRISE_KEY => defaultDays * 3,
+                _ => defaultDays
+            };
+        }
+
+        private int GetPlanBasedTrustLevel(string planType)
+        {
+            return planType switch
+            {
+                PricingConstants.SubscriptionPlans.BASIC_KEY => (int)TrustLevel.Low,
+                PricingConstants.SubscriptionPlans.PRO_KEY => (int)TrustLevel.Medium,
+                PricingConstants.SubscriptionPlans.BUSINESS_KEY => (int)TrustLevel.High,
+                PricingConstants.SubscriptionPlans.ENTERPRISE_KEY => (int)TrustLevel.VeryHigh,
+                _ => (int)TrustLevel.Low
+            };
+        }
+        private int GetAuthenticationStrength(AuthenticationMethod? method)
+        {
+            if (!method.HasValue)
+                return (int)AuthenticationStrength.Low;
+
+            return method.Value switch
+            {
+                AuthenticationMethod.Biometric => (int)AuthenticationStrength.VeryHigh,
+                AuthenticationMethod.Certificate => (int)AuthenticationStrength.VeryHigh,
+                AuthenticationMethod.TwoFactor => (int)AuthenticationStrength.High,
+                AuthenticationMethod.Passkey => (int)AuthenticationStrength.High,
+                AuthenticationMethod.SSO => (int)AuthenticationStrength.Medium,
+                AuthenticationMethod.OAuth => (int)AuthenticationStrength.Medium,
+                AuthenticationMethod.Password => (int)AuthenticationStrength.Low,
+                AuthenticationMethod.MagicLink => (int)AuthenticationStrength.Low,
+                _ => (int)AuthenticationStrength.Low
+            };
+        }
+
+
+        private string GetRequiredPlanForDeviceCount(int deviceCount)
+        {
+            if (deviceCount <= 3) return PricingConstants.SubscriptionPlans.BASIC_KEY;
+            if (deviceCount <= 10) return PricingConstants.SubscriptionPlans.PRO_KEY;
+            if (deviceCount <= 50) return PricingConstants.SubscriptionPlans.BUSINESS_KEY;
+            return PricingConstants.SubscriptionPlans.ENTERPRISE_KEY;
+        }
+
         private TrustedDeviceDto MapToDto(TrustedDevice device)
         {
             return new TrustedDeviceDto
@@ -1283,91 +1473,86 @@ namespace AuthHive.Auth.Services
                 LastUsedAt = device.LastUsedAt,
                 ExpiresAt = device.ExpiresAt,
                 IsActive = device.IsActive,
-                DeviceType = device.DeviceType ?? "Unknown",
+                DeviceType = device.DeviceType ?? CommonDefaults.UnknownDeviceType,
                 Browser = device.Browser,
                 OperatingSystem = device.OperatingSystem,
                 IpAddress = device.IpAddress
             };
         }
 
-        /// <summary>
-        /// 메타데이터에서 신뢰 레벨 추출
-        /// </summary>
-        private int GetTrustLevelFromMetadata(string? metadata)
-        {
-            if (string.IsNullOrEmpty(metadata))
-                return DEFAULT_TRUST_LEVEL;
-            
-            try
-            {
-                var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(metadata);
-                if (dict != null && dict.TryGetValue("trustLevel", out var trustLevel))
-                {
-                    return trustLevel.GetInt32();
-                }
-            }
-            catch
-            {
-                // 파싱 실패 시 기본값 반환
-            }
-            
-            return DEFAULT_TRUST_LEVEL;
-        }
-
-        /// <summary>
-        /// UserAgent 파싱
-        /// </summary>
         private void ParseUserAgent(string userAgent, out string? browser, out string? os)
         {
             browser = null;
             os = null;
-            
-            // 간단한 UserAgent 파싱 (실제 구현에서는 전문 라이브러리 사용)
-            if (userAgent.Contains("Chrome"))
-                browser = "Chrome";
-            else if (userAgent.Contains("Firefox"))
-                browser = "Firefox";
-            else if (userAgent.Contains("Safari"))
-                browser = "Safari";
-            else if (userAgent.Contains("Edge"))
-                browser = "Edge";
-            
-            if (userAgent.Contains("Windows"))
-                os = "Windows";
-            else if (userAgent.Contains("Mac"))
-                os = "macOS";
-            else if (userAgent.Contains("Linux"))
-                os = "Linux";
-            else if (userAgent.Contains("Android"))
-                os = "Android";
-            else if (userAgent.Contains("iOS") || userAgent.Contains("iPhone"))
-                os = "iOS";
+
+            if (userAgent.Contains("Chrome")) browser = "Chrome";
+            else if (userAgent.Contains("Firefox")) browser = "Firefox";
+            else if (userAgent.Contains("Safari")) browser = "Safari";
+            else if (userAgent.Contains("Edge")) browser = "Edge";
+
+            if (userAgent.Contains("Windows")) os = "Windows";
+            else if (userAgent.Contains("Mac")) os = "macOS";
+            else if (userAgent.Contains("Linux")) os = "Linux";
+            else if (userAgent.Contains("Android")) os = "Android";
+            else if (userAgent.Contains("iOS") || userAgent.Contains("iPhone")) os = "iOS";
         }
 
-        /// <summary>
-        /// 장치 캐시 무효화
-        /// </summary>
-        private void InvalidateDeviceCache(Guid userId, string deviceId)
+        private async Task InvalidateUserDeviceCacheAsync(Guid userId)
         {
             var cacheKeys = new[]
             {
-                GetDeviceTrustCacheKey(userId, deviceId, "*"),
-                $"device_list_{userId}",
-                $"device_stats_{userId}"
+                $"{AuthConstants.CacheKeys.SecurityPrefix}devices:{userId}",
+                $"{AuthConstants.CacheKeys.SecurityPrefix}device_list:{userId}",
+                $"{AuthConstants.CacheKeys.SecurityPrefix}device_stats:{userId}"
             };
-            
+
             foreach (var key in cacheKeys)
             {
-                _cache.Remove(key);
+                await _cacheService.RemoveAsync(key);
             }
         }
 
-        /// <summary>
-        /// 장치 신뢰 캐시 키 생성
-        /// </summary>
-        private string GetDeviceTrustCacheKey(Guid userId, string deviceId, string fingerprint)
+        private async Task<int> GetRateLimitCountAsync(string key)
         {
-            return $"device_trust_{userId}_{deviceId}_{fingerprint}";
+            // string으로 캐시 조회
+            var cached = await _cacheService.GetAsync<string>(key);
+            if (!string.IsNullOrEmpty(cached) && int.TryParse(cached, out var count))
+                return count;
+            return 0;
+        }
+
+        private async Task IncrementRateLimitAsync(string key)
+        {
+            var count = await GetRateLimitCountAsync(key);
+            await _cacheService.SetAsync(
+                key,
+                (count + 1).ToString(),
+                TimeSpan.FromMinutes(AuthConstants.OAuth.BlockDurationMinutes));
+        }
+
+        private async Task ClearRateLimitAsync(string key)
+        {
+            await _cacheService.RemoveAsync(key);
+        }
+
+        private int CalculateRiskScore(List<TrustedDevice> devices)
+        {
+            var riskScore = 0;
+
+            // Multiple IPs increases risk
+            var uniqueIps = devices.Select(d => d.IpAddress).Distinct().Count();
+            if (uniqueIps > 5) riskScore += 20;
+            else if (uniqueIps > 3) riskScore += 10;
+
+            // Old devices increase risk
+            var oldDevices = devices.Count(d => d.TrustedAt < _dateTimeProvider.UtcNow.AddMonths(-6));
+            if (oldDevices > 0) riskScore += oldDevices * 5;
+
+            // Inactive devices increase risk
+            var inactiveDevices = devices.Count(d => !d.IsActive);
+            if (inactiveDevices > 0) riskScore += inactiveDevices * 10;
+
+            return Math.Min(100, riskScore);
         }
 
         #endregion

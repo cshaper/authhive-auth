@@ -117,7 +117,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     ConnectedId = connectedIdResult.Data.Id,
                     OrganizationId = targetOrgId,
-                    IPAddress = CommonDefaults.DefaultLocalIpV4,
+                    IpAddress = CommonDefaults.DefaultLocalIpV4,
                     UserAgent = CommonDefaults.RegistrationUserAgent
                 };
 
@@ -193,7 +193,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     ConnectedId = connectedId.Id,
                     OrganizationId = targetOrgId,
-                    IPAddress = CommonDefaults.DefaultLocalIpV4, // TODO: 실제 IP
+                    IpAddress = CommonDefaults.DefaultLocalIpV4, // TODO: 실제 IP
                     UserAgent = CommonDefaults.PasswordAuthUserAgent
                 };
 

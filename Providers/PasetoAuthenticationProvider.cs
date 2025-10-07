@@ -193,7 +193,7 @@ namespace AuthHive.Auth.Providers.Authentication
                 SessionType = SessionType.Web,
                 Level = request.OrganizationId.HasValue ? SessionLevel.Organization : SessionLevel.Global,
                 Status = SessionStatus.Active,
-                IPAddress = request.IpAddress,
+                IpAddress = request.IpAddress,
                 UserAgent = request.UserAgent,
                 ExpiresAt = DateTime.UtcNow.AddHours(8),
                 LastActivityAt = DateTime.UtcNow

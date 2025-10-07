@@ -505,7 +505,7 @@ namespace AuthHive.Auth.Services.Handlers
                     Id = Guid.NewGuid(),
                     SessionId = sessionId,
                     ActivityType = activityType,
-                    IPAddress = ipAddress,
+                    IpAddress = ipAddress,
                     Metadata = metadata != null ? JsonSerializer.Serialize(metadata) : null,
                     Timestamp = _dateTimeProvider.UtcNow,
                     CreatedAt = _dateTimeProvider.UtcNow
@@ -547,7 +547,7 @@ namespace AuthHive.Auth.Services.Handlers
                     ActivityType = activityType,
                     IsSuccessful = isSuccessful,
                     Timestamp = _dateTimeProvider.UtcNow,
-                    IPAddress = "System",
+                    IpAddress = "System",
                     Metadata = metadata != null ? JsonSerializer.Serialize(metadata) : null,
                     CreatedAt = _dateTimeProvider.UtcNow
                 };

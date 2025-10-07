@@ -157,7 +157,7 @@ namespace AuthHive.Auth.Validator
                 }
                 foreach (var ip in ipAddresses)
                 {
-                    if (!IPAddress.TryParse(ip, out _))
+                    if (!System.Net.IPAddress.TryParse(ip, out _))
                     {
                          return Task.FromResult(ValidationResult.Failure("IpRestrictions", $"The IP address '{ip}' is not in a valid format.", "INVALID_IP_FORMAT"));
                     }

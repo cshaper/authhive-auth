@@ -189,7 +189,7 @@ namespace AuthHive.Auth.Repositories
             if (string.IsNullOrWhiteSpace(ipAddress))
                 return Enumerable.Empty<UserActivityLog>();
 
-            var query = Query().Where(log => log.IPAddress == ipAddress);
+            var query = Query().Where(log => log.IpAddress == ipAddress);
             query = ApplyTimeAndLimitFilter(query, startDate, endDate, null);
 
             return await query.OrderByDescending(log => log.Timestamp).ToListAsync(cancellationToken);
@@ -354,7 +354,7 @@ namespace AuthHive.Auth.Repositories
                 query = query.Where(log => log.Timestamp <= request.EndDate.Value);
 
             if (!string.IsNullOrWhiteSpace(request.IpAddress))
-                query = query.Where(log => log.IPAddress == request.IpAddress);
+                query = query.Where(log => log.IpAddress == request.IpAddress);
 
             if (request.IsSuccessful.HasValue)
                 query = query.Where(log => log.IsSuccessful == request.IsSuccessful.Value);

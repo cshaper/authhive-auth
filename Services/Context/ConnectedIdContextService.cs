@@ -70,7 +70,7 @@ namespace AuthHive.Auth.Services.Context
 
             // 권한 컨텍스트를 위한 고유 캐시 키 생성
             var cacheKey = GenerateCacheKeyForContext(connectedId, ConnectedIdContextType.Permissions);
-            
+
             try
             {
                 // 1. 캐시에서 먼저 컨텍스트를 찾아봅니다.
@@ -137,7 +137,7 @@ namespace AuthHive.Auth.Services.Context
 
                 if (newConnection == null)
                     return ServiceResult<SwitchContextResult>.Failure("User is not a member of the target organization.");
-                
+
                 // 3. 새로운 조직에 맞는 컨텍스트를 생성합니다.
                 var newContextResult = await RefreshContextAsync(newConnection.Id);
                 if (!newContextResult.IsSuccess || newContextResult.Data == null)
@@ -151,10 +151,14 @@ namespace AuthHive.Auth.Services.Context
                     new Claim("org_id", newConnection.OrganizationId.ToString()),
                 };
 
-                var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(newConnection.UserId, newConnection.Id, claims);
+
+                var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
+                    newConnection.UserId.Value,
+                    newConnection.Id,
+                    claims);
+
                 if (!tokenResult.IsSuccess || tokenResult.Data == null)
                     return ServiceResult<SwitchContextResult>.Failure("Failed to generate new access token.");
-
                 // 5. 최종 결과를 DTO에 담아 반환합니다.
                 var result = new SwitchContextResult
                 {
@@ -170,7 +174,7 @@ namespace AuthHive.Auth.Services.Context
                 return ServiceResult<SwitchContextResult>.Failure("An error occurred while switching context.");
             }
         }
-        
+
         /// <summary>
         /// 특정 사용자의 모든 컨텍스트 캐시를 삭제합니다.
         /// 역할/권한 변경 시 호출하여 오래된 캐시 정보를 제거합니다.
@@ -179,7 +183,7 @@ namespace AuthHive.Auth.Services.Context
         {
             if (connectedId == Guid.Empty)
                 return ServiceResult.Failure("ConnectedId cannot be empty.");
-            
+
             // 향후 추가될 다른 컨텍스트 타입(설정, 기능 플래그 등)도 모두 삭제하도록 확장 가능
             var contextTypes = Enum.GetValues(typeof(ConnectedIdContextType)).Cast<ConnectedIdContextType>();
             try
@@ -198,7 +202,7 @@ namespace AuthHive.Auth.Services.Context
                 return ServiceResult.Failure("An error occurred while invalidating the cache.");
             }
         }
-        
+
         /// <summary>
         /// 데이터베이스에서 역할과 권한 정보를 조회하여 컨텍스트를 만들고 캐시에 저장하는 핵심 내부 메서드입니다.
         /// </summary>
@@ -211,7 +215,7 @@ namespace AuthHive.Auth.Services.Context
 
             var roles = await _roleRepository.GetByConnectedIdAsync(connectedId);
             var permissions = await _permissionRepository.GetPermissionsForConnectedIdAsync(connectedId);
-             
+
             // 2. 조회한 정보를 DTO가 요구하는 형식으로 가공합니다.
             var roleNames = roles.Select(r => r.Name).ToList();
             var permissionScopes = permissions.Select(p => p.Scope).ToList();
@@ -222,7 +226,7 @@ namespace AuthHive.Auth.Services.Context
                 Roles = roleNames,
                 Permissions = permissionScopes
             };
-            
+
             // 4. 최종 DTO를 생성합니다.
             var contextDto = new ConnectedIdContextDto
             {
@@ -236,7 +240,7 @@ namespace AuthHive.Auth.Services.Context
                 CreatedAt = DateTime.UtcNow,
                 IsHotPath = true // 권한 컨텍스트는 항상 자주 사용되므로 Hot Path로 표시
             };
-            
+
             // 5. 생성된 DTO를 캐시에 저장합니다.
             await _cacheService.SetAsync(contextDto.ContextKey, contextDto, TimeSpan.FromHours(1));
             _logger.LogInformation("Permission context built and cached for ConnectedId: {ConnectedId}", connectedId);

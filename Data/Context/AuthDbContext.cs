@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Http;
 using System.Linq.Expressions;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Entities.Business.Platform;
+using AuthHive.Core.Models.Auth.Authentication;
 namespace AuthHive.Auth.Data.Context
 {
     public class AuthDbContext : DbContext
@@ -29,12 +30,14 @@ namespace AuthHive.Auth.Data.Context
         public DbSet<ConnectedId> ConnectedIds { get; set; }
         public DbSet<ConnectedIdContext> ConnectedIdContexts { get; set; }
         public DbSet<ConnectedIdRole> ConnectedIdRoles { get; set; }
-
         public DbSet<ClientCertificate> ClientCertificates { get; set; }
         public DbSet<SessionEntity> Sessions { get; set; }
         public DbSet<SessionActivityLog> SessionActivityLogs { get; set; }
         public DbSet<AuthenticationAttemptLog> AuthenticationAttemptLogs { get; set; }
         public DbSet<AuthorizationAuditLog> AuthorizationAuditLogs { get; set; }
+
+        public DbSet<SSOConfiguration> SSOConfigurations { get; set; }
+        public DbSet<SamlConfiguration> SamlConfigurations { get; set; }
         #endregion
 
         #region 권한 관리
@@ -254,7 +257,7 @@ namespace AuthHive.Auth.Data.Context
                       .IsRequired()
                       .HasMaxLength(50);
 
-                    // --- Default Values ---
+                // --- Default Values ---
 
                 entity.Property(e => e.SignupBonusPoints)
                       .IsRequired()
@@ -276,26 +279,26 @@ namespace AuthHive.Auth.Data.Context
                       .IsRequired()
                       .HasDefaultValue(false);
 
-                    // --- Relationships ---
+                // --- Relationships ---
 
-                    // Defines the one-to-many relationship between OrganizationPlan and PlanFeature.
+                // Defines the one-to-many relationship between OrganizationPlan and PlanFeature.
                 entity.HasMany(p => p.Features)
                       .WithOne(f => f.Plan)
                       .HasForeignKey(f => f.PlanId)
                       .OnDelete(DeleteBehavior.Cascade); // If a plan is deleted, its features are also deleted.
 
-                    // Defines the one-to-many relationship between OrganizationPlan and PlanSubscription.
+                // Defines the one-to-many relationship between OrganizationPlan and PlanSubscription.
                 entity.HasMany(p => p.Subscriptions)
                       .WithOne(s => s.Plan)
                       .HasForeignKey(s => s.PlanId)
                       .OnDelete(DeleteBehavior.Restrict); // Prevent deleting a plan if it has active subscriptions.
 
-                    // Note: For PostgreSQL, the [Column(TypeName = "jsonb")] attribute is often sufficient.
-                    // If you need more specific JSON handling, you can add it here.
-                    // entity.Property(e => e.Configuration).HasColumnType("jsonb");
-                    // entity.Property(e => e.Metadata).HasColumnType("jsonb");
-                });
-                
+                // Note: For PostgreSQL, the [Column(TypeName = "jsonb")] attribute is often sufficient.
+                // If you need more specific JSON handling, you can add it here.
+                // entity.Property(e => e.Configuration).HasColumnType("jsonb");
+                // entity.Property(e => e.Metadata).HasColumnType("jsonb");
+            });
+
             modelBuilder.Entity<UserProfile>(entity =>
             {
                 entity.ToTable("user_profiles");
@@ -369,6 +372,50 @@ namespace AuthHive.Auth.Data.Context
             {
                 entity.ToTable("connected_id_roles");
                 entity.HasIndex(cr => new { cr.ConnectedId, cr.RoleId, cr.ApplicationId }).IsUnique();
+            });
+
+            modelBuilder.Entity<ClientCertificate>(entity =>
+            {
+                entity.ToTable("client_certificates");
+
+                // Unique constraint on thumbprint (fingerprint)
+                entity.HasIndex(c => c.Thumbprint).IsUnique();
+
+                // Indexes for query performance
+                entity.HasIndex(c => c.ConnectedIdId);
+                entity.HasIndex(c => c.SerialNumber);
+                entity.HasIndex(c => c.NotAfter);
+                entity.HasIndex(c => c.IsActive);
+                entity.HasIndex(c => c.IsRevoked);
+                entity.HasIndex(c => c.LastUsedAt);
+
+                // Composite indexes for common queries
+                entity.HasIndex(c => new { c.ConnectedIdId, c.IsActive });
+                entity.HasIndex(c => new { c.IsActive, c.NotAfter })
+                    .HasFilter("\"IsActive\" = true");
+
+                // Property configurations
+                entity.Property(c => c.CertificateData)
+                    .HasColumnType("bytea");
+
+                entity.Property(c => c.Metadata)
+                    .HasColumnType("jsonb");
+
+                // Default values
+                entity.Property(c => c.IsActive)
+                    .HasDefaultValue(true);
+
+                entity.Property(c => c.UseCount)
+                    .HasDefaultValue(0);
+
+                entity.Property(c => c.IsRevoked)
+                    .HasDefaultValue(false);
+
+                // Relationship with ConnectedId
+                entity.HasOne(c => c.ConnectedId)
+                    .WithMany()
+                    .HasForeignKey(c => c.ConnectedIdId)
+                    .OnDelete(DeleteBehavior.Cascade);
             });
             #endregion
 
@@ -626,6 +673,76 @@ namespace AuthHive.Auth.Data.Context
                 entity.ToTable("audit_trail_details");
                 entity.HasIndex(d => d.AuditLogId);
                 entity.HasIndex(d => d.FieldName);
+            });
+            modelBuilder.Entity<SamlConfiguration>(entity =>
+            {
+                entity.ToTable("saml_configurations");
+
+                // Indexes
+                entity.HasIndex(s => s.OrganizationId);
+                entity.HasIndex(s => s.EntityId).IsUnique();
+                entity.HasIndex(s => s.Provider);
+                entity.HasIndex(s => s.IsEnabled);
+                entity.HasIndex(s => new { s.OrganizationId, s.Provider }).IsUnique();
+
+                // Property configurations
+                entity.Property(s => s.Protocol)
+                    .IsRequired()
+                    .HasMaxLength(50);
+
+                entity.Property(s => s.Provider)
+                    .IsRequired()
+                    .HasMaxLength(100);
+
+                entity.Property(s => s.EntityId)
+                    .IsRequired()
+                    .HasMaxLength(500);
+
+                entity.Property(s => s.SsoUrl)
+                    .HasMaxLength(1000);
+
+                entity.Property(s => s.SloUrl)
+                    .HasMaxLength(1000);
+
+                entity.Property(s => s.Certificate)
+                    .HasColumnType("text");
+
+                entity.Property(s => s.MetadataUrl)
+                    .HasMaxLength(1000);
+
+                entity.Property(s => s.Metadata)
+                    .HasColumnType("text");
+
+                entity.Property(s => s.AcsUrl)
+                    .HasMaxLength(1000);
+
+                entity.Property(s => s.AttributeMapping)
+                    .HasColumnType("jsonb")
+                    .HasDefaultValue("{}");
+
+                entity.Property(s => s.AllowedDomains)
+                    .HasColumnType("jsonb")
+                    .HasDefaultValue("[]");
+
+                entity.Property(s => s.AdditionalSettings)
+                    .HasColumnType("jsonb")
+                    .HasDefaultValue("{}");
+
+                // Default values
+                entity.Property(s => s.EnableAutoProvisioning)
+                    .HasDefaultValue(false);
+
+                entity.Property(s => s.EnableJitProvisioning)
+                    .HasDefaultValue(false);
+
+                entity.Property(s => s.IsEnabled)
+                    .HasDefaultValue(true);
+
+                // Relationships (if DefaultRoleId exists)
+                entity.HasOne<Role>()
+                    .WithMany()
+                    .HasForeignKey(s => s.DefaultRoleId)
+                    .OnDelete(DeleteBehavior.SetNull);
             });
 
             modelBuilder.Entity<AuthenticationAttemptLog>(entity =>

@@ -96,5 +96,7 @@ namespace AuthHive.Auth.Data
             _context.Dispose();
             GC.SuppressFinalize(this);
         }
+
+        public bool HasActiveTransaction => _transaction != null;
     }
 }

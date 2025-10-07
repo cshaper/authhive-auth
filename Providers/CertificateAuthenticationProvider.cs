@@ -137,7 +137,7 @@ namespace AuthHive.Auth.Providers.Authentication
                         ConnectedId = connectedId.Id,
                         OrganizationId = organizationId,
                         SessionType = SessionType.Web,
-                        IPAddress = request.IpAddress,
+                        IpAddress = request.IpAddress,
                         UserAgent = request.UserAgent,
                         DeviceInfo = request.DeviceInfo?.DeviceId,
                         OperatingSystem = request.DeviceInfo?.OperatingSystem,
@@ -165,7 +165,7 @@ namespace AuthHive.Auth.Providers.Authentication
                 // 토큰 생성
                 var claims = new List<Claim>
                 {
-                    new Claim("user_id", user.Id.ToString()),
+                    new Claim("user_id", user!.Id.ToString()),
                     new Claim("connected_id", connectedId.Id.ToString()),
                     new Claim("org_id", organizationId.ToString()),
                     new Claim("auth_method", "certificate"),

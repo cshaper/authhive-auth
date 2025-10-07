@@ -36,6 +36,8 @@ namespace AuthHive.Auth.Services.External
         private const string CACHE_PREFIX = "social";
         private const int TOKEN_CACHE_MINUTES = 30;
         private const int PROFILE_CACHE_MINUTES = 15;
+        private int _failureCount = 0;
+        private const int RECOVERY_THRESHOLD = 3;
 
         #region IExternalService Properties
         public string ServiceName => "Social";
@@ -89,44 +91,58 @@ namespace AuthHive.Auth.Services.External
         /// 통합 소셜 인증 - 모든 프로바이더 동적 처리
         /// </summary>
         public async Task<ServiceResult<SocialAuthResult>> AuthenticateAsync(
-            SocialProvider provider,
-            SocialAuthRequest request)
+     SocialProvider provider,
+     SocialAuthRequest request)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
-                await _unitOfWork.BeginTransactionAsync();
-
                 // 동적 토큰 검증
                 var profile = await ValidateDynamicTokenAsync(provider, request.Token);
                 if (profile == null)
                 {
-                    await _unitOfWork.RollbackTransactionAsync();
                     return ServiceResult<SocialAuthResult>.Failure("Invalid token");
                 }
 
                 // 사용자 조회/생성
                 var userResult = await GetOrCreateUserAsync(provider, profile);
-                // 수정 후
                 if (!userResult.IsSuccess || userResult.Data == null)
                 {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<SocialAuthResult>.Failure(userResult.Message ?? "User creation failed");
+                    return ServiceResult<SocialAuthResult>.Failure(
+                        userResult.Message ?? "User creation failed");
                 }
 
                 // 토큰 캐싱
-                await CacheTokensAsync(userResult.Data!.ConnectedId, provider, request.Token);
+                await CacheTokensAsync(userResult.Data.ConnectedId, provider, request.Token);
 
                 await _unitOfWork.CommitTransactionAsync();
 
-                ServiceCalled?.Invoke(this, new() { ServiceName = ServiceName, Operation = "Authenticate" });
+                ServiceCalled?.Invoke(this, new()
+                {
+                    ServiceName = ServiceName,
+                    Operation = "Authenticate"
+                });
+
                 return ServiceResult<SocialAuthResult>.Success(userResult.Data);
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Social auth failed for {Provider}", provider);
-                ServiceFailed?.Invoke(this, new() { ServiceName = ServiceName, Error = ex.Message });
+                ServiceFailed?.Invoke(this, new()
+                {
+                    ServiceName = ServiceName,
+                    Error = ex.Message
+                });
                 return ServiceResult<SocialAuthResult>.Failure("Authentication failed");
+            }
+            finally
+            {
+                // 트랜잭션이 커밋되지 않았으면 자동 롤백
+                if (_unitOfWork.HasActiveTransaction)
+                {
+                    await _unitOfWork.RollbackTransactionAsync();
+                }
             }
         }
 

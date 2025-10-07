@@ -643,7 +643,7 @@ namespace AuthHive.Auth.Services.User
                 {
                     UserId = user.Id,
                     LoggedInAt = loginInfo.LoginTime,
-                    IPAddress = ipAddress,
+                    IpAddress = ipAddress,
                     UserAgent = userAgent,
                     IsFirstLogin = user.LoginCount == 1
                 });
@@ -731,7 +731,7 @@ namespace AuthHive.Auth.Services.User
                     ActivityType = ParseActivityType(activityType),
                     IsSuccessful = isSuccessful,
                     Timestamp = DateTime.UtcNow,
-                    IPAddress = GetClientIpAddress(),
+                    IpAddress = GetClientIpAddress(),
                     UserAgent = GetUserAgent(),
                     Metadata = additionalData != null ? JsonConvert.SerializeObject(additionalData) : null
                 };

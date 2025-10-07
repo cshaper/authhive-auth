@@ -5,88 +5,138 @@ using System.Threading.Tasks;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Repositories.Business.Platform;
+using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Core.Models.Auth.Authentication;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Requests;
 using AuthHive.Core.Models.Auth.Authentication.Responses;
 using AuthHive.Core.Models.Common;
+using AuthHive.Core.Models.Infra.Security;
+using AuthHive.Core.Constants.Auth;
+using AuthHive.Core.Constants.Business;
+using AuthHive.Core.Constants.Common;
+using AuthHive.Core.Models.Auth.Authentication.Events;
+using AuthHive.Core.Models.Business.Events;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Caching.Memory;
-using AuthHive.Core.Interfaces.User.Repository;
+using System.Text.Json;
 using UserEntity = AuthHive.Core.Entities.User.User;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
-using AuthHive.Core.Models.Infra.Security;
 
 namespace AuthHive.Auth.Services.Authentication
 {
     /// <summary>
-    /// 인증 시도 관리 서비스 구현 - AuthHive v15
-    /// 메모리 캐시를 활용한 최적화 버전
+    /// Authentication attempt management service implementation - AuthHive v15
+    /// Optimized version using memory cache with proper plan limits and events
     /// </summary>
     public class AuthenticationAttemptService : IAuthenticationAttemptService
     {
+        #region Dependencies
+
         private readonly IAuthenticationAttemptLogRepository _attemptLogRepository;
         private readonly IUserRepository _userRepository;
         private readonly ISessionRepository _sessionRepository;
-        private readonly IMemoryCache _cache;
+        private readonly IConnectedIdRepository _connectedIdRepository;
+        private readonly IPlanSubscriptionRepository _planSubscriptionRepository;
+        private readonly ICacheService _cacheService;
         private readonly IConfiguration _configuration;
         private readonly ILogger<AuthenticationAttemptService> _logger;
+        private readonly IEventBus _eventBus;
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly IDateTimeProvider _dateTimeProvider;
 
-        // 설정값
-        private readonly int _maxFailedAttempts;
-        private readonly int _lockoutDurationMinutes;
-        private readonly int _bruteForceThreshold;
-        private readonly int _riskScoreThreshold;
+        // Plan-based configuration values - will be loaded based on subscription
+        private int _maxFailedAttempts;
+        private int _lockoutDurationMinutes;
+        private int _bruteForceThreshold;
+        private int _riskScoreThreshold;
+        private int _maxConcurrentSessions;
+        private int _maxIpBlocksPerOrg;
 
-        // 캐시 키 접두사
+        // Cache key prefixes
         private const string BLOCKED_IP_PREFIX = "blocked_ip:";
         private const string TRUSTED_IP_PREFIX = "trusted_ip:";
         private const string USER_LOCK_PREFIX = "user_lock:";
         private const string FAILURE_COUNT_PREFIX = "failure_count:";
         private const string MFA_ATTEMPTS_PREFIX = "mfa_attempts:";
         private const string RECENT_ATTEMPTS_PREFIX = "recent_attempts:";
+        private const string IP_ATTEMPTS_PREFIX = "ip_attempts:";
+        private const string ORG_SETTINGS_PREFIX = "org_settings:";
+
+        #endregion
+
+        #region Constructor
 
         public AuthenticationAttemptService(
             IAuthenticationAttemptLogRepository attemptLogRepository,
             IUserRepository userRepository,
             ISessionRepository sessionRepository,
-            IMemoryCache cache,
+            IConnectedIdRepository connectedIdRepository,
+            IPlanSubscriptionRepository planSubscriptionRepository,
+            ICacheService cacheService,
             IConfiguration configuration,
-            ILogger<AuthenticationAttemptService> logger)
+            ILogger<AuthenticationAttemptService> logger,
+            IEventBus eventBus,
+            IUnitOfWork unitOfWork,
+            IDateTimeProvider dateTimeProvider)
         {
-            _attemptLogRepository = attemptLogRepository;
-            _userRepository = userRepository;
-            _sessionRepository = sessionRepository;
-            _cache = cache;
-            _configuration = configuration;
-            _logger = logger;
+            _attemptLogRepository = attemptLogRepository ?? throw new ArgumentNullException(nameof(attemptLogRepository));
+            _userRepository = userRepository ?? throw new ArgumentNullException(nameof(userRepository));
+            _sessionRepository = sessionRepository ?? throw new ArgumentNullException(nameof(sessionRepository));
+            _connectedIdRepository = connectedIdRepository ?? throw new ArgumentNullException(nameof(connectedIdRepository));
+            _planSubscriptionRepository = planSubscriptionRepository ?? throw new ArgumentNullException(nameof(planSubscriptionRepository));
+            _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService));
+            _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
+            _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
+            _dateTimeProvider = dateTimeProvider ?? throw new ArgumentNullException(nameof(dateTimeProvider));
 
-            // 설정 로드
-            _maxFailedAttempts = configuration.GetValue<int>("Auth:Security:MaxFailedAttempts", 5);
-            _lockoutDurationMinutes = configuration.GetValue<int>("Auth:Security:LockoutDurationMinutes", 30);
-            _bruteForceThreshold = configuration.GetValue<int>("Auth:Security:BruteForceThreshold", 10);
-            _riskScoreThreshold = configuration.GetValue<int>("Auth:Security:RiskScoreThreshold", 70);
+            // Load default configuration (will be overridden by plan-specific settings)
+            LoadDefaultConfiguration();
         }
 
-        #region IService 인터페이스 구현
+        private void LoadDefaultConfiguration()
+        {
+            // Default values - will be overridden based on organization's plan
+            _maxFailedAttempts = _configuration.GetValue<int>("Auth:Security:MaxFailedAttempts",
+                AuthConstants.Security.MaxFailedLoginAttempts);
+            _lockoutDurationMinutes = _configuration.GetValue<int>("Auth:Security:LockoutDurationMinutes",
+                AuthConstants.Security.AccountLockoutDurationMinutes);
+            _bruteForceThreshold = _configuration.GetValue<int>("Auth:Security:BruteForceThreshold", 10);
+            _riskScoreThreshold = _configuration.GetValue<int>("Auth:Security:RiskScoreThreshold", 70);
+            _maxConcurrentSessions = AuthConstants.Session.MaxConcurrentGlobalSessions;
+            _maxIpBlocksPerOrg = 100; // Default limit for IP blocks per organization
+        }
+
+        #endregion
+
+        #region IService Interface Implementation
 
         /// <summary>
-        /// 서비스 상태 확인
+        /// Check service health status
         /// </summary>
         public async Task<bool> IsHealthyAsync()
         {
             try
             {
-                // Repository 접근 가능 여부 확인
+                // 리포지토리 접근성 확인
                 await _attemptLogRepository.CountAsync();
 
                 // 캐시 동작 확인
-                _cache.Set("health_check", true, TimeSpan.FromSeconds(1));
-                _cache.Remove("health_check");
+                string healthCheckKey = "health_check";
+                await _cacheService.SetStringAsync(healthCheckKey, true.ToString(), TimeSpan.FromSeconds(10));
+
+                // Remove를 await RemoveAsync로 수정
+                await _cacheService.RemoveAsync(healthCheckKey);
 
                 return true;
             }
@@ -98,31 +148,43 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         /// <summary>
-        /// 서비스 초기화
+        /// Initialize service
         /// </summary>
         public Task InitializeAsync()
         {
             _logger.LogInformation("AuthenticationAttemptService initialized");
-            // 필요한 초기화 로직 추가
             return Task.CompletedTask;
         }
 
         #endregion
 
-        #region 인증 시도 기록
+        #region Authentication Attempt Logging
 
         /// <summary>
-        /// 인증 시도 기록
+        /// Log authentication attempt
         /// </summary>
         public async Task<ServiceResult<AuthenticationResponse>> LogAuthenticationAttemptAsync(
             AuthenticationRequest request)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
-                // IP 차단 확인
-                if (IsIpBlocked(request.IpAddress))
+                // Get organization settings and plan limits
+                var orgSettings = await GetOrganizationSecuritySettingsAsync(request.OrganizationId ?? Guid.Empty);
+
+                // Check IP blocking with plan limits
+                var ipBlockResult = await CheckIpBlockingWithPlanLimitsAsync(
+                    request.IpAddress,
+                    request.OrganizationId,
+                    request.ApplicationId);
+
+                if (!ipBlockResult.IsSuccess)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("IP address is blocked");
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult<AuthenticationResponse>.Failure(
+                        ipBlockResult.ErrorMessage ?? "IP address is blocked",
+                        AuthConstants.ErrorCodes.SuspiciousLogin);
                 }
 
                 var attemptLog = new AuthenticationAttemptLog
@@ -134,7 +196,7 @@ namespace AuthHive.Auth.Services.Authentication
                     OrganizationId = request.OrganizationId ?? Guid.Empty,
                     IpAddress = request.IpAddress ?? "unknown",
                     UserAgent = request.UserAgent,
-                    AttemptedAt = DateTime.UtcNow,
+                    AttemptedAt = _dateTimeProvider.UtcNow,
                     Provider = request.Provider,
                     DeviceId = request.DeviceInfo?.DeviceId,
                     DeviceType = request.DeviceInfo?.DeviceType,
@@ -143,8 +205,40 @@ namespace AuthHive.Auth.Services.Authentication
 
                 await _attemptLogRepository.AddAsync(attemptLog);
 
-                // 최근 시도 캐시 업데이트
-                UpdateRecentAttemptsCache(attemptLog);
+                // Update recent attempts cache
+                await UpdateRecentAttemptsCacheAsync(attemptLog);
+
+                // Check for suspicious patterns
+                var suspiciousActivity = await DetectSuspiciousActivityAsync(
+                    attemptLog,
+                    orgSettings);
+
+                if (suspiciousActivity)
+                {
+                    // 1. 먼저 이벤트 발행에 필수적인 정보가 있는지 확인합니다.
+                    // string.IsNullOrEmpty를 사용하면 null과 빈 문자열("")을 모두 검사할 수 있습니다.
+                    if (string.IsNullOrEmpty(request.IpAddress) || string.IsNullOrEmpty(request.Username))
+                    {
+                        // 2. 필수 정보가 없다면, 이벤트를 발행하는 대신 경고 로그를 남기고 종료합니다.
+                        _logger.LogWarning("의심스러운 활동이 감지되었으나, IP 주소 또는 사용자 이름이 누락되어 이벤트를 발행할 수 없습니다.");
+                    }
+                    else
+                    {
+                        // 3. 모든 필수 정보가 유효할 때만 이벤트를 생성하고 발행합니다.
+                        // 이 블록 안에서는 request.IpAddress와 request.Username이 null이 아님이 보장됩니다.
+                        await _eventBus.PublishAsync(new SuspiciousLoginActivityEvent(
+                            organizationId: request.OrganizationId ?? Guid.Empty,
+                            ipAddress: request.IpAddress, // 경고 없이 안전하게 사용
+                            username: request.Username    // 경고 없이 안전하게 사용
+                        )
+                        {
+                            DeviceFingerprint = request.DeviceInfo?.DeviceId,
+                            RiskScore = await CalculateRiskScoreAsync(request.IpAddress, null),
+                            DetectedPatterns = new List<string> { "Unusual login pattern detected" }
+                        });
+                    }
+                }
+                await _unitOfWork.CommitTransactionAsync();
 
                 return ServiceResult<AuthenticationResponse>.Success(new AuthenticationResponse
                 {
@@ -155,13 +249,16 @@ namespace AuthHive.Auth.Services.Authentication
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error logging authentication attempt");
-                return ServiceResult<AuthenticationResponse>.Failure("Failed to log authentication attempt");
+                return ServiceResult<AuthenticationResponse>.Failure(
+                    "Failed to log authentication attempt",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 성공한 인증 기록
+        /// Log successful authentication
         /// </summary>
         public async Task<ServiceResult> LogSuccessfulAuthenticationAsync(
             Guid userId,
@@ -170,12 +267,23 @@ namespace AuthHive.Auth.Services.Authentication
             string ipAddress,
             string? userAgent = null)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
                 var user = await _userRepository.GetByIdAsync(userId);
                 if (user == null)
                 {
-                    return ServiceResult.Failure("User not found");
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult.Failure("User not found", AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                }
+
+                // Check concurrent session limits based on plan
+                var sessionLimitResult = await CheckSessionLimitsAsync(userId, user.OrganizationId);
+                if (!sessionLimitResult.IsSuccess)
+                {
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return sessionLimitResult;
                 }
 
                 var attemptLog = new AuthenticationAttemptLog
@@ -188,29 +296,50 @@ namespace AuthHive.Auth.Services.Authentication
                     IsSuccess = true,
                     IpAddress = ipAddress,
                     UserAgent = userAgent,
-                    AttemptedAt = DateTime.UtcNow,
+                    AttemptedAt = _dateTimeProvider.UtcNow,
                     OrganizationId = user.OrganizationId ?? Guid.Empty,
                     ConsecutiveFailures = 0
                 };
 
                 await _attemptLogRepository.AddAsync(attemptLog);
 
-                // 캐시 초기화
+                // Clear failure caches
                 ClearUserFailureCaches(userId);
-                UpdateRecentAttemptsCache(attemptLog);
+                await UpdateRecentAttemptsCacheAsync(attemptLog);
 
-                _logger.LogInformation("Successful authentication logged for user {UserId}", userId);
+                // Publish successful authentication event
+                await _eventBus.PublishAsync(new UserAuthenticatedEvent(
+                    // --- 생성자에 필수 값 전달 ---
+                    userId: userId,
+                    method: method.ToString(),
+                    ipAddress: ipAddress
+                )
+                {
+                    // --- 나머지 선택적 속성들은 여기서 초기화 ---
+                    ConnectedId = connectedId,
+                    DeviceInfo = userAgent,
+                    OrganizationId = user.OrganizationId
+                });
+
+                _logger.LogInformation(
+                    "Successful authentication logged for user {UserId} from {IpAddress}",
+                    userId, ipAddress);
+
+                await _unitOfWork.CommitTransactionAsync();
                 return ServiceResult.Success();
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error logging successful authentication for user {UserId}", userId);
-                return ServiceResult.Failure("Failed to log successful authentication");
+                return ServiceResult.Failure(
+                    "Failed to log successful authentication",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 실패한 인증 기록
+        /// Log failed authentication
         /// </summary>
         public async Task<ServiceResult> LogFailedAuthenticationAsync(
             string identifier,
@@ -219,22 +348,29 @@ namespace AuthHive.Auth.Services.Authentication
             string ipAddress,
             string? userAgent = null)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
-                // 사용자 찾기
+                // Find user
                 Guid? userId = await _userRepository.FindByUsernameOrEmailAsync(identifier);
                 UserEntity? user = null;
+                Guid organizationId = Guid.Empty;
 
                 if (userId.HasValue)
                 {
                     user = await _userRepository.GetByIdAsync(userId.Value);
+                    organizationId = user?.OrganizationId ?? Guid.Empty;
                 }
 
-                // 연속 실패 횟수 계산 (캐시 활용)
+                // Get organization security settings
+                var orgSettings = await GetOrganizationSecuritySettingsAsync(organizationId);
+
+                // Calculate consecutive failures (using cache)
                 var consecutiveFailures = 0;
                 if (userId.HasValue)
                 {
-                    consecutiveFailures = IncrementFailureCount(userId.Value);
+                    var failureCount = await IncrementFailureCountAsync(userId ?? Guid.Empty);
                 }
 
                 var attemptLog = new AuthenticationAttemptLog
@@ -247,43 +383,77 @@ namespace AuthHive.Auth.Services.Authentication
                     FailureReason = reason,
                     IpAddress = ipAddress,
                     UserAgent = userAgent,
-                    AttemptedAt = DateTime.UtcNow,
-                    OrganizationId = user?.OrganizationId ?? Guid.Empty,
+                    AttemptedAt = _dateTimeProvider.UtcNow,
+                    OrganizationId = organizationId,
                     ConsecutiveFailures = consecutiveFailures
                 };
 
-                // 계정 잠금 체크
-                if (userId.HasValue && consecutiveFailures >= _maxFailedAttempts)
+                // Check account lock with plan-specific limits
+                if (userId.HasValue && consecutiveFailures >= orgSettings.MaxFailedAttempts)
                 {
                     attemptLog.TriggeredAccountLock = true;
-                    await LockAccountAsync(userId.Value, TimeSpan.FromMinutes(_lockoutDurationMinutes),
+
+                    var lockDuration = TimeSpan.FromMinutes(orgSettings.LockoutDurationMinutes);
+                    await LockAccountAsync(
+                        userId.Value,
+                        lockDuration,
                         $"Too many failed attempts ({consecutiveFailures})");
+
+                    // Publish account locked event
+                    await _eventBus.PublishAsync(new AccountLockedEvent(userId.Value)
+                    {
+                        OrganizationId = organizationId,
+                        Reason = $"Exceeded maximum failed attempts ({orgSettings.MaxFailedAttempts})",
+                        LockedUntil = _dateTimeProvider.UtcNow.Add(lockDuration),
+                        FailedAttempts = consecutiveFailures,
+                        IpAddress = ipAddress
+                    });
                 }
 
-                // 위험도 평가
+                // Risk assessment
                 attemptLog.RiskScore = await CalculateRiskScoreAsync(ipAddress, userId);
-                attemptLog.IsSuspicious = attemptLog.RiskScore > _riskScoreThreshold;
+                attemptLog.IsSuspicious = attemptLog.RiskScore > orgSettings.RiskScoreThreshold;
 
                 await _attemptLogRepository.AddAsync(attemptLog);
-                UpdateRecentAttemptsCache(attemptLog);
+                await UpdateRecentAttemptsCacheAsync(attemptLog);
 
-                // IP 기반 무차별 대입 공격 감지
-                await CheckAndBlockSuspiciousIp(ipAddress);
+                // Check for brute force attack with plan limits
+                var bruteForceDetected = await CheckAndBlockSuspiciousIpAsync(
+                    ipAddress,
+                    organizationId,
+                    orgSettings);
 
-                _logger.LogWarning("Failed authentication attempt for {Identifier} from {IpAddress}",
-                    identifier, ipAddress);
+                if (bruteForceDetected)
+                {
+                    await _eventBus.PublishAsync(new BruteForceAttackDetectedEvent(organizationId)
+                    {
+                        IpAddress = ipAddress,
+                        AttemptsCount = await GetIpAttemptsAsync(ipAddress),
+                        TimeWindow = TimeSpan.FromMinutes(10),
+                        ActionTaken = "IP blocked",
+                        AffectedUsers = new List<string> { identifier }
+                    });
+                }
 
+                _logger.LogWarning(
+                    "Failed authentication attempt for {Identifier} from {IpAddress}. Consecutive failures: {Count}",
+                    identifier, ipAddress, consecutiveFailures);
+
+                await _unitOfWork.CommitTransactionAsync();
                 return ServiceResult.Success();
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error logging failed authentication");
-                return ServiceResult.Failure("Failed to log failed authentication");
+                return ServiceResult.Failure(
+                    "Failed to log failed authentication",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// MFA 인증 시도 기록 (개선된 버전)
+        /// Log MFA authentication attempt (improved version)
         /// </summary>
         public async Task<ServiceResult<MfaChallengeResponse>> LogMfaAttemptAsync(
             Guid userId,
@@ -291,42 +461,54 @@ namespace AuthHive.Auth.Services.Authentication
             bool isSuccess,
             string? failureReason = null)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
-                // 계정 잠금 상태 확인
+                // Check account lock status
                 var lockStatus = await CheckAccountLockStatusAsync(userId);
                 if (lockStatus.IsSuccess && lockStatus.Data?.IsLocked == true)
                 {
-                    return ServiceResult<MfaChallengeResponse>.Failure("Account is locked");
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult<MfaChallengeResponse>.Failure(
+                        "Account is locked",
+                        AuthConstants.ErrorCodes.AccountLocked);
                 }
 
                 var user = await _userRepository.GetByIdAsync(userId);
                 if (user == null)
                 {
-                    return ServiceResult<MfaChallengeResponse>.Failure("User not found");
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult<MfaChallengeResponse>.Failure(
+                        "User not found",
+                        AuthConstants.ErrorCodes.USER_NOT_FOUND);
                 }
 
-                // MFA 시도 횟수 관리 (캐시 활용)
+                // Get organization settings
+                var orgSettings = await GetOrganizationSecuritySettingsAsync(user.OrganizationId ?? Guid.Empty);
+
+                // MFA attempt count management (cache utilization)
                 var mfaCacheKey = $"{MFA_ATTEMPTS_PREFIX}{userId}";
-                var mfaAttempts = _cache.Get<MfaAttemptInfo>(mfaCacheKey) ?? new MfaAttemptInfo
+                var mfaAttempts = await _cacheService.GetAsync<MfaAttemptInfo>(mfaCacheKey) ?? new MfaAttemptInfo
                 {
                     UserId = userId,
                     FailedAttempts = 0,
-                    FirstAttemptTime = DateTime.UtcNow
+                    FirstAttemptTime = _dateTimeProvider.UtcNow
                 };
 
                 if (!isSuccess)
                 {
                     mfaAttempts.FailedAttempts++;
-                    mfaAttempts.LastAttemptTime = DateTime.UtcNow;
+                    mfaAttempts.LastAttemptTime = _dateTimeProvider.UtcNow;
 
-                    // 30분 동안 캐시 유지
-                    _cache.Set(mfaCacheKey, mfaAttempts, TimeSpan.FromMinutes(30));
+                    // Cache for 30 minutes
+                    // 객체 자체를 SetAsync 메서드에 전달
+                    await _cacheService.SetAsync(mfaCacheKey, mfaAttempts, TimeSpan.FromMinutes(30));
                 }
                 else
                 {
-                    // 성공 시 캐시 제거
-                    _cache.Remove(mfaCacheKey);
+                    // Clear cache on success
+                    await _cacheService.RemoveAsync(mfaCacheKey);
                     mfaAttempts.FailedAttempts = 0;
                 }
 
@@ -340,19 +522,28 @@ namespace AuthHive.Auth.Services.Authentication
                     MfaRequired = true,
                     MfaCompleted = isSuccess,
                     FailureMessage = failureReason,
-                    AttemptedAt = DateTime.UtcNow,
+                    AttemptedAt = _dateTimeProvider.UtcNow,
                     OrganizationId = user.OrganizationId ?? Guid.Empty,
                     ConsecutiveFailures = mfaAttempts.FailedAttempts
                 };
 
                 await _attemptLogRepository.AddAsync(attemptLog);
-                UpdateRecentAttemptsCache(attemptLog);
+                await UpdateRecentAttemptsCacheAsync(attemptLog);
 
-                // 최대 시도 횟수 초과 시 계정 잠금
-                if (mfaAttempts.FailedAttempts >= _maxFailedAttempts)
+                // Check if max attempts exceeded
+                if (mfaAttempts.FailedAttempts >= orgSettings.MaxFailedAttempts)
                 {
-                    await LockAccountAsync(userId, TimeSpan.FromMinutes(_lockoutDurationMinutes),
-                        "Too many failed MFA attempts");
+                    var lockDuration = TimeSpan.FromMinutes(orgSettings.LockoutDurationMinutes);
+                    await LockAccountAsync(userId, lockDuration, "Too many failed MFA attempts");
+
+                    await _eventBus.PublishAsync(new MfaFailureThresholdExceededEvent(userId)
+                    {
+                        OrganizationId = user.OrganizationId,
+                        FailedAttempts = mfaAttempts.FailedAttempts,
+                        Method = method.ToString(),
+                        AccountLocked = true,
+                        LockedUntil = _dateTimeProvider.UtcNow.Add(lockDuration)
+                    });
                 }
 
                 var response = new MfaChallengeResponse
@@ -360,35 +551,47 @@ namespace AuthHive.Auth.Services.Authentication
                     ChallengeId = Guid.NewGuid().ToString(),
                     Method = method,
                     ChallengeType = isSuccess ? "completed" : "failed",
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(5),
-                    AttemptsRemaining = Math.Max(0, _maxFailedAttempts - mfaAttempts.FailedAttempts),
-                    AttemptsAllowed = _maxFailedAttempts,
+                    ExpiresAt = _dateTimeProvider.UtcNow.AddMinutes(5),
+                    AttemptsRemaining = Math.Max(0, orgSettings.MaxFailedAttempts - mfaAttempts.FailedAttempts),
+                    AttemptsAllowed = orgSettings.MaxFailedAttempts,
                     CodeSent = false,
-                    Message = GetMfaResponseMessage(isSuccess, mfaAttempts.FailedAttempts, failureReason)
+                    Message = GetMfaResponseMessage(
+                        isSuccess,
+                        mfaAttempts.FailedAttempts,
+                        orgSettings.MaxFailedAttempts,
+                        failureReason)
                 };
 
+                await _unitOfWork.CommitTransactionAsync();
                 return ServiceResult<MfaChallengeResponse>.Success(response);
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error logging MFA attempt for user {UserId}", userId);
-                return ServiceResult<MfaChallengeResponse>.Failure("Failed to log MFA attempt");
+                return ServiceResult<MfaChallengeResponse>.Failure(
+                    "Failed to log MFA attempt",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         #endregion
 
-        #region 계정 잠금 관리
+        #region Account Lock Management
 
         /// <summary>
-        /// 계정 잠금 상태 확인
+        /// Check account lock status
         /// </summary>
         public async Task<ServiceResult<AccountLockStatus>> CheckAccountLockStatusAsync(Guid userId)
         {
             try
             {
                 var cacheKey = $"{USER_LOCK_PREFIX}{userId}";
-                if (_cache.TryGetValue<AccountLockInfo>(cacheKey, out var lockInfo) && lockInfo != null)
+                // 1. GetAsync를 사용해 비동기적으로 데이터를 가져옵니다.
+                var lockInfo = await _cacheService.GetAsync<AccountLockInfo>(cacheKey);
+
+                // 2. 가져온 데이터가 null이 아닌지 확인합니다.
+                if (lockInfo != null)
                 {
                     return ServiceResult<AccountLockStatus>.Success(new AccountLockStatus
                     {
@@ -401,10 +604,10 @@ namespace AuthHive.Auth.Services.Authentication
                     });
                 }
 
-                // 캐시에서 실패 횟수 확인
-                var failureCount = GetFailureCount(userId);
+                // Check failure count from cache
+                var failureCount = await GetFailureCountAsync(userId);
 
-                await Task.CompletedTask; // async 경고 방지
+                await Task.CompletedTask; // Avoid async warning
 
                 return ServiceResult<AccountLockStatus>.Success(new AccountLockStatus
                 {
@@ -416,33 +619,38 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error checking account lock status for user {UserId}", userId);
-                return ServiceResult<AccountLockStatus>.Failure("Failed to check account lock status");
+                return ServiceResult<AccountLockStatus>.Failure(
+                    "Failed to check account lock status",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 계정 잠금
+        /// Lock user account
         /// </summary>
         public async Task<ServiceResult> LockAccountAsync(
             Guid userId,
             TimeSpan duration,
             string reason)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
                 var lockInfo = new AccountLockInfo
                 {
                     UserId = userId,
                     Reason = reason,
-                    LockedAt = DateTime.UtcNow,
-                    LockedUntil = DateTime.UtcNow.Add(duration),
-                    FailedAttempts = GetFailureCount(userId)
+                    LockedAt = _dateTimeProvider.UtcNow,
+                    LockedUntil = _dateTimeProvider.UtcNow.Add(duration),
+                    FailedAttempts = await GetFailureCountAsync(userId)
                 };
 
                 var cacheKey = $"{USER_LOCK_PREFIX}{userId}";
-                _cache.Set(cacheKey, lockInfo, duration);
+                // 객체 저장을 위한 제네릭 메서드 SetAsync 사용
+                await _cacheService.SetAsync(cacheKey, lockInfo, TimeSpan.FromMinutes(_lockoutDurationMinutes));
 
-                // 사용자 엔티티 업데이트
+                // Update user entity
                 var user = await _userRepository.GetByIdAsync(userId);
                 if (user != null)
                 {
@@ -451,7 +659,7 @@ namespace AuthHive.Auth.Services.Authentication
                     await _userRepository.UpdateAsync(user);
                 }
 
-                // 활성 세션 종료
+                // Terminate active sessions
                 var sessions = await _sessionRepository.GetActiveSessionsByUserAsync(userId);
                 foreach (var session in sessions)
                 {
@@ -461,30 +669,37 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 _logger.LogWarning("Account locked for user {UserId}: {Reason}", userId, reason);
+
+                await _unitOfWork.CommitTransactionAsync();
                 return ServiceResult.Success();
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error locking account for user {UserId}", userId);
-                return ServiceResult.Failure("Failed to lock account");
+                return ServiceResult.Failure(
+                    "Failed to lock account",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 계정 잠금 해제
+        /// Unlock user account
         /// </summary>
         public async Task<ServiceResult> UnlockAccountAsync(Guid userId)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
-                // 캐시에서 잠금 정보 제거
+                // Remove lock info from cache
                 var lockCacheKey = $"{USER_LOCK_PREFIX}{userId}";
-                _cache.Remove(lockCacheKey);
+                await _cacheService.RemoveAsync(lockCacheKey);
 
-                // 실패 횟수 초기화
+                // Clear failure counts
                 ClearUserFailureCaches(userId);
 
-                // 사용자 엔티티 업데이트
+                // Update user entity
                 var user = await _userRepository.GetByIdAsync(userId);
                 if (user != null)
                 {
@@ -494,46 +709,69 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 _logger.LogInformation("Account unlocked for user {UserId}", userId);
+
+                await _unitOfWork.CommitTransactionAsync();
                 return ServiceResult.Success();
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error unlocking account for user {UserId}", userId);
-                return ServiceResult.Failure("Failed to unlock account");
+                return ServiceResult.Failure(
+                    "Failed to unlock account",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 자동 잠금 정책 확인 및 적용
+        /// Check and apply automatic lock policy
         /// </summary>
         public async Task<ServiceResult<bool>> CheckAndApplyLockPolicyAsync(Guid userId)
         {
+            await _unitOfWork.BeginTransactionAsync();
+
             try
             {
-                var failureCount = GetFailureCount(userId);
-
-                if (failureCount >= _maxFailedAttempts)
+                var user = await _userRepository.GetByIdAsync(userId);
+                if (user == null)
                 {
-                    await LockAccountAsync(userId, TimeSpan.FromMinutes(_lockoutDurationMinutes),
-                        "Auto-lock policy triggered");
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult<bool>.Failure(
+                        "User not found",
+                        AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                }
+
+                var orgSettings = await GetOrganizationSecuritySettingsAsync(user.OrganizationId ?? Guid.Empty);
+                var failureCount = await GetFailureCountAsync(userId);
+
+                if (failureCount >= orgSettings.MaxFailedAttempts)
+                {
+                    var lockDuration = TimeSpan.FromMinutes(orgSettings.LockoutDurationMinutes);
+                    await LockAccountAsync(userId, lockDuration, "Auto-lock policy triggered");
+
+                    await _unitOfWork.CommitTransactionAsync();
                     return ServiceResult<bool>.Success(true);
                 }
 
+                await _unitOfWork.CommitTransactionAsync();
                 return ServiceResult<bool>.Success(false);
             }
             catch (Exception ex)
             {
+                await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error checking lock policy for user {UserId}", userId);
-                return ServiceResult<bool>.Failure("Failed to check lock policy");
+                return ServiceResult<bool>.Failure(
+                    "Failed to check lock policy",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         #endregion
 
-        #region 보안 위협 탐지
+        #region Security Threat Detection
 
         /// <summary>
-        /// 무차별 대입 공격 탐지
+        /// Detect brute force attack
         /// </summary>
         public async Task<ServiceResult<bool>> DetectBruteForceAttackAsync(
             string identifier,
@@ -541,17 +779,44 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // IP별 시도 횟수 확인 (캐시 활용)
-                var ipAttemptsCacheKey = $"ip_attempts:{ipAddress}";
-                var ipAttempts = _cache.Get<int>(ipAttemptsCacheKey);
+                // Get organization ID from identifier
+                var userId = await _userRepository.FindByUsernameOrEmailAsync(identifier);
+                var organizationId = Guid.Empty;
 
-                if (ipAttempts >= _bruteForceThreshold)
+                if (userId.HasValue)
                 {
-                    _logger.LogWarning("Brute force attack detected from IP {IpAddress} for {Identifier}",
-                        ipAddress, identifier);
+                    var user = await _userRepository.GetByIdAsync(userId.Value);
+                    organizationId = user?.OrganizationId ?? Guid.Empty;
+                }
 
-                    // IP 자동 차단
-                    await BlockIpAddressAsync(ipAddress, TimeSpan.FromHours(1), "Brute force attack detected");
+                var orgSettings = await GetOrganizationSecuritySettingsAsync(organizationId);
+
+                // Check IP attempt count (cache utilization)
+                var ipAttempts = await GetIpAttemptsAsync(ipAddress);
+
+                if (ipAttempts >= orgSettings.BruteForceThreshold)
+                {
+                    _logger.LogWarning(
+                        "Brute force attack detected from IP {IpAddress} for {Identifier}. Attempts: {Count}",
+                        ipAddress, identifier, ipAttempts);
+
+                    // Auto-block IP
+                    await BlockIpAddressAsync(
+                        ipAddress,
+                        TimeSpan.FromHours(1),
+                        "Brute force attack detected",
+                        organizationId);
+
+                    // Publish event
+                    await _eventBus.PublishAsync(new BruteForceAttackDetectedEvent(organizationId)
+                    {
+                        IpAddress = ipAddress,
+                        AttemptsCount = ipAttempts,
+                        TimeWindow = TimeSpan.FromMinutes(10),
+                        ActionTaken = "IP blocked for 1 hour",
+                        AffectedUsers = new List<string> { identifier }
+                    });
+
                     return ServiceResult<bool>.Success(true);
                 }
 
@@ -560,12 +825,14 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error detecting brute force attack");
-                return ServiceResult<bool>.Failure("Failed to detect brute force attack");
+                return ServiceResult<bool>.Failure(
+                    "Failed to detect brute force attack",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// IP 기반 위협 평가
+        /// Assess IP-based risk
         /// </summary>
         public async Task<ServiceResult<RiskAssessment>> AssessIpRiskAsync(string ipAddress)
         {
@@ -574,55 +841,52 @@ namespace AuthHive.Auth.Services.Authentication
                 var assessment = new RiskAssessment
                 {
                     AssessmentId = Guid.NewGuid(),
-                    AssessedAt = DateTime.UtcNow,
+                    AssessedAt = _dateTimeProvider.UtcNow,
                     RiskFactors = new List<RiskFactor>(),
                     RecommendedActions = new List<string>()
                 };
 
-                // 신뢰할 수 있는 IP인지 확인
+                // Check if trusted IP
                 if (IsTrustedIp(ipAddress))
                 {
                     assessment.RiskScore = 0;
                     assessment.RiskLevel = "Low";
                     return ServiceResult<RiskAssessment>.Success(assessment);
                 }
-
-                // 차단된 IP인지 확인
-                // 차단된 IP인지 확인
-                if (IsIpBlocked(ipAddress))
+                // Check if blocked IP
+                if (await IsIpBlockedAsync(ipAddress))
                 {
                     assessment.RiskScore = 1.0;
                     assessment.RiskLevel = "Critical";
                     assessment.RiskFactors.Add(new RiskFactor
                     {
-                        Name = "BlockedIP",                    // FactorType 대신 Name 사용
+                        Name = "BlockedIP",
                         Description = "IP is currently blocked",
                         Weight = 1.0,
-                        Impact = 100,                          // Impact 추가 (Critical이므로 100)
-                        Category = "Network"                   // Severity 대신 Category 사용
+                        Impact = 100,
+                        Category = "Network"
                     });
                     return ServiceResult<RiskAssessment>.Success(assessment);
                 }
 
-                // 캐시에서 IP 시도 횟수 확인
-                var ipAttemptsCacheKey = $"ip_attempts:{ipAddress}";
-                var ipAttempts = _cache.Get<int>(ipAttemptsCacheKey);
+                // Check IP attempt count from cache
+                var ipAttempts = await GetIpAttemptsAsync(ipAddress);
                 if (ipAttempts > 5)
                 {
                     assessment.RiskFactors.Add(new RiskFactor
                     {
-                        Name = "HighFailureRate",                                              // FactorType → Name
+                        Name = "HighFailureRate",
                         Description = $"High failure rate: {ipAttempts} attempts in recent period",
                         Weight = 0.3,
-                        Impact = 80,                                                           // Severity "High" → Impact 80
-                        Category = "Authentication"                                            // 카테고리 추가
+                        Impact = 80,
+                        Category = "Authentication"
                     });
                 }
 
-                // 위험도 점수 계산
+                // Calculate risk score
                 assessment.RiskScore = Math.Min(assessment.RiskFactors.Sum(x => x.Weight), 1.0);
 
-                // 위험 수준 결정
+                // Determine risk level
                 assessment.RiskLevel = assessment.RiskScore switch
                 {
                     >= 0.8 => "Critical",
@@ -631,7 +895,7 @@ namespace AuthHive.Auth.Services.Authentication
                     _ => "Low"
                 };
 
-                // 권장 조치
+                // Recommended actions
                 if (assessment.RiskScore >= 0.6)
                 {
                     assessment.RequiresMfa = true;
@@ -643,18 +907,20 @@ namespace AuthHive.Auth.Services.Authentication
                     assessment.RecommendedActions.Add("Block IP temporarily");
                 }
 
-                await Task.CompletedTask; // async 경고 방지
+                await Task.CompletedTask; // Avoid async warning
                 return ServiceResult<RiskAssessment>.Success(assessment);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error assessing IP risk for {IpAddress}", ipAddress);
-                return ServiceResult<RiskAssessment>.Failure("Failed to assess IP risk");
+                return ServiceResult<RiskAssessment>.Failure(
+                    "Failed to assess IP risk",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 이상 패턴 탐지
+        /// Detect anomalous pattern
         /// </summary>
         public async Task<ServiceResult<bool>> DetectAnomalousPatternAsync(
             Guid userId,
@@ -663,10 +929,8 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // 캐시에서 최근 시도 패턴 확인
-                var recentAttempts = GetRecentAttemptsFromCache(userId);
-
-                // 새로운 IP나 디바이스에서의 접근인지 확인
+                // Get recent attempts from cache
+                var recentAttempts = await GetRecentAttemptsFromCacheAsync(userId);
                 var isNewIp = !recentAttempts.Any(a => a.IpAddress == ipAddress);
                 var isNewDevice = !string.IsNullOrEmpty(deviceFingerprint) &&
                                  !recentAttempts.Any(a => a.DeviceId == deviceFingerprint);
@@ -675,22 +939,39 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (isAnomalous)
                 {
-                    _logger.LogWarning("Anomalous pattern detected for user {UserId} from IP {IpAddress}",
-                        userId, ipAddress);
+                    _logger.LogWarning(
+                        "Anomalous pattern detected for user {UserId} from IP {IpAddress}. New IP: {NewIp}, New Device: {NewDevice}",
+                        userId, ipAddress, isNewIp, isNewDevice);
+
+                    // Publish suspicious activity event
+                    var user = await _userRepository.GetByIdAsync(userId);
+                    if (user != null)
+                    {
+                        await _eventBus.PublishAsync(new AnomalousLoginPatternDetectedEvent(userId)
+                        {
+                            OrganizationId = user.OrganizationId,
+                            IpAddress = ipAddress,
+                            DeviceFingerprint = deviceFingerprint,
+                            IsNewLocation = isNewIp,
+                            IsNewDevice = isNewDevice,
+                            RiskScore = isNewIp && isNewDevice ? 80 : 50
+                        });
+                    }
                 }
 
-                await Task.CompletedTask; // async 경고 방지
                 return ServiceResult<bool>.Success(isAnomalous);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error detecting anomalous pattern");
-                return ServiceResult<bool>.Failure("Failed to detect anomalous pattern");
+                return ServiceResult<bool>.Failure(
+                    "Failed to detect anomalous pattern",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 지리적 이상 징후 탐지
+        /// Detect geographical anomaly
         /// </summary>
         public async Task<ServiceResult<bool>> DetectGeographicalAnomalyAsync(
             Guid userId,
@@ -698,8 +979,10 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // 캐시에서 최근 위치 정보 확인
-                var recentAttempts = GetRecentAttemptsFromCache(userId);
+                // 1. 이 메서드는 'recentAttempts'를 기반으로 동작합니다. 'devices' 변수는 없습니다.
+                var recentAttempts = await GetRecentAttemptsFromCacheAsync(userId);
+
+                // Now you can use LINQ methods on recentAttempts
                 var recentLocations = recentAttempts
                     .Where(a => !string.IsNullOrEmpty(a.Location))
                     .Select(a => a.Location)
@@ -710,121 +993,175 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (isNewLocation)
                 {
-                    _logger.LogWarning("Geographical anomaly detected for user {UserId}: New location {Location}",
+                    _logger.LogWarning(
+                        "Geographical anomaly detected for user {UserId}: New location {Location}",
                         userId, currentLocation);
+
+                    var user = await _userRepository.GetByIdAsync(userId);
+                    if (user != null)
+                    {
+                        // 3. 따라서 'if' 블록 안에서는 변수를 새로 만들 필요 없이,
+                        //    위에서 만든 'recentLocations'를 그대로 사용하면 됩니다.
+                        await _eventBus.PublishAsync(new GeographicalAnomalyDetectedEvent(userId)
+                        {
+                            OrganizationId = user.OrganizationId,
+                            NewLocation = currentLocation,
+
+                            // 이미 존재하는 'recentLocations'를 OfType<string>()으로 안전하게 변환
+                            PreviousLocations = recentLocations.OfType<string>().ToList(),
+
+                            RiskScore = 60
+                        });
+                    }
                 }
 
-                await Task.CompletedTask; // async 경고 방지
                 return ServiceResult<bool>.Success(isNewLocation);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error detecting geographical anomaly");
-                return ServiceResult<bool>.Failure("Failed to detect geographical anomaly");
+                return ServiceResult<bool>.Failure(
+                    "Failed to detect geographical anomaly",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         #endregion
 
-        #region IP 관리
+        #region IP Management
 
         /// <summary>
-        /// IP 차단
+        /// Block IP address with plan limit checking
         /// </summary>
-        public Task<ServiceResult> BlockIpAddressAsync(
+        public async Task<ServiceResult> BlockIpAddressAsync(
             string ipAddress,
             TimeSpan duration,
-            string reason)
+            string reason,
+            Guid? organizationId = null)
         {
             try
             {
+                // Check organization's IP block limit
+                if (organizationId.HasValue)
+                {
+                    var orgSettings = await GetOrganizationSecuritySettingsAsync(organizationId.Value);
+                    var currentBlocks = GetOrganizationBlockedIpCount(organizationId.Value);
+
+                    if (currentBlocks >= orgSettings.MaxIpBlocks)
+                    {
+                        // Publish event that limit is reached
+                        await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                            organizationId.Value,
+                            orgSettings.PlanKey,
+                            PlanLimitType.IpBlockLimit,
+                            currentBlocks,
+                            orgSettings.MaxIpBlocks,
+                            Guid.Empty
+                        ));
+
+                        return ServiceResult.Failure(
+                            $"IP block limit reached ({orgSettings.MaxIpBlocks}). Upgrade plan for more blocks.",
+                            AuthConstants.ErrorCodes.RATE_LIMIT_EXCEEDED);
+                    }
+                }
+
                 var cacheKey = $"{BLOCKED_IP_PREFIX}{ipAddress}";
-                _cache.Set(cacheKey, new BlockedIpInfo
+                await _cacheService.SetAsync(cacheKey, new BlockedIpInfo
                 {
                     IpAddress = ipAddress,
                     Reason = reason,
-                    BlockedAt = DateTime.UtcNow,
-                    BlockedUntil = DateTime.UtcNow.Add(duration)
+                    BlockedAt = _dateTimeProvider.UtcNow,
+                    BlockedUntil = _dateTimeProvider.UtcNow.Add(duration),
+                    OrganizationId = organizationId
                 }, duration);
 
                 _logger.LogWarning("IP {IpAddress} blocked: {Reason}", ipAddress, reason);
-                return Task.FromResult(ServiceResult.Success());
+                return ServiceResult.Success();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error blocking IP {IpAddress}", ipAddress);
-                return Task.FromResult(ServiceResult.Failure("Failed to block IP"));
+                return ServiceResult.Failure(
+                    "Failed to block IP",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// IP 차단 해제
+        /// Unblock IP address
         /// </summary>
-        public Task<ServiceResult> UnblockIpAddressAsync(string ipAddress)
+        public async Task<ServiceResult> UnblockIpAddressAsync(string ipAddress)
         {
             try
             {
                 var cacheKey = $"{BLOCKED_IP_PREFIX}{ipAddress}";
-                _cache.Remove(cacheKey);
+                await _cacheService.RemoveAsync(cacheKey);
 
                 _logger.LogInformation("IP {IpAddress} unblocked", ipAddress);
-                return Task.FromResult(ServiceResult.Success());
+                return ServiceResult.Success();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error unblocking IP {IpAddress}", ipAddress);
-                return Task.FromResult(ServiceResult.Failure("Failed to unblock IP"));
+                return ServiceResult.Failure(
+                    "Failed to unblock IP",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 차단된 IP 목록 조회
+        /// Get blocked IP addresses
         /// </summary>
         public Task<ServiceResult<IEnumerable<string>>> GetBlockedIpAddressesAsync()
         {
             try
             {
-                // 실제 구현시에는 별도의 저장소나 더 정교한 캐시 관리가 필요
+                // In production, this should query from a persistent store
                 var blockedIps = new List<string>();
                 return Task.FromResult(ServiceResult<IEnumerable<string>>.Success(blockedIps));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting blocked IPs");
-                return Task.FromResult(ServiceResult<IEnumerable<string>>.Failure("Failed to get blocked IPs"));
+                return Task.FromResult(ServiceResult<IEnumerable<string>>.Failure(
+                    "Failed to get blocked IPs",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR));
             }
         }
 
         /// <summary>
-        /// 신뢰할 수 있는 IP 추가
+        /// Add trusted IP address
         /// </summary>
-        public Task<ServiceResult> AddTrustedIpAddressAsync(
+        public async Task<ServiceResult> AddTrustedIpAddressAsync(
             Guid organizationId,
             string ipAddress)
         {
             try
             {
                 var cacheKey = $"{TRUSTED_IP_PREFIX}{organizationId}:{ipAddress}";
-                _cache.Set(cacheKey, true, TimeSpan.FromDays(365));
+                await _cacheService.SetStringAsync(cacheKey, true.ToString(), TimeSpan.FromDays(365));
 
-                _logger.LogInformation("Trusted IP {IpAddress} added for organization {OrganizationId}",
+                _logger.LogInformation(
+                    "Trusted IP {IpAddress} added for organization {OrganizationId}",
                     ipAddress, organizationId);
 
-                return Task.FromResult(ServiceResult.Success());
+                return ServiceResult.Success();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error adding trusted IP");
-                return Task.FromResult(ServiceResult.Failure("Failed to add trusted IP"));
+                return ServiceResult.Failure(
+                    "Failed to add trusted IP",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         #endregion
 
-        #region 인증 이력 조회
+        #region Authentication History Queries
 
         /// <summary>
-        /// 사용자 인증 이력 조회
+        /// Get user authentication history
         /// </summary>
         public async Task<ServiceResult<AuthenticationHistory>> GetAuthenticationHistoryAsync(
             Guid userId,
@@ -833,29 +1170,30 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                // 1. 조회 기간을 명확하게 설정합니다.
-                // 종료일이 없으면 현재 시간, 시작일이 없으면 종료일로부터 30일 전으로 기본 설정합니다.
-                var effectiveEndDate = endDate ?? DateTime.UtcNow;
+                // Set query period clearly
+                var effectiveEndDate = endDate ?? _dateTimeProvider.UtcNow;
                 var effectiveStartDate = startDate ?? effectiveEndDate.AddDays(-30);
 
-                // 2. 새로운 리포지토리 메서드를 사용하여 기간 내 사용자의 전체 기록을 가져옵니다.
+                // Get all records for the user within the period
                 var userHistory = await _attemptLogRepository.GetHistoryForUserAsync(
                     userId,
                     effectiveStartDate,
                     effectiveEndDate);
 
-                // 3. 가져온 기록 중에서 가장 최근의 '성공'한 기록을 찾습니다.
-                // (GetHistoryForUserAsync가 최신순으로 정렬된 데이터를 반환한다고 가정)
+                // Find the most recent successful record
                 var lastSuccessfulAttempt = userHistory.FirstOrDefault(log => log.IsSuccess);
 
-                // 4. 성공한 기록을 찾지 못했다면 '결과 없음'을 반환합니다.
                 if (lastSuccessfulAttempt == null)
                 {
-                    _logger.LogWarning("No successful authentication history found for user {UserId} in the specified period.", userId);
-                    return ServiceResult<AuthenticationHistory>.Failure("No successful authentication history found.");
+                    _logger.LogWarning(
+                        "No successful authentication history found for user {UserId} in the specified period",
+                        userId);
+                    return ServiceResult<AuthenticationHistory>.Failure(
+                        "No successful authentication history found",
+                        AuthConstants.ErrorCodes.USER_NOT_FOUND);
                 }
 
-                // 5. 찾은 성공 기록을 AuthenticationHistory DTO 객체로 변환(매핑)합니다.
+                // Map to DTO
                 var historyDto = new AuthenticationHistory
                 {
                     Id = lastSuccessfulAttempt.Id,
@@ -866,22 +1204,24 @@ namespace AuthHive.Auth.Services.Authentication
                     AuthenticatedAt = lastSuccessfulAttempt.AttemptedAt,
                     IpAddress = lastSuccessfulAttempt.IpAddress,
                     Location = lastSuccessfulAttempt.Location,
-                    DeviceName = lastSuccessfulAttempt.DeviceId ?? "Unknown",
-                    DeviceType = lastSuccessfulAttempt.DeviceType ?? "Unknown",
+                    DeviceName = lastSuccessfulAttempt.DeviceId ?? CommonDefaults.UnknownDevice,
+                    DeviceType = lastSuccessfulAttempt.DeviceType ?? CommonDefaults.UnknownDeviceType,
                     SessionId = lastSuccessfulAttempt.SessionId
                 };
 
-                // 6. 최종 결과를 성공으로 반환합니다.
                 return ServiceResult<AuthenticationHistory>.Success(historyDto);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting authentication history for user {UserId}", userId);
-                return ServiceResult<AuthenticationHistory>.Failure("An error occurred while fetching authentication history.");
+                return ServiceResult<AuthenticationHistory>.Failure(
+                    "An error occurred while fetching authentication history",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
+
         /// <summary>
-        /// 최근 인증 시도 조회
+        /// Get recent authentication attempts
         /// </summary>
         public async Task<ServiceResult<IEnumerable<AuthenticationAttempts>>> GetRecentAttemptsAsync(
             Guid userId,
@@ -891,30 +1231,25 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 IEnumerable<AuthenticationAttemptLog> finalLogs;
 
-                // 1. 캐시에서 먼저 확인
-                var cachedAttempts = GetRecentAttemptsFromCache(userId);
+                // Check cache first
+                var cachedAttempts = await GetRecentAttemptsFromCacheAsync(userId);
 
                 if (cachedAttempts != null && cachedAttempts.Count() >= count)
                 {
-                    // 캐시에 충분한 데이터가 있으면 캐시 데이터를 최종 소스로 사용
                     finalLogs = cachedAttempts;
                 }
                 else
                 {
-                    // 캐시가 비어있거나 데이터가 부족하면 DB에서 새로 조회
-                    // GetRecentAttemptsAsync 대신 GetHistoryForUserAsync를 사용합니다.
+                    // Get from database if cache is insufficient
                     var dbHistory = await _attemptLogRepository.GetHistoryForUserAsync(
                         userId,
-                        DateTime.UtcNow.AddDays(-30), // 최근 30일처럼 충분한 기간을 설정
-                        DateTime.UtcNow);
-
-                    // (선택적이지만 권장) 여기서 가져온 최신 DB 데이터로 캐시를 업데이트하는 로직을 추가할 수 있습니다.
-                    // UpdateRecentAttemptsCache(userId, dbHistory);
+                        _dateTimeProvider.UtcNow.AddDays(-30),
+                        _dateTimeProvider.UtcNow);
 
                     finalLogs = dbHistory;
                 }
 
-                // 2. 최종 데이터 소스(캐시 또는 DB)에서 필요한 개수만큼만 가져와 DTO로 변환합니다.
+                // Convert to DTO
                 var resultDto = finalLogs
                     .Take(count)
                     .Select(x => new AuthenticationAttempts
@@ -936,13 +1271,14 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting recent attempts for user {UserId}", userId);
-                return ServiceResult<IEnumerable<AuthenticationAttempts>>.Failure("Failed to get recent attempts");
+                return ServiceResult<IEnumerable<AuthenticationAttempts>>.Failure(
+                    "Failed to get recent attempts",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
-
         /// <summary>
-        /// 실패한 인증 시도 조회
+        /// Get failed authentication attempts
         /// </summary>
         public async Task<ServiceResult<IEnumerable<AuthenticationFailure>>> GetFailedAttemptsAsync(
             Guid? userId = null,
@@ -972,16 +1308,18 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting failed attempts");
-                return ServiceResult<IEnumerable<AuthenticationFailure>>.Failure("Failed to get failed attempts");
+                return ServiceResult<IEnumerable<AuthenticationFailure>>.Failure(
+                    "Failed to get failed attempts",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         #endregion
 
-        #region 통계 및 분석
+        #region Statistics and Analysis
 
         /// <summary>
-        /// 인증 성공률 계산
+        /// Calculate authentication success rate
         /// </summary>
         public async Task<ServiceResult<double>> CalculateSuccessRateAsync(
             Guid organizationId,
@@ -996,12 +1334,14 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error calculating success rate");
-                return ServiceResult<double>.Failure("Failed to calculate success rate");
+                return ServiceResult<double>.Failure(
+                    "Failed to calculate success rate",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 인증 방법별 통계
+        /// Get authentication method statistics
         /// </summary>
         public async Task<ServiceResult<Dictionary<AuthenticationMethod, int>>> GetMethodStatisticsAsync(
             Guid organizationId,
@@ -1009,8 +1349,8 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                var from = startDate ?? DateTime.UtcNow.AddMonths(-1);
-                var to = DateTime.UtcNow;
+                var from = startDate ?? _dateTimeProvider.UtcNow.AddMonths(-1);
+                var to = _dateTimeProvider.UtcNow;
 
                 var stats = await _attemptLogRepository.GetStatisticsAsync(from, to, organizationId);
                 return ServiceResult<Dictionary<AuthenticationMethod, int>>.Success(stats.AttemptsByMethod);
@@ -1018,12 +1358,14 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting method statistics");
-                return ServiceResult<Dictionary<AuthenticationMethod, int>>.Failure("Failed to get method statistics");
+                return ServiceResult<Dictionary<AuthenticationMethod, int>>.Failure(
+                    "Failed to get method statistics",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 실패 원인 분석
+        /// Analyze failure reasons
         /// </summary>
         public async Task<ServiceResult<Dictionary<AuthenticationResult, int>>> AnalyzeFailureReasonsAsync(
             Guid organizationId,
@@ -1031,8 +1373,8 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                var from = DateTime.UtcNow.AddDays(-periodDays);
-                var to = DateTime.UtcNow;
+                var from = _dateTimeProvider.UtcNow.AddDays(-periodDays);
+                var to = _dateTimeProvider.UtcNow;
 
                 var stats = await _attemptLogRepository.GetStatisticsAsync(from, to, organizationId);
                 return ServiceResult<Dictionary<AuthenticationResult, int>>.Success(stats.FailureReasons);
@@ -1040,86 +1382,124 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error analyzing failure reasons");
-                return ServiceResult<Dictionary<AuthenticationResult, int>>.Failure("Failed to analyze failure reasons");
+                return ServiceResult<Dictionary<AuthenticationResult, int>>.Failure(
+                    "Failed to analyze failure reasons",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         #endregion
 
-        #region 알림
+        #region Notifications
 
         /// <summary>
-        /// 의심스러운 활동 알림
+        /// Notify suspicious activity
         /// </summary>
-        public Task<ServiceResult> NotifySuspiciousActivityAsync(
+        public async Task<ServiceResult> NotifySuspiciousActivityAsync(
             Guid userId,
             string activityDescription)
         {
             try
             {
-                // TODO: 실제 알림 서비스 구현
-                _logger.LogWarning("Suspicious activity for user {UserId}: {Description}",
+                // Publish event for suspicious activity
+                var user = await _userRepository.GetByIdAsync(userId);
+                if (user != null)
+                {
+                    await _eventBus.PublishAsync(new SuspiciousActivityNotificationEvent(
+                        userId,
+                        activityDescription)  // Pass as constructor parameter
+                    {
+                        OrganizationId = user.OrganizationId,
+                        DetectedAt = _dateTimeProvider.UtcNow,
+                        NotificationRequired = true
+                    });
+                }
+
+                _logger.LogWarning(
+                    "Suspicious activity for user {UserId}: {Description}",
                     userId, activityDescription);
 
-                return Task.FromResult(ServiceResult.Success());
+                return ServiceResult.Success();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error notifying suspicious activity");
-                return Task.FromResult(ServiceResult.Failure("Failed to notify suspicious activity"));
+                return ServiceResult.Failure(
+                    "Failed to notify suspicious activity",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 새 디바이스 로그인 알림
+        /// Notify new device login
         /// </summary>
-        public Task<ServiceResult> NotifyNewDeviceLoginAsync(
+        public async Task<ServiceResult> NotifyNewDeviceLoginAsync(
             Guid userId,
             string deviceInfo,
             string location)
         {
             try
             {
-                // TODO: 실제 알림 서비스 구현
-                _logger.LogInformation("New device login for user {UserId}: {Device} from {Location}",
+                // Publish event for new device login
+                var user = await _userRepository.GetByIdAsync(userId);
+                if (user != null)
+                {
+                    await _eventBus.PublishAsync(new NewDeviceLoginEvent(
+                        // --- 생성자에 필수 값 전달 ---
+                        userId: userId,
+                        deviceInfo: deviceInfo,
+                        location: location
+                    )
+                    {
+                        // --- 나머지 선택적 속성들은 여기서 초기화 ---
+                        OrganizationId = user.OrganizationId,
+                        LoginTime = _dateTimeProvider.UtcNow,
+                        RequiresVerification = true
+                    });
+                }
+
+                _logger.LogInformation(
+                    "New device login for user {UserId}: {Device} from {Location}",
                     userId, deviceInfo, location);
 
-                return Task.FromResult(ServiceResult.Success());
+                return ServiceResult.Success();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error notifying new device login");
-                return Task.FromResult(ServiceResult.Failure("Failed to notify new device login"));
+                return ServiceResult.Failure(
+                    "Failed to notify new device login",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 계정 잠금 알림
+        /// Notify account lock
         /// </summary>
-        public Task<ServiceResult> NotifyAccountLockAsync(
-            Guid userId,
-            string reason)
+        // async 키워드만 제거
+        public Task<ServiceResult> NotifyAccountLockAsync(Guid userId, string reason)
         {
             try
             {
-                // TODO: 실제 알림 서비스 구현
-                _logger.LogWarning("Account locked for user {UserId}: {Reason}", userId, reason);
-
+                _logger.LogWarning("Account locked notification for user {UserId}: {Reason}", userId, reason);
+                // Task.FromResult를 사용하여 결과를 Task로 감싸서 반환
                 return Task.FromResult(ServiceResult.Success());
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error notifying account lock");
-                return Task.FromResult(ServiceResult.Failure("Failed to notify account lock"));
+                return Task.FromResult(ServiceResult.Failure(
+                    "Failed to notify account lock",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR));
             }
         }
 
         #endregion
 
-        #region 데이터 관리
+        #region Data Management
 
         /// <summary>
-        /// 오래된 로그 정리
+        /// Cleanup old logs
         /// </summary>
         public async Task<ServiceResult<int>> CleanupOldLogsAsync(
             int olderThanDays,
@@ -1127,7 +1507,7 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                var before = DateTime.UtcNow.AddDays(-olderThanDays);
+                var before = _dateTimeProvider.UtcNow.AddDays(-olderThanDays);
                 var count = await _attemptLogRepository.CleanupOldLogsAsync(before);
 
                 _logger.LogInformation("Cleaned up {Count} old authentication logs", count);
@@ -1136,12 +1516,14 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error cleaning up old logs");
-                return ServiceResult<int>.Failure("Failed to cleanup old logs");
+                return ServiceResult<int>.Failure(
+                    "Failed to cleanup old logs",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
         /// <summary>
-        /// 인증 로그 아카이빙
+        /// Archive authentication logs
         /// </summary>
         public async Task<ServiceResult<int>> ArchiveLogsAsync(
             Guid organizationId,
@@ -1152,7 +1534,8 @@ namespace AuthHive.Auth.Services.Authentication
                 var archiveLocation = _configuration["Storage:ArchiveLocation"] ?? "archive";
                 var count = await _attemptLogRepository.ArchiveSuccessfulLogsAsync(beforeDate, archiveLocation);
 
-                _logger.LogInformation("Archived {Count} authentication logs for organization {OrganizationId}",
+                _logger.LogInformation(
+                    "Archived {Count} authentication logs for organization {OrganizationId}",
                     count, organizationId);
 
                 return ServiceResult<int>.Success(count);
@@ -1160,7 +1543,9 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error archiving logs");
-                return ServiceResult<int>.Failure("Failed to archive logs");
+                return ServiceResult<int>.Failure(
+                    "Failed to archive logs",
+                    AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -1169,135 +1554,346 @@ namespace AuthHive.Auth.Services.Authentication
         #region Private Helper Methods
 
         /// <summary>
-        /// IP 차단 여부 확인
+        /// Get organization security settings based on plan
         /// </summary>
-        private bool IsIpBlocked(string? ipAddress)
+        private async Task<OrganizationSecuritySettings> GetOrganizationSecuritySettingsAsync(Guid organizationId)
+        {
+            var cacheKey = $"{ORG_SETTINGS_PREFIX}{organizationId}";
+
+            return await _cacheService.GetOrSetAsync(
+                cacheKey,
+                async () =>
+                {
+                    // Get organization's plan
+                    var subscription = await _planSubscriptionRepository.GetActiveByOrganizationIdAsync(organizationId);
+                    var planKey = subscription?.PlanKey ?? PricingConstants.DefaultPlanKey;
+
+                    return new OrganizationSecuritySettings
+                    {
+                        OrganizationId = organizationId,
+                        PlanKey = planKey,
+                        MaxFailedAttempts = GetPlanBasedLimit(planKey, "MaxFailedAttempts", 5),
+                        LockoutDurationMinutes = GetPlanBasedLimit(planKey, "LockoutDuration", 30),
+                        BruteForceThreshold = GetPlanBasedLimit(planKey, "BruteForceThreshold", 10),
+                        RiskScoreThreshold = GetPlanBasedLimit(planKey, "RiskScoreThreshold", 70),
+                        MaxConcurrentSessions = GetMaxSessionsForPlan(planKey),
+                        MaxIpBlocks = GetMaxIpBlocksForPlan(planKey)
+                    };
+                },
+                TimeSpan.FromMinutes(5)
+            );
+        }
+
+        /// <summary>
+        /// Get plan-based limit value
+        /// </summary>
+        private int GetPlanBasedLimit(string planKey, string limitType, int defaultValue)
+        {
+            // Define limits based on plan
+            return (planKey, limitType) switch
+            {
+                (PricingConstants.SubscriptionPlans.BASIC_KEY, "MaxFailedAttempts") => 3,
+                (PricingConstants.SubscriptionPlans.PRO_KEY, "MaxFailedAttempts") => 5,
+                (PricingConstants.SubscriptionPlans.BUSINESS_KEY, "MaxFailedAttempts") => 10,
+                (PricingConstants.SubscriptionPlans.ENTERPRISE_KEY, "MaxFailedAttempts") => 20,
+
+                (PricingConstants.SubscriptionPlans.BASIC_KEY, "LockoutDuration") => 60,  // 1 hour for basic
+                (PricingConstants.SubscriptionPlans.PRO_KEY, "LockoutDuration") => 30,
+                (PricingConstants.SubscriptionPlans.BUSINESS_KEY, "LockoutDuration") => 15,
+                (PricingConstants.SubscriptionPlans.ENTERPRISE_KEY, "LockoutDuration") => 10,
+
+                (PricingConstants.SubscriptionPlans.BASIC_KEY, "BruteForceThreshold") => 5,
+                (PricingConstants.SubscriptionPlans.PRO_KEY, "BruteForceThreshold") => 10,
+                (PricingConstants.SubscriptionPlans.BUSINESS_KEY, "BruteForceThreshold") => 20,
+                (PricingConstants.SubscriptionPlans.ENTERPRISE_KEY, "BruteForceThreshold") => 50,
+
+                _ => defaultValue
+            };
+        }
+
+        /// <summary>
+        /// Get maximum sessions allowed for plan
+        /// </summary>
+        private int GetMaxSessionsForPlan(string planKey)
+        {
+            return planKey switch
+            {
+                PricingConstants.SubscriptionPlans.BASIC_KEY => 1,
+                PricingConstants.SubscriptionPlans.PRO_KEY => 3,
+                PricingConstants.SubscriptionPlans.BUSINESS_KEY => 10,
+                PricingConstants.SubscriptionPlans.ENTERPRISE_KEY => -1, // Unlimited
+                _ => 3
+            };
+        }
+
+        /// <summary>
+        /// Get maximum IP blocks allowed for plan
+        /// </summary>
+        private int GetMaxIpBlocksForPlan(string planKey)
+        {
+            return planKey switch
+            {
+                PricingConstants.SubscriptionPlans.BASIC_KEY => 10,
+                PricingConstants.SubscriptionPlans.PRO_KEY => 50,
+                PricingConstants.SubscriptionPlans.BUSINESS_KEY => 200,
+                PricingConstants.SubscriptionPlans.ENTERPRISE_KEY => -1, // Unlimited
+                _ => 10
+            };
+        }
+
+        /// <summary>
+        /// Check IP blocking with plan limits
+        /// </summary>
+        private async Task<ServiceResult> CheckIpBlockingWithPlanLimitsAsync(
+            string? ipAddress,
+            Guid? organizationId,
+            Guid? applicationId)
+        {
+            if (string.IsNullOrEmpty(ipAddress))
+                return ServiceResult.Success();
+
+            if (await IsIpBlockedAsync(ipAddress))
+            {
+                // Publish event for blocked IP attempt
+                await _eventBus.PublishAsync(new BlockedIpAccessAttemptEvent(
+                    // --- 생성자에 필수 값 전달 ---
+                    organizationId: organizationId ?? Guid.Empty,
+                    ipAddress: ipAddress
+                )
+                {
+                    // --- 나머지 선택적 속성들은 여기서 초기화 ---
+                    ApplicationId = applicationId,
+                    AttemptTime = _dateTimeProvider.UtcNow
+                });
+
+                return ServiceResult.Failure("IP address is blocked", AuthConstants.ErrorCodes.SuspiciousLogin);
+            }
+
+            return ServiceResult.Success();
+        }
+        /// <summary>
+        /// Check session limits based on plan
+        /// </summary>
+        private async Task<ServiceResult> CheckSessionLimitsAsync(Guid userId, Guid? organizationId)
+        {
+            if (!organizationId.HasValue)
+                return ServiceResult.Success();
+
+            var orgSettings = await GetOrganizationSecuritySettingsAsync(organizationId.Value);
+
+            if (orgSettings.MaxConcurrentSessions <= 0) // Unlimited
+                return ServiceResult.Success();
+
+            var activeSessions = await _sessionRepository.GetActiveSessionsByUserAsync(userId);
+            var activeCount = activeSessions.Count();
+
+            if (activeCount >= orgSettings.MaxConcurrentSessions)
+            {
+                // Publish plan limit reached event
+                await _eventBus.PublishAsync(new PlanLimitReachedEvent(
+                    organizationId.Value,
+                    orgSettings.PlanKey,
+                    PlanLimitType.ConccurentSessions,
+                    activeCount,
+                    orgSettings.MaxConcurrentSessions,
+                    userId
+                ));
+
+                return ServiceResult.Failure(
+                    $"Maximum concurrent sessions limit ({orgSettings.MaxConcurrentSessions}) reached for {orgSettings.PlanKey} plan",
+                    AuthConstants.ErrorCodes.RATE_LIMIT_EXCEEDED);
+            }
+
+            return ServiceResult.Success();
+        }
+
+        /// <summary>
+        /// Detect suspicious activity based on patterns
+        /// </summary>
+        private async Task<bool> DetectSuspiciousActivityAsync(
+            AuthenticationAttemptLog attemptLog,
+            OrganizationSecuritySettings settings)
+        {
+            // Check various suspicious patterns
+            var ipAttempts = await GetIpAttemptsAsync(attemptLog.IpAddress);
+            var riskScore = await CalculateRiskScoreAsync(attemptLog.IpAddress, attemptLog.UserId);
+
+            return ipAttempts > 5 || riskScore > settings.RiskScoreThreshold;
+        }
+
+        /// <summary>
+        /// Check if IP is blocked
+        /// </summary>
+        private async Task<bool> IsIpBlockedAsync(string? ipAddress)
         {
             if (string.IsNullOrEmpty(ipAddress)) return false;
 
             var cacheKey = $"{BLOCKED_IP_PREFIX}{ipAddress}";
-            return _cache.TryGetValue<BlockedIpInfo>(cacheKey, out _);
+
+            // Option 1: Use ExistsAsync if you just need to check existence
+            return await _cacheService.ExistsAsync(cacheKey);
         }
 
         /// <summary>
-        /// 신뢰할 수 있는 IP 여부 확인
+        /// Check if IP is trusted
         /// </summary>
         private bool IsTrustedIp(string ipAddress)
         {
-            // 로컬 IP 확인
-            if (ipAddress.StartsWith("192.168.") || ipAddress == "::1" || ipAddress == "127.0.0.1")
+            // Check for local IPs
+            if (ipAddress.StartsWith("192.168.") ||
+                ipAddress == CommonDefaults.DefaultLocalIpV6 ||
+                ipAddress == CommonDefaults.DefaultLocalIpV4)
                 return true;
 
-            // 캐시에서 신뢰 IP 확인
-            // 실제로는 조직별로 더 정교한 확인 필요
+            // Check cache for trusted IPs
+            // In production, implement more sophisticated logic
             return false;
         }
 
         /// <summary>
-        /// 사용자 실패 횟수 증가
+        /// Increment user failure count
         /// </summary>
-        private int IncrementFailureCount(Guid userId)
+        private async Task<int> IncrementFailureCountAsync(Guid userId)
         {
             var cacheKey = $"{FAILURE_COUNT_PREFIX}{userId}";
-            var currentCount = _cache.Get<int>(cacheKey);
-            currentCount++;
 
-            // 30분 동안 유지
-            _cache.Set(cacheKey, currentCount, TimeSpan.FromMinutes(30));
+            // IncrementAsync is atomic and handles the increment operation
+            var currentCount = await _cacheService.IncrementAsync(cacheKey, 1);
 
-            return currentCount;
+            // Note: IncrementAsync might not support expiration directly
+            // You may need to set expiration separately if not already set
+            // or handle it in your cache implementation
+
+            return (int)currentCount;
         }
 
         /// <summary>
-        /// 사용자 실패 횟수 조회
+        /// Get user failure count
         /// </summary>
-        private int GetFailureCount(Guid userId)
+        private async Task<int> GetFailureCountAsync(Guid userId)
         {
             var cacheKey = $"{FAILURE_COUNT_PREFIX}{userId}";
-            return _cache.Get<int>(cacheKey);
-        }
 
+            // Option 1: Using GetStringAsync (if storing as string)
+            var countStr = await _cacheService.GetStringAsync(cacheKey);
+            return string.IsNullOrEmpty(countStr) ? 0 : int.Parse(countStr);
+        }
         /// <summary>
-        /// 사용자 실패 관련 캐시 초기화
+        /// Get IP attempt count
         /// </summary>
-        private void ClearUserFailureCaches(Guid userId)
+        private async Task<int> GetIpAttemptsAsync(string ipAddress)
         {
-            _cache.Remove($"{FAILURE_COUNT_PREFIX}{userId}");
-            _cache.Remove($"{MFA_ATTEMPTS_PREFIX}{userId}");
+            var cacheKey = $"{IP_ATTEMPTS_PREFIX}{ipAddress}";
+
+            // Option 1: Using GetStringAsync (if storing as string)
+            var attemptsStr = await _cacheService.GetStringAsync(cacheKey);
+            return string.IsNullOrEmpty(attemptsStr) ? 0 : int.Parse(attemptsStr);
         }
 
         /// <summary>
-        /// 최근 시도 캐시 업데이트
+        /// Get organization blocked IP count
         /// </summary>
-        private void UpdateRecentAttemptsCache(AuthenticationAttemptLog attemptLog)
+        private int GetOrganizationBlockedIpCount(Guid organizationId)
+        {
+            // In production, query from persistent store
+            // For now, return estimated count
+            return 0;
+        }
+
+        /// <summary>
+        /// Clear user failure related caches
+        /// </summary>
+        private async void ClearUserFailureCaches(Guid userId)
+        {
+            await _cacheService.RemoveAsync($"{FAILURE_COUNT_PREFIX}{userId}");
+            await _cacheService.RemoveAsync($"{MFA_ATTEMPTS_PREFIX}{userId}");
+        }
+
+        /// <summary>
+        /// Update recent attempts cache
+        /// </summary>
+        private async Task UpdateRecentAttemptsCacheAsync(AuthenticationAttemptLog attemptLog)
         {
             if (attemptLog.UserId.HasValue)
             {
                 var cacheKey = $"{RECENT_ATTEMPTS_PREFIX}{attemptLog.UserId}";
-                var recentAttempts = _cache.Get<List<AuthenticationAttemptLog>>(cacheKey)
-                                    ?? new List<AuthenticationAttemptLog>();
+                var recentAttempts = await _cacheService.GetAsync<List<AuthenticationAttemptLog>>(cacheKey)
+                                   ?? new List<AuthenticationAttemptLog>();
 
                 recentAttempts.Insert(0, attemptLog);
 
-                // 최근 100개만 유지
+                // Keep only last 100 attempts
                 if (recentAttempts.Count > 100)
                 {
                     recentAttempts = recentAttempts.Take(100).ToList();
                 }
 
-                // 1시간 동안 캐시
-                _cache.Set(cacheKey, recentAttempts, TimeSpan.FromHours(1));
+                // Cache for 1 hour
+                await _cacheService.SetAsync(cacheKey, recentAttempts, TimeSpan.FromHours(1));
             }
 
-            // IP별 시도 횟수 업데이트
-            var ipCacheKey = $"ip_attempts:{attemptLog.IpAddress}";
-            var ipAttempts = _cache.Get<int>(ipCacheKey);
-            _cache.Set(ipCacheKey, ipAttempts + 1, TimeSpan.FromMinutes(10));
+            // Update IP attempt count - Option 1: Using IncrementAsync (preferred)
+            var ipCacheKey = $"{IP_ATTEMPTS_PREFIX}{attemptLog.IpAddress}";
+            await _cacheService.IncrementAsync(ipCacheKey, 1);
+
+            // Option 2: If you need to set expiration and IncrementAsync doesn't support it
+            // var ipAttemptsStr = await _cacheService.GetStringAsync(ipCacheKey);
+            // var ipAttempts = string.IsNullOrEmpty(ipAttemptsStr) ? 0 : int.Parse(ipAttemptsStr);
+            // await _cacheService.SetStringAsync(ipCacheKey, (ipAttempts + 1).ToString(), TimeSpan.FromMinutes(10));
         }
 
         /// <summary>
-        /// 캐시에서 최근 시도 조회
+        /// Get recent attempts from cache
         /// </summary>
-        private List<AuthenticationAttemptLog> GetRecentAttemptsFromCache(Guid userId)
+        private async Task<List<AuthenticationAttemptLog>> GetRecentAttemptsFromCacheAsync(Guid userId)
         {
             var cacheKey = $"{RECENT_ATTEMPTS_PREFIX}{userId}";
-            return _cache.Get<List<AuthenticationAttemptLog>>(cacheKey)
+            return await _cacheService.GetAsync<List<AuthenticationAttemptLog>>(cacheKey)
                    ?? new List<AuthenticationAttemptLog>();
         }
 
         /// <summary>
-        /// 의심스러운 IP 확인 및 차단
+        /// Check and block suspicious IP
         /// </summary>
-        private async Task CheckAndBlockSuspiciousIp(string ipAddress)
+        private async Task<bool> CheckAndBlockSuspiciousIpAsync(
+            string ipAddress,
+            Guid organizationId,
+            OrganizationSecuritySettings settings)
         {
-            var ipCacheKey = $"ip_attempts:{ipAddress}";
-            var ipAttempts = _cache.Get<int>(ipCacheKey);
+            var ipAttempts = await GetIpAttemptsAsync(ipAddress);
 
-            if (ipAttempts >= _bruteForceThreshold)
+            if (ipAttempts >= settings.BruteForceThreshold)
             {
-                await BlockIpAddressAsync(ipAddress, TimeSpan.FromHours(1),
-                    $"Exceeded threshold with {ipAttempts} attempts");
+                await BlockIpAddressAsync(
+                    ipAddress,
+                    TimeSpan.FromHours(1),
+                    $"Exceeded threshold with {ipAttempts} attempts",
+                    organizationId);
+
+                return true;
             }
+
+            return false;
         }
 
         /// <summary>
-        /// 위험도 점수 계산
+        /// Calculate risk score for authentication attempt
         /// </summary>
         private async Task<int> CalculateRiskScoreAsync(string ipAddress, Guid? userId)
         {
             var score = 0;
 
-            // IP 기반 위험도
+            // IP-based risk
             var ipRisk = await AssessIpRiskAsync(ipAddress);
             if (ipRisk.IsSuccess && ipRisk.Data != null)
             {
                 score += (int)(ipRisk.Data.RiskScore * 50);
             }
 
-            // 사용자 기반 위험도
+            // User-based risk
             if (userId.HasValue)
             {
-                var failureCount = GetFailureCount(userId.Value);
+                var failureCount = await GetFailureCountAsync(userId.Value);
                 score += failureCount * 10;
             }
 
@@ -1305,21 +1901,25 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         /// <summary>
-        /// MFA 응답 메시지 생성
+        /// Get MFA response message
         /// </summary>
-        private string GetMfaResponseMessage(bool isSuccess, int failedAttempts, string? failureReason)
+        private string GetMfaResponseMessage(
+            bool isSuccess,
+            int failedAttempts,
+            int maxAttempts,
+            string? failureReason)
         {
             if (isSuccess)
             {
                 return "MFA authentication successful";
             }
 
-            if (failedAttempts >= _maxFailedAttempts)
+            if (failedAttempts >= maxAttempts)
             {
-                return "Maximum attempts exceeded. Account temporarily locked.";
+                return $"Maximum attempts ({maxAttempts}) exceeded. Account temporarily locked.";
             }
 
-            var attemptsRemaining = _maxFailedAttempts - failedAttempts;
+            var attemptsRemaining = maxAttempts - failedAttempts;
             return $"{failureReason ?? "Authentication failed"}. {attemptsRemaining} attempt(s) remaining.";
         }
 
@@ -1328,7 +1928,22 @@ namespace AuthHive.Auth.Services.Authentication
         #region Helper Classes
 
         /// <summary>
-        /// 계정 잠금 정보
+        /// Organization security settings
+        /// </summary>
+        private class OrganizationSecuritySettings
+        {
+            public Guid OrganizationId { get; set; }
+            public string PlanKey { get; set; } = PricingConstants.DefaultPlanKey;
+            public int MaxFailedAttempts { get; set; }
+            public int LockoutDurationMinutes { get; set; }
+            public int BruteForceThreshold { get; set; }
+            public int RiskScoreThreshold { get; set; }
+            public int MaxConcurrentSessions { get; set; }
+            public int MaxIpBlocks { get; set; }
+        }
+
+        /// <summary>
+        /// Account lock information
         /// </summary>
         private class AccountLockInfo
         {
@@ -1340,7 +1955,7 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         /// <summary>
-        /// 차단된 IP 정보
+        /// Blocked IP information
         /// </summary>
         private class BlockedIpInfo
         {
@@ -1348,10 +1963,11 @@ namespace AuthHive.Auth.Services.Authentication
             public string Reason { get; set; } = string.Empty;
             public DateTime BlockedAt { get; set; }
             public DateTime BlockedUntil { get; set; }
+            public Guid? OrganizationId { get; set; }
         }
 
         /// <summary>
-        /// MFA 시도 정보
+        /// MFA attempt information
         /// </summary>
         private class MfaAttemptInfo
         {

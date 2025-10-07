@@ -293,7 +293,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var settings = new MfaSettingsResponse
                 {
-                    IsEnabled = user.IsTwoFactorEnabled,
+                    IsMfaEnabled = user.IsTwoFactorEnabled,
                     PreferredMethod = user.TwoFactorMethod ?? string.Empty,
                     EnabledMethods = GetEnabledMethods(user),
                     IsRequired = false, 

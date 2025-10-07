@@ -86,7 +86,7 @@ namespace AuthHive.Auth.Providers
                     ApplicationId = request.ApplicationId,
                     SessionType = SessionType.Web,
                     Level = SessionLevel.Organization,
-                    IPAddress = request.IpAddress,
+                    IpAddress = request.IpAddress,
                     UserAgent = request.UserAgent,
                     DeviceInfo = request.DeviceInfo != null ? JsonSerializer.Serialize(request.DeviceInfo) : null,
                     Provider = "SSO",

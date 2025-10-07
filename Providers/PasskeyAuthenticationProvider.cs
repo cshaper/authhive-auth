@@ -173,7 +173,7 @@ namespace AuthHive.Auth.Providers
                 ApplicationId = request.ApplicationId,
                 SessionType = SessionType.Web,
                 Level = request.OrganizationId.HasValue ? SessionLevel.Organization : SessionLevel.Global,
-                IPAddress = request.IpAddress,
+                IpAddress = request.IpAddress,
                 UserAgent = request.UserAgent,
                 DeviceInfo = request.DeviceInfo != null ? JsonSerializer.Serialize(request.DeviceInfo) : null,
                 Provider = "Passkey",

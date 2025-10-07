@@ -10,6 +10,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Interfaces.Repositories.Business.Platform; // CORRECT NAMESPACE
 using AuthHive.Core.Models.Auth.ConnectedId.Requests;
 using AuthHive.Core.Models.Auth.ConnectedId.Responses;
@@ -32,6 +33,7 @@ namespace AuthHive.Auth.Services
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IOrganizationRepository _organizationRepository;
         private readonly IOrganizationPlanRepository _organizationPlanRepository;
+        private readonly IPlatformApplicationRepository _applicationRepository;
         private readonly ILogger<ConnectedIdService> _logger;
         private readonly IMapper _mapper;
         private readonly IDateTimeProvider _dateTimeProvider;
@@ -45,6 +47,7 @@ namespace AuthHive.Auth.Services
             IConnectedIdRepository connectedIdRepository,
             IOrganizationRepository organizationRepository,
             IOrganizationPlanRepository organizationPlanRepository,
+            IPlatformApplicationRepository applicationRepository,
             ILogger<ConnectedIdService> logger,
             IMapper mapper,
             IDateTimeProvider dateTimeProvider,
@@ -55,6 +58,7 @@ namespace AuthHive.Auth.Services
         {
             _unitOfWork = unitOfWork;
             _connectedIdRepository = connectedIdRepository;
+            _applicationRepository = applicationRepository;
             _organizationRepository = organizationRepository;
             _organizationPlanRepository = organizationPlanRepository;
             _logger = logger;
@@ -443,7 +447,7 @@ namespace AuthHive.Auth.Services
             await _cacheService.RemoveAsync($"cache:org:{organizationId}:members:page:1:size:10");
         }
 
-        private async Task InvalidateSingleConnectedIdCache(Guid id, Guid organizationId, Guid userId)
+        private async Task InvalidateSingleConnectedIdCache(Guid id, Guid organizationId, Guid? userId)
         {
             await _cacheService.RemoveAsync($"cache:connectedid:{id}");
             await _cacheService.RemoveAsync($"cache:user:{userId}:connections");
@@ -451,6 +455,84 @@ namespace AuthHive.Auth.Services
             await _cacheService.RemoveAsync($"cache:org:{organizationId}:ismember:{userId}");
             await InvalidateOrganizationCache(organizationId);
         }
+
+        // Path: AuthHive.Auth/Services/ConnectedId/ConnectedIdService.cs
+
+        // ... inside the ConnectedIdService class ...
+
+        #region Service Account Management
+
+        /// <summary>
+        /// 지정된 애플리케이션을 대표하는 서비스 계정 ConnectedId를 조회하거나 생성합니다.
+        /// 이 작업은 원자성을 보장하기 위해 데이터베이스 트랜잭션 내에서 수행됩니다.
+        /// </summary>
+        public async Task<ServiceResult<Guid>> GetOrCreateServiceAccountForApplicationAsync(Guid applicationId)
+        {
+            // 서비스 계정은 ApplicationId가 일치하고 UserId가 null인 ConnectedId로 식별합니다.
+            var existingServiceAccount = (await _connectedIdRepository.FindAsync(
+                cid => cid.ApplicationId == applicationId &&
+                       cid.UserId == null &&
+                       cid.MembershipType == MembershipType.ServiceAccount
+            )).FirstOrDefault();
+
+            if (existingServiceAccount != null)
+            {
+                _logger.LogDebug("Found existing service account ConnectedId {ConnectedId} for ApplicationId {ApplicationId}", existingServiceAccount.Id, applicationId);
+                return ServiceResult<Guid>.Success(existingServiceAccount.Id);
+            }
+
+            // 트랜잭션 내에서 생성하여 동시성 문제를 방지합니다.
+            await _unitOfWork.BeginTransactionAsync();
+            try
+            {
+                // 트랜잭션 진입 후 다시 한번 확인 (Double-checked locking)
+                var recheckServiceAccount = (await _connectedIdRepository.FindAsync(
+                    cid => cid.ApplicationId == applicationId &&
+                           cid.UserId == null &&
+                           cid.MembershipType == MembershipType.ServiceAccount
+                )).FirstOrDefault();
+
+                if (recheckServiceAccount != null)
+                {
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult<Guid>.Success(recheckServiceAccount.Id);
+                }
+
+                // 애플리케이션 정보를 조회하여 OrganizationId를 가져옵니다.
+                var application = await _applicationRepository.GetByIdAsync(applicationId);
+                if (application == null)
+                {
+                    await _unitOfWork.RollbackTransactionAsync();
+                    return ServiceResult<Guid>.Failure($"Application with ID '{applicationId}' not found.");
+                }
+
+                // 새로운 서비스 계정 ConnectedId를 생성합니다.
+                var newServiceAccount = new ConnectedId
+                {
+                    OrganizationId = application.OrganizationId,
+                    ApplicationId = applicationId, // 이제 이 속성이 존재합니다.
+                    UserId = null,
+                    MembershipType = MembershipType.ServiceAccount,
+                    Status = ConnectedIdStatus.Active,
+                };
+
+                var createdEntity = await _connectedIdRepository.AddAsync(newServiceAccount);
+                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.CommitTransactionAsync();
+
+                _logger.LogInformation("Created new service account ConnectedId {ConnectedId} for ApplicationId {ApplicationId}", createdEntity.Id, applicationId);
+
+                return ServiceResult<Guid>.Success(createdEntity.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to get or create service account for ApplicationId {ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync();
+                return ServiceResult<Guid>.Failure("An internal error occurred while creating the service account.");
+            }
+        }
+
+        #endregion
 
         #endregion
     }

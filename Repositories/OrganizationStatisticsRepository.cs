@@ -503,7 +503,7 @@ namespace AuthHive.Auth.Repositories
             EventType = SecurityEventType.LoginFailed,  // enum 사용
             Severity = SecuritySeverityLevel.Medium,     // enum 사용
             EventDescription = "Multiple failed login attempts",
-            IPAddress = "192.168.1.100"
+            IpAddress = "192.168.1.100"
         },
         new SecurityEventDto
         {

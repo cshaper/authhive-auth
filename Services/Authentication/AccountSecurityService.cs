@@ -26,6 +26,8 @@ using AuthHive.Core.Interfaces.Business.Platform.Service;
 using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Models.Auth.Events;
 using AuthHive.Core.Models.Infra.Monitoring;
+using AuthHive.Core.Interfaces.Infra.UserExperience;
+using AuthHive.Core.Models.External;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -49,6 +51,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IAccountSecuritySettingsRepository _securitySettingsRepository;
         private readonly IOrganizationHierarchyService _orgHierarchyService;
         private readonly IPlanService _planService;
+        private readonly IEmailService _emailService;
         private readonly IMapper _mapper;
 
         public AccountSecurityService(
@@ -65,6 +68,7 @@ namespace AuthHive.Auth.Services.Authentication
             IOrganizationHierarchyService orgHierarchyService,
             IPlanService planService,
             IMapper mapper,
+            IEmailService emailService,
             ILogger<AccountSecurityService> logger)
         {
             _userRepository = userRepository;
@@ -80,6 +84,7 @@ namespace AuthHive.Auth.Services.Authentication
             _orgHierarchyService = orgHierarchyService;
             _planService = planService;
             _mapper = mapper;
+            _emailService = emailService;
             _logger = logger;
         }
 
@@ -141,7 +146,14 @@ namespace AuthHive.Auth.Services.Authentication
                 await _cacheService.RemoveAsync($"account_lock_status_{userId}");
 
                 await _auditService.LogActionAsync(lockedBy, "ACCOUNT_LOCKED", AuditActionType.Blocked, "User", userId.ToString(), true, $"Reason: {reason}");
-                await _eventBus.PublishAsync(new AccountLockedEvent { UserId = userId, LockReason = reason, LockedUntil = lockUntil, LockedByConnectedId = lockedBy });
+                // Option 3: Simple fix with minimal information
+                await _eventBus.PublishAsync(new AccountLockedEvent(userId)
+                {
+                    Reason = reason,
+                    LockedUntil = DateTime.UtcNow.AddHours(1), // Default 1 hour lock
+                    FailedAttempts = 0, // Set to 0 if you don't have the count
+                    IpAddress = "Unknown" // Set to "Unknown" if not available
+                });
 
                 return ServiceResult.Success("Account has been locked successfully.");
             }
@@ -528,7 +540,74 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         #endregion
+        // Path: D:/Works/Projects/Auth_V2/AuthHive/authhive.auth/Services/Authentication/AccountSecurityService.cs
 
+        // ... (inside the AccountSecurityService class) ...
+
+        #region 신뢰할 수 있는 장치 (Trusted Devices)
+
+        // ... (your other trusted device methods like RegisterTrustedDeviceAsync, etc.) ...
+
+        /// <summary>
+        /// Checks if a device is trusted and sends a notification if it's new.
+        /// </summary>
+        public async Task<ServiceResult> CheckAndNotifyNewDeviceAsync(
+            Guid userId,
+            string deviceId,
+            string deviceFingerprint,
+            string? location,
+            string ipAddress,      // <-- Add parameter
+            string? userAgent)     // <-- Add parameter
+        {
+            try
+            {
+                var isTrustedResult = await _trustedDeviceService.IsDeviceTrustedAsync(userId, deviceId, deviceFingerprint);
+                if (isTrustedResult.IsSuccess && isTrustedResult.Data)
+                {
+                    return ServiceResult.Success();
+                }
+
+                var user = await _userRepository.GetByIdAsync(userId);
+                if (user == null)
+                {
+                    _logger.LogWarning("Could not send new device notification for user {UserId} as user was not found.", userId);
+                    return ServiceResult.Success();
+                }
+
+                _logger.LogInformation("New device detected for user {UserId}. DeviceId: {DeviceId}", userId, deviceId);
+
+                await _auditService.LogActionAsync(
+                    userId, "NEW_DEVICE_LOGIN", AuditActionType.Login, "User", userId.ToString(), true,
+                    $"New device login detected. DeviceId: {deviceId}, Location: {location ?? "Unknown"}"
+                );
+
+                // FINAL FIX: Use the new, complete constructor for the event, not the object initializer.
+                var newDeviceEvent = new NewDeviceLoggedInEvent(
+                    userId: userId,
+                    deviceId: deviceId,
+                    ipAddress: ipAddress,
+                    userAgent: userAgent ?? "Unknown",
+                    location: location
+                );
+                await _eventBus.PublishAsync(newDeviceEvent);
+
+                var emailMessage = new EmailMessageDto
+                {
+                    To = user.Email,
+                    Subject = "Security Alert: New Device Login",
+                    Body = $"We detected a login from a new device in {location ?? "an unknown location"}. If this was not you, please secure your account immediately."
+                };
+                await _emailService.SendEmailAsync(emailMessage);
+
+                return ServiceResult.Success("New device notification sent.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to check and notify for new device for user {UserId}", userId);
+                return ServiceResult.Success("An error occurred during new device check, but login process can continue.");
+            }
+        }
+        #endregion
         #region Private Helper Methods
 
 

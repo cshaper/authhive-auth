@@ -1046,10 +1046,18 @@ namespace AuthHive.Auth.Services.Security
 
                 foreach (var connectedId in connectedIds)
                 {
-                    var userScoreResult = await CalculateUserRiskScoreAsync(connectedId.UserId);
+                    // FIX: UserId가 null인 경우 건너뛰기
+                    if (!connectedId.UserId.HasValue)
+                    {
+                        _logger.LogWarning("ConnectedId {ConnectedId} has no UserId, skipping risk calculation",
+                            connectedId.Id);
+                        continue;
+                    }
+
+                    var userScoreResult = await CalculateUserRiskScoreAsync(connectedId.UserId.Value);
                     if (userScoreResult.IsSuccess && userScoreResult.Data != null)
                     {
-                        userScores[connectedId.UserId] = userScoreResult.Data.CurrentScore;
+                        userScores[connectedId.UserId.Value] = userScoreResult.Data.CurrentScore;
                         totalScore += userScoreResult.Data.CurrentScore;
 
                         if (userScoreResult.Data.CurrentScore >= 70)
@@ -1087,7 +1095,6 @@ namespace AuthHive.Auth.Services.Security
                     "SCORE_CALCULATION_ERROR");
             }
         }
-
         /// <summary>
         /// 위험 점수 업데이트
         /// </summary>
@@ -1337,8 +1344,8 @@ namespace AuthHive.Auth.Services.Security
         private RiskFactor? AnalyzeLocationChanges(IEnumerable<Core.Entities.Auth.SessionActivityLog> activities)  // async/Task 제거
         {
             var locations = activities
-                .Where(a => !string.IsNullOrWhiteSpace(a.IPAddress))
-                .Select(a => a.IPAddress)
+                .Where(a => !string.IsNullOrWhiteSpace(a.IpAddress))
+                .Select(a => a.IpAddress)
                 .Distinct()
                 .ToList();
 

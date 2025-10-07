@@ -8,6 +8,8 @@ using AuthHive.Auth.Providers;
 using AuthHive.Auth.Providers.Authentication;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
@@ -36,16 +38,19 @@ namespace AuthHive.Auth.Services
         private readonly Dictionary<AuthenticationMethod, Type> _providerMapping;
         private readonly IAuthenticationAttemptLogRepository _authAttemptRepository;
         private readonly ICacheService? _cacheService; // 선택적
+        private readonly IAuditService _auditService; // 선택적
 
         public AuthenticationManager(
             IServiceProvider serviceProvider,
             ILogger<AuthenticationManager> logger,
+            IAuditService auditService,
             ITokenProvider tokenProvider,
             ISessionService sessionService,
             IAuthenticationAttemptLogRepository authAttemptRepository)
         {
             _serviceProvider = serviceProvider;
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _auditService = auditService ?? throw new ArgumentNullException(nameof(auditService));
             _tokenProvider = tokenProvider;
             _sessionService = sessionService ?? throw new ArgumentNullException(nameof(sessionService));
             _authAttemptRepository = authAttemptRepository;
@@ -464,7 +469,7 @@ namespace AuthHive.Auth.Services
                     ConnectedId = s.ConnectedId != Guid.Empty ? s.ConnectedId : null,
                     OrganizationId = s.OrganizationId != Guid.Empty ? s.OrganizationId : null,
                     AuthenticationMethod = "Password", // SessionResponse에 없으므로 기본값 또는 별도 조회 필요
-                    IpAddress = s.IPAddress,
+                    IpAddress = s.IpAddress,
                     DeviceInfo = !string.IsNullOrEmpty(s.Browser) && !string.IsNullOrEmpty(s.OperatingSystem)
                         ? $"{s.Browser} on {s.OperatingSystem}"
                         : null,
@@ -1073,16 +1078,36 @@ namespace AuthHive.Auth.Services
 
         private async Task PublishAuthenticationSuccessEvent(AuthenticationOutcome outcome)
         {
-            // TODO: Platform 서비스로 이벤트 발행
-            await Task.CompletedTask;
+            // 단순 성공 기록은 AuditService 사용
+
+            await _auditService.LogActionAsync(
+                performedByConnectedId: outcome.ConnectedId, // 파라미터 이름을 'performedByConnectedId'로 수정
+                action: "AUTHENTICATION_SUCCESS",
+                actionType: AuditActionType.Login, // 필수 파라미터 추가
+                resourceType: "User",              // 필수 파라미터 추가
+                resourceId: outcome.ConnectedId.ToString(), // 필수 파라미터 추가
+                success: true,
+                metadata: $"Authenticated via {outcome.AuthenticationMethod}"
+            );
         }
 
-        private async Task PublishAuthenticationFailureEvent(
-            AuthenticationRequest request,
-            string? errorMessage)
+        private async Task PublishAuthenticationFailureEvent(AuthenticationRequest request, string? errorMessage)
         {
-            // TODO: Platform 서비스로 이벤트 발행
-            await Task.CompletedTask;
+            // 단순 실패 기록은 AuditService 사용
+            await _auditService.LogActionAsync(
+      performedByConnectedId: null, // 인증 실패로 아직 ConnectedId가 없음
+      action: "AUTHENTICATION_FAILURE",
+      actionType: AuditActionType.Login,
+      resourceType: "User", // 인증 시도의 대상 리소스는 'User'
+      resourceId: request.Username ?? "unknown", // 사용자 이름을 'resourceId'로 전달
+      success: false,
+      metadata: $"Authentication failed for method {request.Method}. Reason: {errorMessage}" // 'details'를 'metadata'로 수정
+  );
+
+            // 특정 조건(예: 실패 횟수 임계값 초과)에서는 IEventBus로 보안 이벤트 발행
+            // if (isSuspicious) {
+            //     await _eventBus.PublishAsync(new SuspiciousLoginActivityEvent(...));
+            // }
         }
     }
 }

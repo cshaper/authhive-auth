@@ -236,8 +236,8 @@ namespace AuthHive.Auth.Handlers.User
                     anomalyData["indicators"] = @event.AnomalyIndicators;
                 }
 
-                if (!string.IsNullOrEmpty(@event.IPAddress))
-                    anomalyData["ip_address"] = @event.IPAddress;
+                if (!string.IsNullOrEmpty(@event.IpAddress))
+                    anomalyData["ip_address"] = @event.IpAddress;
                 if (!string.IsNullOrEmpty(@event.Location))
                     anomalyData["location"] = @event.Location;
                 if (!string.IsNullOrEmpty(@event.DeviceFingerprint))

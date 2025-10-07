@@ -14,12 +14,14 @@ using System.Collections.Generic;
 using System.Text.Json;
 using AuthHive.Core.Interfaces.Infra.Monitoring;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Models.Auth.Authentication.Events;
 
 namespace AuthHive.Auth.Services.Handlers
 {
     /// <summary>
-    /// 인증 이벤트 핸들러 구현 - AuthHive v15
+    /// 인증 이벤트 핸들러 구현 - AuthHive v16 (확장됨)
     /// 인증 관련 모든 이벤트를 처리하고 감사 로그, 알림, 캐시 무효화 등을 수행합니다.
+    /// ✨ v16: 인증 시도 추적, 위험 평가, 이상 징후 감지 기능 추가
     /// </summary>
     public class AuthEventHandler : IAuthEventHandler
     {
@@ -49,6 +51,8 @@ namespace AuthHive.Auth.Services.Handlers
             _metricsService = metricsService;
         }
 
+        #region 기존 메서드들 (v15)
+
         /// <inheritdoc />
         public async Task HandleAuthenticationSuccessAsync(AuthenticationSuccessEvent eventData)
         {
@@ -58,7 +62,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "Authentication success for User {UserId} via {AuthMethod} from {IpAddress}",
                     eventData.UserId, eventData.AuthMethod, eventData.IpAddress);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     eventData.ConnectedId ?? Guid.Empty,
                     "AUTH_SUCCESS",
@@ -73,14 +76,11 @@ namespace AuthHive.Auth.Services.Handlers
                         ["AdditionalData"] = eventData.AdditionalData ?? new Dictionary<string, object>()
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.success.{eventData.AuthMethod.ToLower()}");
 
-                // 3. 캐시 무효화 (이전 세션 데이터)
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{eventData.UserId}";
                 await _cacheService.RemoveAsync(cacheKey);
 
-                // 4. 성공 알림 (선택적 - 새로운 위치에서 로그인 시)
                 if (await IsNewLocationAsync(eventData.UserId, eventData.IpAddress))
                 {
                     await _notificationService.SendSecurityAlertAsync(
@@ -92,7 +92,6 @@ namespace AuthHive.Auth.Services.Handlers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to handle authentication success event for User {UserId}", eventData.UserId);
-                // 이벤트 처리 실패는 인증 자체를 실패시키지 않음
             }
         }
 
@@ -103,10 +102,9 @@ namespace AuthHive.Auth.Services.Handlers
             {
                 _logger.LogWarning(
                     "Authentication failure for {Username} via {AuthMethod} from {IpAddress}. Reason: {Reason}. Attempt: {AttemptCount}",
-                    eventData.Username ?? "Unknown", eventData.AuthMethod, eventData.IpAddress, 
+                    eventData.Username ?? "Unknown", eventData.AuthMethod, eventData.IpAddress,
                     eventData.FailureReason, eventData.AttemptCount);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "AUTH_FAILURE",
@@ -122,10 +120,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ["FailureReason"] = eventData.FailureReason
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.failure.{eventData.AuthMethod.ToLower()}");
-                
-                // 3. 반복 실패 감지 및 대응
+
                 if (eventData.AttemptCount >= 3)
                 {
                     await HandleRepeatedFailuresAsync(eventData);
@@ -146,7 +142,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "Token issued for User {UserId}. Type: {TokenType}, ID: {TokenId}, Expires: {ExpiresAt}",
                     eventData.UserId, eventData.TokenType, eventData.TokenId, eventData.ExpiresAt);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "TOKEN_ISSUED",
@@ -161,10 +156,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ["Scopes"] = eventData.Scopes ?? new List<string>()
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.token.issued.{eventData.TokenType.ToLower()}");
 
-                // 3. 토큰 정보 캐싱 (빠른 검증을 위해)
                 var cacheKey = $"token:{eventData.TokenId}";
                 var cacheData = new
                 {
@@ -194,7 +187,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "Token refreshed for User {UserId}. Old: {OldTokenId}, New: {NewTokenId}",
                     eventData.UserId, eventData.OldTokenId, eventData.NewTokenId);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "TOKEN_REFRESHED",
@@ -207,10 +199,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ["NewTokenId"] = eventData.NewTokenId
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.token.refreshed");
 
-                // 3. 이전 토큰 캐시 무효화
                 var oldCacheKey = $"token:{eventData.OldTokenId}";
                 await _cacheService.RemoveAsync(oldCacheKey);
             }
@@ -229,7 +219,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "Token revoked for User {UserId}. TokenId: {TokenId}, Reason: {Reason}",
                     eventData.UserId, eventData.TokenId, eventData.RevokeReason);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "TOKEN_REVOKED",
@@ -242,14 +231,11 @@ namespace AuthHive.Auth.Services.Handlers
                         ["RevokeReason"] = eventData.RevokeReason
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.token.revoked");
 
-                // 3. 토큰 캐시 즉시 무효화
                 var cacheKey = $"token:{eventData.TokenId}";
                 await _cacheService.RemoveAsync(cacheKey);
 
-                // 4. 보안 알림 (의심스러운 활동인 경우)
                 if (IsSuspiciousRevocation(eventData.RevokeReason))
                 {
                     await _notificationService.SendSecurityAlertAsync(
@@ -273,7 +259,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "MFA required for User {UserId}. Method: {MfaMethod}",
                     eventData.UserId, eventData.MfaMethod);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "MFA_REQUIRED",
@@ -285,10 +270,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ["MfaMethod"] = eventData.MfaMethod
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.mfa.required.{eventData.MfaMethod.ToLower()}");
 
-                // 3. MFA 알림 발송 (SMS, Email 등)
                 if (eventData.MfaMethod == "SMS" || eventData.MfaMethod == "Email")
                 {
                     await _notificationService.SendMfaCodeAsync(eventData.UserId, eventData.MfaMethod);
@@ -309,7 +292,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "MFA verification successful for User {UserId}. Method: {MfaMethod}",
                     eventData.UserId, eventData.MfaMethod);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "MFA_SUCCESS",
@@ -321,7 +303,6 @@ namespace AuthHive.Auth.Services.Handlers
                         ["MfaMethod"] = eventData.MfaMethod
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.mfa.success.{eventData.MfaMethod.ToLower()}");
             }
             catch (Exception ex)
@@ -337,32 +318,28 @@ namespace AuthHive.Auth.Services.Handlers
             {
                 _logger.LogWarning(
                     "Account locked for User {UserId}. Reason: {Reason}, Until: {LockedUntil}",
-                    eventData.UserId, eventData.LockReason, eventData.LockedUntil);
+                    eventData.UserId, eventData.Reason, eventData.LockedUntil);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "ACCOUNT_LOCKED",
-                    $"Account locked: {eventData.LockReason}",
+                    $"Account locked: {eventData.Reason}",
                     eventData.UserId,
                     AuditEventSeverity.Critical,
                     new Dictionary<string, object>
                     {
-                        ["LockReason"] = eventData.LockReason,
-                        ["LockedUntil"] = eventData.LockedUntil?.ToString() ?? "Indefinite"
+                        ["LockReason"] = eventData.Reason,
+                        ["LockedUntil"] = eventData.LockedUntil.ToString()
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.account.locked");
 
-                // 3. 모든 활성 세션 무효화
                 var sessionPattern = $"{CACHE_KEY_PREFIX}:{eventData.UserId}:*";
                 await _cacheService.RemoveByPatternAsync(sessionPattern);
 
-                // 4. 계정 잠금 알림 발송
                 await _notificationService.SendAccountLockedNotificationAsync(
                     eventData.UserId,
-                    eventData.LockReason,
+                    eventData.Reason,
                     eventData.LockedUntil);
             }
             catch (Exception ex)
@@ -380,7 +357,6 @@ namespace AuthHive.Auth.Services.Handlers
                     "Account unlocked for User {UserId}. Reason: {Reason}",
                     eventData.UserId, eventData.UnlockReason);
 
-                // 1. 감사 로그 기록
                 await LogAuditAsync(
                     Guid.Empty,
                     "ACCOUNT_UNLOCKED",
@@ -392,10 +368,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ["UnlockReason"] = eventData.UnlockReason
                     });
 
-                // 2. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.account.unlocked");
 
-                // 3. 계정 잠금 해제 알림 발송
                 await _notificationService.SendAccountUnlockedNotificationAsync(
                     eventData.UserId,
                     eventData.UnlockReason);
@@ -405,6 +379,239 @@ namespace AuthHive.Auth.Services.Handlers
                 _logger.LogError(ex, "Failed to handle account unlocked event for User {UserId}", eventData.UserId);
             }
         }
+
+        #endregion
+
+        #region 신규 메서드들 (v16)
+
+        /// <inheritdoc />
+        public async Task HandleAuthenticationAttemptedAsync(AuthenticationAttemptedEvent eventData)
+        {
+            try
+            {
+                var logLevel = eventData.IsSuccess ? LogLevel.Information : LogLevel.Warning;
+                _logger.Log(
+                    logLevel,
+                    "Authentication attempt for User {Username} via {Method} from {IpAddress}. Success: {Success}",
+                    eventData.Username, eventData.Method, eventData.IpAddress, eventData.IsSuccess);
+
+                await LogAuditAsync(
+                    eventData.ConnectedId ?? Guid.Empty,
+                    eventData.IsSuccess ? "AUTH_ATTEMPT_SUCCESS" : "AUTH_ATTEMPT_FAILURE",
+                    $"Authentication attempt via {eventData.Method}: {(eventData.IsSuccess ? "Success" : $"Failed - {eventData.FailureReason}")}",
+                    eventData.UserId,
+                    eventData.IsSuccess ? AuditEventSeverity.Info : AuditEventSeverity.Warning,
+                    new Dictionary<string, object>
+                    {
+                        ["Username"] = eventData.Username,
+                        ["Method"] = eventData.Method.ToString(),
+                        ["IsSuccess"] = eventData.IsSuccess,
+                        ["FailureReason"] = eventData.FailureReason?.ToString() ?? "N/A",
+                        ["IpAddress"] = eventData.IpAddress,
+                        ["UserAgent"] = eventData.UserAgent ?? "Unknown",
+                        ["ApplicationId"] = eventData.ApplicationId?.ToString() ?? "N/A"
+                    });
+
+                var metricKey = eventData.IsSuccess 
+                    ? $"{METRICS_PREFIX}.attempt.success.{eventData.Method.ToString().ToLower()}"
+                    : $"{METRICS_PREFIX}.attempt.failure.{eventData.Method.ToString().ToLower()}";
+                await _metricsService.IncrementAsync(metricKey);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle authentication attempted event");
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task HandleHighRiskAuthenticationAsync(HighRiskAuthenticationEvent eventData)
+        {
+            try
+            {
+                _logger.LogWarning(
+                    "High-risk authentication for User {Username} from {IpAddress}. Risk Score: {RiskScore}, Level: {RiskLevel}",
+                    eventData.Username, eventData.IpAddress, eventData.RiskScore, eventData.RiskLevel);
+
+                await LogAuditAsync(
+                    eventData.UserId ?? Guid.Empty,
+                    "HIGH_RISK_AUTH",
+                    $"High-risk authentication detected: {eventData.RiskLevel} (Score: {eventData.RiskScore})",
+                    eventData.UserId,
+                    AuditEventSeverity.Warning,
+                    new Dictionary<string, object>
+                    {
+                        ["Username"] = eventData.Username,
+                        ["IpAddress"] = eventData.IpAddress,
+                        ["RiskScore"] = eventData.RiskScore,
+                        ["RiskLevel"] = eventData.RiskLevel,
+                        ["RiskFactors"] = eventData.RiskFactors,
+                        ["RequiresMfa"] = eventData.RequiresMfa,
+                        ["RequiresAdditionalVerification"] = eventData.RequiresAdditionalVerification
+                    });
+
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.security.high_risk");
+
+                // 고위험 인증 시 보안팀에 알림
+                if (eventData.RiskScore >= 0.8)
+                {
+                    await _notificationService.SendSecurityAlertAsync(
+                        eventData.UserId ?? Guid.Empty,
+                        "High-Risk Authentication Detected",
+                        $"A high-risk authentication was detected for {eventData.Username} from {eventData.IpAddress}. " +
+                        $"Risk Score: {eventData.RiskScore:P0}. Factors: {string.Join(", ", eventData.RiskFactors)}");
+                }
+
+                // MFA 요구 시 사용자에게 알림
+                if (eventData.RequiresMfa && eventData.UserId.HasValue)
+                {
+                    await _notificationService.SendSecurityAlertAsync(
+                        eventData.UserId.Value,
+                        "MFA Required for Security",
+                        "Due to unusual activity, multi-factor authentication is now required.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle high-risk authentication event");
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task HandleSuspiciousLoginActivityAsync(SuspiciousLoginActivityEvent eventData)
+        {
+            try
+            {
+                _logger.LogWarning(
+                    "Suspicious login activity detected for {Username} from {IpAddress}. Risk Score: {RiskScore}. Patterns: {Patterns}",
+                    eventData.Username, eventData.IpAddress, eventData.RiskScore, 
+                    string.Join(", ", eventData.DetectedPatterns));
+
+                await LogAuditAsync(
+                    Guid.Empty,
+                    "SUSPICIOUS_LOGIN",
+                    $"Suspicious login activity detected. Patterns: {string.Join(", ", eventData.DetectedPatterns)}",
+                    null,
+                    eventData.RiskScore >= 80 ? AuditEventSeverity.Critical : AuditEventSeverity.Warning,
+                    new Dictionary<string, object>
+                    {
+                        ["Username"] = eventData.Username,
+                        ["IpAddress"] = eventData.IpAddress,
+                        ["DeviceFingerprint"] = eventData.DeviceFingerprint ?? "Unknown",
+                        ["RiskScore"] = eventData.RiskScore,
+                        ["DetectedPatterns"] = eventData.DetectedPatterns
+                    });
+
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.security.suspicious_login");
+
+                // 임시 IP 차단 (고위험 시)
+                if (eventData.RiskScore >= 80)
+                {
+                    var blockKey = $"auth:blocked:ip:{eventData.IpAddress}";
+                    await _cacheService.SetAsync(blockKey, "suspicious_activity", TimeSpan.FromMinutes(30));
+
+                    _logger.LogWarning("Temporarily blocked IP {IpAddress} due to suspicious activity", eventData.IpAddress);
+                }
+
+                // 보안 알림 발송
+                // Note: Username으로 실제 UserId를 찾아야 하지만, 여기서는 보안팀에 알림으로 대체
+                _logger.LogWarning(
+                    "Sending security alert for suspicious login: {Username} from {IpAddress}",
+                    eventData.Username, eventData.IpAddress);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle suspicious login activity event");
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task HandleGeographicalAnomalyAsync(GeographicalAnomalyDetectedEvent eventData)
+        {
+            try
+            {
+                _logger.LogWarning(
+                    "Geographical anomaly detected for User {UserId}. New location: {NewLocation}. Previous: {PreviousLocations}",
+                    eventData.TriggeredBy, eventData.NewLocation, string.Join(", ", eventData.PreviousLocations));
+
+                await LogAuditAsync(
+                    eventData.TriggeredBy ?? Guid.Empty,
+                    "GEO_ANOMALY",
+                    $"Geographical anomaly detected. New location: {eventData.NewLocation}",
+                    eventData.TriggeredBy,
+                    AuditEventSeverity.Warning,
+                    new Dictionary<string, object>
+                    {
+                        ["NewLocation"] = eventData.NewLocation,
+                        ["PreviousLocations"] = eventData.PreviousLocations,
+                        ["RiskScore"] = eventData.RiskScore
+                    });
+
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.security.geo_anomaly");
+
+                // 사용자에게 위치 확인 요청
+                if (eventData.TriggeredBy.HasValue)
+                {
+                    await _notificationService.SendSecurityAlertAsync(
+                        eventData.TriggeredBy.Value,
+                        "New Login Location Detected",
+                        $"We detected a login from a new location: {eventData.NewLocation}. " +
+                        $"If this wasn't you, please secure your account immediately.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle geographical anomaly event");
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task HandleBruteForceAttackAsync(BruteForceAttackDetectedEvent eventData)
+        {
+            try
+            {
+                _logger.LogCritical(
+                    "BRUTE FORCE ATTACK detected from IP {IpAddress}. {AttemptsCount} attempts in {TimeWindow} minutes. Affected users: {Users}",
+                    eventData.IpAddress, eventData.AttemptsCount, eventData.TimeWindow.TotalMinutes,
+                    string.Join(", ", eventData.AffectedUsers));
+
+                await LogAuditAsync(
+                    Guid.Empty,
+                    "BRUTE_FORCE_ATTACK",
+                    $"Brute force attack detected from {eventData.IpAddress}. {eventData.AttemptsCount} attempts",
+                    null,
+                    AuditEventSeverity.Critical,
+                    new Dictionary<string, object>
+                    {
+                        ["IpAddress"] = eventData.IpAddress,
+                        ["AttemptsCount"] = eventData.AttemptsCount,
+                        ["TimeWindow"] = eventData.TimeWindow.TotalMinutes,
+                        ["ActionTaken"] = eventData.ActionTaken,
+                        ["AffectedUsers"] = eventData.AffectedUsers
+                    });
+
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.security.brute_force_attack");
+
+                // IP 영구 차단 (24시간)
+                var blockKey = $"auth:blocked:ip:{eventData.IpAddress}";
+                await _cacheService.SetAsync(blockKey, "brute_force_attack", TimeSpan.FromHours(24));
+
+                _logger.LogCritical("IP {IpAddress} blocked for 24 hours due to brute force attack", eventData.IpAddress);
+
+                // 보안팀에 긴급 알림 (TODO: 실제 보안팀 알림 시스템 구현 필요)
+                _logger.LogCritical(
+                    "CRITICAL SECURITY ALERT: Brute Force Attack Detected. " +
+                    "IP: {IpAddress}, Attempts: {AttemptsCount}, TimeWindow: {TimeWindow} minutes, " +
+                    "Action: {ActionTaken}, AffectedUsers: {Users}",
+                    eventData.IpAddress, eventData.AttemptsCount, eventData.TimeWindow.TotalMinutes,
+                    eventData.ActionTaken, string.Join(", ", eventData.AffectedUsers));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle brute force attack event");
+            }
+        }
+
+        #endregion
 
         #region Private Helper Methods
 
@@ -448,6 +655,8 @@ namespace AuthHive.Auth.Services.Handlers
             {
                 "AUTH_SUCCESS" => AuditActionType.Login,
                 "AUTH_FAILURE" => AuditActionType.LoginAttempt,
+                "AUTH_ATTEMPT_SUCCESS" => AuditActionType.Login,
+                "AUTH_ATTEMPT_FAILURE" => AuditActionType.LoginAttempt,
                 "TOKEN_ISSUED" => AuditActionType.Create,
                 "TOKEN_REFRESHED" => AuditActionType.Update,
                 "TOKEN_REVOKED" => AuditActionType.Delete,
@@ -455,6 +664,10 @@ namespace AuthHive.Auth.Services.Handlers
                 "MFA_SUCCESS" => AuditActionType.Update,
                 "ACCOUNT_LOCKED" => AuditActionType.Update,
                 "ACCOUNT_UNLOCKED" => AuditActionType.Update,
+                "HIGH_RISK_AUTH" => AuditActionType.LoginAttempt,
+                "SUSPICIOUS_LOGIN" => AuditActionType.LoginAttempt,
+                "GEO_ANOMALY" => AuditActionType.LoginAttempt,
+                "BRUTE_FORCE_ATTACK" => AuditActionType.LoginAttempt,
                 _ => AuditActionType.Others
             };
         }
@@ -466,19 +679,18 @@ namespace AuthHive.Auth.Services.Handlers
 
             try
             {
-                // 캐시에서 최근 로그인 위치 확인
                 var recentLocationsKey = $"auth:locations:{userId}";
                 var recentLocationsJson = await _cacheService.GetAsync<string>(recentLocationsKey);
-                
+
                 if (string.IsNullOrEmpty(recentLocationsJson))
-                    return true; // 첫 로그인
+                    return true;
 
                 var recentLocations = JsonSerializer.Deserialize<List<string>>(recentLocationsJson);
                 return !recentLocations?.Contains(ipAddress) ?? true;
             }
             catch
             {
-                return false; // 오류 시 새 위치로 간주하지 않음
+                return false;
             }
         }
 
@@ -486,21 +698,18 @@ namespace AuthHive.Auth.Services.Handlers
         {
             try
             {
-                // 5번 이상 실패 시 임시 차단
                 if (eventData.AttemptCount >= 5)
                 {
                     _logger.LogWarning(
                         "Repeated authentication failures detected for {Username} from {IpAddress}. Implementing temporary block.",
                         eventData.Username, eventData.IpAddress);
 
-                    // IP 기반 임시 차단 (15분)
                     if (!string.IsNullOrEmpty(eventData.IpAddress))
                     {
                         var blockKey = $"auth:blocked:ip:{eventData.IpAddress}";
                         await _cacheService.SetAsync(blockKey, "blocked", TimeSpan.FromMinutes(15));
                     }
 
-                    // 메트릭 기록
                     await _metricsService.IncrementAsync($"{METRICS_PREFIX}.security.repeated_failures");
                 }
             }

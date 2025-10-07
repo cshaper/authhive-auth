@@ -225,7 +225,7 @@ namespace AuthHive.Auth.Services.Handlers
                         ConnectedId = eventData.ConnectedId.Value,
                         OrganizationId = user?.OrganizationId ?? Guid.Empty,
                         SessionType = SessionType.Web,
-                        IPAddress = eventData.IpAddress,
+                        IpAddress = eventData.IpAddress,
                         UserAgent = eventData.Device,
                         InitialStatus = SessionStatus.Active,
                         ExpiresAt = DateTime.UtcNow.AddMinutes(AuthConstants.Session.GlobalSessionTimeoutMinutes),
@@ -710,7 +710,7 @@ namespace AuthHive.Auth.Services.Handlers
                     ActivityType = activityType,
                     IsSuccessful = isSuccessful,
                     Timestamp = _dateTimeProvider.UtcNow,
-                    IPAddress = "System",
+                    IpAddress = "System",
                     Metadata = metadata != null ? JsonSerializer.Serialize(metadata) : null,
                     CreatedAt = _dateTimeProvider.UtcNow
                 };
