@@ -30,7 +30,7 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<UserFeatureProfileRepository> logger,
-            IMemoryCache? cache = null) 
+            IMemoryCache? cache = null)
             : base(context, organizationContext, cache)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -40,7 +40,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>ConnectedId로 기능 프로필 조회 (캐시 활용)</summary>
         public async Task<UserFeatureProfile?> GetByConnectedIdAsync(
-            Guid connectedId, 
+            Guid connectedId,
             CancellationToken cancellationToken = default)
         {
             // 캐시 확인
@@ -56,11 +56,11 @@ namespace AuthHive.Auth.Repositories
             // ConnectedId → User → UserFeatureProfile 경로로 조회
             var connectedIdEntity = await _context.ConnectedIds
                 .Include(c => c.User)
-                .ThenInclude(u => u.UserFeatureProfile)
+                .ThenInclude(u => u!.UserFeatureProfile)
                 .FirstOrDefaultAsync(c => c.Id == connectedId && !c.IsDeleted, cancellationToken);
 
             var profile = connectedIdEntity?.User?.UserFeatureProfile;
-            
+
             // 캐시 저장
             if (profile != null && _cache != null)
             {
@@ -73,28 +73,36 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>여러 ConnectedId의 기능 프로필 일괄 조회</summary>
         public async Task<IEnumerable<UserFeatureProfile>> GetByConnectedIdsAsync(
-            IEnumerable<Guid> connectedIds, 
+            IEnumerable<Guid> connectedIds,
             CancellationToken cancellationToken = default)
         {
             var connectedIdList = connectedIds.ToList();
-            if (!connectedIdList.Any()) return new List<UserFeatureProfile>();
+            if (!connectedIdList.Any())
+            {
+                return Enumerable.Empty<UserFeatureProfile>();
+            }
 
             var profiles = await _context.ConnectedIds
+                // 1. 초기 필터링
                 .Where(c => connectedIdList.Contains(c.Id) && !c.IsDeleted)
-                .Include(c => c.User)
-                .ThenInclude(u => u.UserFeatureProfile)
-                .Select(c => c.User.UserFeatureProfile)
-                .Where(p => p != null)
+
+                // 2. User와 UserFeatureProfile이 null이 아닌 데이터만 안전하게 필터링
+                .Where(c => c.User != null && c.User.UserFeatureProfile != null)
+
+                // 3. '!' 연산자를 사용하여 컴파일러 경고를 해결하고 최종 데이터 선택
+                .Select(c => c.User!.UserFeatureProfile!)
+
                 .ToListAsync(cancellationToken);
 
-            return profiles!;
+            // profiles의 타입이 List<UserFeatureProfile>이므로 '!' 없이 반환
+            return profiles;
         }
 
         /// <summary>조직별 기능 프로필 조회</summary>
         public async Task<PagedResult<UserFeatureProfile>> GetByOrganizationAsync(
-            Guid organizationId, 
-            int pageNumber = 1, 
-            int pageSize = 50, 
+            Guid organizationId,
+            int pageNumber = 1,
+            int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
             // BaseRepository의 GetPagedByOrganizationAsync 활용
@@ -116,7 +124,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>사용자 기능 프로필 생성 또는 업데이트 (Upsert)</summary>
         public async Task<UserFeatureProfile> UpsertAsync(
-            UserFeatureProfile profile, 
+            UserFeatureProfile profile,
             CancellationToken cancellationToken = default)
         {
             var existing = await FirstOrDefaultAsync(p => p.UserId == profile.UserId);
@@ -139,7 +147,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>마지막 활동 시간 업데이트</summary>
         public async Task<bool> UpdateLastActivityAsync(
-            Guid connectedId, 
+            Guid connectedId,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -147,17 +155,17 @@ namespace AuthHive.Auth.Repositories
 
             profile.LastActivityAt = DateTime.UtcNow;
             profile.UpdatedAt = DateTime.UtcNow;
-            
+
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>프로필 메타데이터 업데이트</summary>
         public async Task<bool> UpdateMetadataAsync(
-            Guid connectedId, 
-            Dictionary<string, object> metadata, 
+            Guid connectedId,
+            Dictionary<string, object> metadata,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -165,10 +173,10 @@ namespace AuthHive.Auth.Repositories
 
             profile.Metadata = JsonSerializer.Serialize(metadata);
             profile.UpdatedAt = DateTime.UtcNow;
-            
+
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
@@ -178,8 +186,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>활성 애드온 추가</summary>
         public async Task<bool> AddActiveAddonAsync(
-            Guid connectedId, 
-            string addonKey, 
+            Guid connectedId,
+            string addonKey,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -195,14 +203,14 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>활성 애드온 제거</summary>
         public async Task<bool> RemoveActiveAddonAsync(
-            Guid connectedId, 
-            string addonKey, 
+            Guid connectedId,
+            string addonKey,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -217,14 +225,14 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>활성 애드온 목록 업데이트</summary>
         public async Task<bool> UpdateActiveAddonsAsync(
-            Guid connectedId, 
-            IEnumerable<string> addonKeys, 
+            Guid connectedId,
+            IEnumerable<string> addonKeys,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -237,14 +245,14 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>특정 애드온을 활성화한 사용자들 조회</summary>
         public async Task<IEnumerable<UserFeatureProfile>> GetUsersWithAddonAsync(
-            string addonKey, 
-            Guid? organizationId = null, 
+            string addonKey,
+            Guid? organizationId = null,
             CancellationToken cancellationToken = default)
         {
             var query = Query().Where(p => p.ActiveAddons.Contains($"\"{addonKey}\""));
@@ -267,8 +275,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>API 접근 권한 목록 업데이트</summary>
         public async Task<bool> UpdateApiAccessAsync(
-            Guid connectedId, 
-            IEnumerable<string> apiScopes, 
+            Guid connectedId,
+            IEnumerable<string> apiScopes,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -279,14 +287,14 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>API 호출 수 증가</summary>
         public async Task<int> IncrementApiCallsAsync(
-            Guid connectedId, 
-            int increment = 1, 
+            Guid connectedId,
+            int increment = 1,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -298,7 +306,7 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return profile.TotalApiCalls;
         }
 
@@ -308,9 +316,9 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>기능 사용 기록</summary>
         public async Task<bool> RecordFeatureUsageAsync(
-            Guid connectedId, 
-            string featureKey, 
-            Dictionary<string, object>? usageData = null, 
+            Guid connectedId,
+            string featureKey,
+            Dictionary<string, object>? usageData = null,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -326,23 +334,23 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>기능 설정 업데이트</summary>
         public async Task<bool> UpdateFeatureSettingsAsync(
-            Guid connectedId, 
-            string featureKey, 
-            Dictionary<string, object> settings, 
+            Guid connectedId,
+            string featureKey,
+            Dictionary<string, object> settings,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
             if (profile == null) return false;
 
-            var featureSettings = string.IsNullOrEmpty(profile.FeatureSettings) 
-                ? new Dictionary<string, object>() 
-                : JsonSerializer.Deserialize<Dictionary<string, object>>(profile.FeatureSettings) 
+            var featureSettings = string.IsNullOrEmpty(profile.FeatureSettings)
+                ? new Dictionary<string, object>()
+                : JsonSerializer.Deserialize<Dictionary<string, object>>(profile.FeatureSettings)
                   ?? new Dictionary<string, object>();
 
             featureSettings[featureKey] = settings;
@@ -352,7 +360,7 @@ namespace AuthHive.Auth.Repositories
 
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
@@ -362,17 +370,17 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>비활성 사용자 프로필 조회</summary>
         public async Task<IEnumerable<UserFeatureProfile>> GetInactiveProfilesAsync(
-            int inactiveDays, 
-            Guid? organizationId = null, 
+            int inactiveDays,
+            Guid? organizationId = null,
             CancellationToken cancellationToken = default)
         {
             var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
-            
+
             var query = organizationId.HasValue
                 ? QueryForOrganization(organizationId.Value)
                 : Query();
-                
-            query = query.Where(p => 
+
+            query = query.Where(p =>
                 (p.LastActivityAt == null && p.CreatedAt < cutoffDate) ||
                 (p.LastActivityAt < cutoffDate));
 
@@ -384,7 +392,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 검색</summary>
         public async Task<PagedResult<UserFeatureProfile>> SearchAsync(
-            SearchUserFeatureProfileRequest request, 
+            SearchUserFeatureProfileRequest request,
             CancellationToken cancellationToken = default)
         {
             var query = request.OrganizationId.HasValue
@@ -395,8 +403,8 @@ namespace AuthHive.Auth.Repositories
             if (request.ConnectedId.HasValue)
             {
                 query = query.Where(p => _context.ConnectedIds
-                    .Any(c => c.UserId == p.UserId && 
-                              c.Id == request.ConnectedId.Value && 
+                    .Any(c => c.UserId == p.UserId &&
+                              c.Id == request.ConnectedId.Value &&
                               !c.IsDeleted));
             }
 
@@ -430,7 +438,7 @@ namespace AuthHive.Auth.Repositories
 
             // 정렬 및 페이징
             var sortedQuery = ApplySorting(query, request.SortBy, request.SortDescending);
-            
+
             var totalCount = await query.CountAsync(cancellationToken);
             var profiles = await sortedQuery
                 .Include(p => p.User)
@@ -448,7 +456,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>애드온별 사용자 수</summary>
         public async Task<Dictionary<string, int>> GetAddonUserCountAsync(
-            Guid? organizationId = null, 
+            Guid? organizationId = null,
             CancellationToken cancellationToken = default)
         {
             var query = organizationId.HasValue
@@ -482,8 +490,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>활성 프로필 수</summary>
         public async Task<int> GetActiveProfileCountAsync(
-            Guid? organizationId = null, 
-            DateTime? since = null, 
+            Guid? organizationId = null,
+            DateTime? since = null,
             CancellationToken cancellationToken = default)
         {
             var query = organizationId.HasValue
@@ -527,7 +535,7 @@ namespace AuthHive.Auth.Repositories
         private List<string> DeserializeStringArray(string? json)
         {
             if (string.IsNullOrEmpty(json)) return new List<string>();
-            
+
             try
             {
                 return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
@@ -542,10 +550,10 @@ namespace AuthHive.Auth.Repositories
         private Dictionary<string, object> DeserializeUsageStats(string? json)
         {
             if (string.IsNullOrEmpty(json)) return new Dictionary<string, object>();
-            
+
             try
             {
-                return JsonSerializer.Deserialize<Dictionary<string, object>>(json) 
+                return JsonSerializer.Deserialize<Dictionary<string, object>>(json)
                     ?? new Dictionary<string, object>();
             }
             catch (JsonException)
@@ -556,8 +564,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>기능 사용 통계 업데이트</summary>
         private void UpdateFeatureUsageStats(
-            Dictionary<string, object> usageStats, 
-            string featureKey, 
+            Dictionary<string, object> usageStats,
+            string featureKey,
             Dictionary<string, object>? additionalData)
         {
             if (!usageStats.ContainsKey(featureKey))
@@ -571,9 +579,9 @@ namespace AuthHive.Auth.Repositories
             }
             else if (usageStats[featureKey] is JsonElement element)
             {
-                var featureStats = JsonSerializer.Deserialize<Dictionary<string, object>>(element.GetRawText()) 
+                var featureStats = JsonSerializer.Deserialize<Dictionary<string, object>>(element.GetRawText())
                     ?? new Dictionary<string, object>();
-                
+
                 var currentCount = GetIntFromJsonElement(featureStats.GetValueOrDefault("usageCount", 0));
                 featureStats["usageCount"] = currentCount + 1;
                 featureStats["lastUsed"] = DateTime.UtcNow;
@@ -610,16 +618,16 @@ namespace AuthHive.Auth.Repositories
         private int CalculateProfileCompleteness(UserFeatureProfile profile)
         {
             int score = 0;
-            
-            if (!string.IsNullOrEmpty(profile.ActiveAddons) && profile.ActiveAddons != "[]") 
+
+            if (!string.IsNullOrEmpty(profile.ActiveAddons) && profile.ActiveAddons != "[]")
                 score += 30;
-            if (!string.IsNullOrEmpty(profile.ApiAccess) && profile.ApiAccess != "[]") 
+            if (!string.IsNullOrEmpty(profile.ApiAccess) && profile.ApiAccess != "[]")
                 score += 25;
-            if (!string.IsNullOrEmpty(profile.FeatureSettings)) 
+            if (!string.IsNullOrEmpty(profile.FeatureSettings))
                 score += 20;
-            if (profile.LastActivityAt.HasValue) 
+            if (profile.LastActivityAt.HasValue)
                 score += 15;
-            if (!string.IsNullOrEmpty(profile.Metadata)) 
+            if (!string.IsNullOrEmpty(profile.Metadata))
                 score += 10;
 
             return Math.Min(score, 100);
@@ -654,8 +662,8 @@ namespace AuthHive.Auth.Repositories
             {
                 if (kvp.Value is JsonElement element && element.ValueKind == JsonValueKind.Object)
                 {
-                    if (element.TryGetProperty("usageCount", out var usageCountElement) && 
-                        usageCountElement.TryGetInt32(out var usageCount) && 
+                    if (element.TryGetProperty("usageCount", out var usageCountElement) &&
+                        usageCountElement.TryGetInt32(out var usageCount) &&
                         usageCount > maxUsage)
                     {
                         maxUsage = usageCount;
@@ -678,25 +686,25 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>정렬 적용</summary>
         private IOrderedQueryable<UserFeatureProfile> ApplySorting(
-            IQueryable<UserFeatureProfile> query, 
-            string? sortBy, 
+            IQueryable<UserFeatureProfile> query,
+            string? sortBy,
             bool descending)
         {
             return sortBy?.ToLower() switch
             {
-                "lastactivity" => descending 
+                "lastactivity" => descending
                     ? query.OrderByDescending(p => p.LastActivityAt ?? p.CreatedAt)
                     : query.OrderBy(p => p.LastActivityAt ?? p.CreatedAt),
-                "addons" => descending 
+                "addons" => descending
                     ? query.OrderByDescending(p => p.ActiveAddonCount)
                     : query.OrderBy(p => p.ActiveAddonCount),
-                "apicalls" => descending 
+                "apicalls" => descending
                     ? query.OrderByDescending(p => p.TotalApiCalls)
                     : query.OrderBy(p => p.TotalApiCalls),
-                "completeness" => descending 
+                "completeness" => descending
                     ? query.OrderByDescending(p => p.ProfileCompleteness)
                     : query.OrderBy(p => p.ProfileCompleteness),
-                _ => descending 
+                _ => descending
                     ? query.OrderByDescending(p => p.LastActivityAt ?? p.CreatedAt)
                     : query.OrderBy(p => p.LastActivityAt ?? p.CreatedAt)
             };

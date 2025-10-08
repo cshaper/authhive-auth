@@ -136,6 +136,17 @@ namespace AuthHive.Auth.Repositories
         }
 
         /// <summary>
+        /// Implements the interface member to resolve the compiler error.
+        /// Retrieves the first available setting for a given organization.
+        /// Note: For fetching a specific value like a pricing plan, 
+        /// using GetSettingAsync("Billing", "PricingPlanId") is the more direct approach.
+        /// </summary>
+        public async Task<OrganizationSettings?> GetByOrgIdAsync(Guid organizationId)
+        {
+            return await _context.OrganizationSettings
+                .FirstOrDefaultAsync(s => s.OrganizationId == organizationId);
+        }
+        /// <summary>
         /// 여러 설정 일괄 업데이트
         /// 사용 시점: 설정 페이지에서 여러 설정을 한번에 저장할 때
         /// </summary>

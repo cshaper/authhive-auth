@@ -33,7 +33,7 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<UserProfileRepository> logger,
-            IMemoryCache? cache = null) 
+            IMemoryCache? cache = null)
             : base(context, organizationContext, cache)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -43,7 +43,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>ConnectedId로 프로필 조회 (캐시 활용)</summary>
         public async Task<UserProfile?> GetByConnectedIdAsync(
-            Guid connectedId, 
+            Guid connectedId,
             CancellationToken cancellationToken = default)
         {
             // 캐시 확인
@@ -59,11 +59,11 @@ namespace AuthHive.Auth.Repositories
             // ConnectedId -> User -> UserProfile 경로로 조회
             var connectedIdEntity = await _context.ConnectedIds
                 .Include(c => c.User)
-                .ThenInclude(u => u.UserProfile)
+                .ThenInclude(u => u!.UserProfile)
                 .FirstOrDefaultAsync(c => c.Id == connectedId && !c.IsDeleted, cancellationToken);
 
             var profile = connectedIdEntity?.User?.UserProfile;
-            
+
             // 캐시 저장
             if (profile != null && _cache != null)
             {
@@ -76,38 +76,47 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>여러 ConnectedId의 프로필 일괄 조회</summary>
         public async Task<IEnumerable<UserProfile>> GetByConnectedIdsAsync(
-            IEnumerable<Guid> connectedIds, 
+            IEnumerable<Guid> connectedIds,
             CancellationToken cancellationToken = default)
         {
             var connectedIdList = connectedIds.ToList();
-            if (!connectedIdList.Any()) return new List<UserProfile>();
+            if (!connectedIdList.Any())
+            {
+                return Enumerable.Empty<UserProfile>();
+            }
 
             var profiles = await _context.ConnectedIds
+                // 1. 요청된 ID와 삭제되지 않은 항목을 먼저 필터링합니다.
                 .Where(c => connectedIdList.Contains(c.Id) && !c.IsDeleted)
-                .Include(c => c.User)
-                .ThenInclude(u => u.UserProfile)
-                .Select(c => c.User.UserProfile)
-                .Where(p => p != null)
+                // 2. User 또는 UserProfile이 없는 데이터를 DB 조회 단계에서 제외합니다.
+                .Where(c => c.User != null && c.User.UserProfile != null)
+                // 3. UserProfile을 선택합니다.
+                .Select(c => c.User!.UserProfile!)
                 .ToListAsync(cancellationToken);
-
-            return profiles!;
+            return profiles;
         }
 
         /// <summary>조직별 프로필 조회</summary>
         public async Task<PagedResult<UserProfile>> GetByOrganizationAsync(
-            Guid organizationId, 
-            int pageNumber = 1, 
-            int pageSize = 50, 
+            Guid organizationId,
+            int pageNumber = 1,
+            int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
+            // UserProfile을 직접 조회하는 쿼리 정의
             var query = _context.ConnectedIds
+                // 1. 기본적인 조건으로 필터링
                 .Where(c => c.OrganizationId == organizationId && !c.IsDeleted)
-                .Include(c => c.User)
-                .ThenInclude(u => u.UserProfile)
-                .Where(c => c.User.UserProfile != null)
-                .Select(c => c.User.UserProfile!);
 
+                // 2. 'User'와 'UserProfile'이 모두 존재하는 데이터만 안전하게 필터링
+                .Where(c => c.User != null && c.User.UserProfile != null)
+
+                // 3. '!' 연산자로 컴파일러에게 null이 아님을 명확히 알려주고 UserProfile 선택
+                .Select(c => c.User!.UserProfile!);
+
+            // 페이징 처리를 위한 나머지 로직은 동일
             var totalCount = await query.CountAsync(cancellationToken);
+
             var profiles = await query
                 .OrderByDescending(p => p.CreatedAt)
                 .Skip((pageNumber - 1) * pageSize)
@@ -119,7 +128,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 존재 여부 확인</summary>
         public async Task<bool> ExistsByConnectedIdAsync(
-            Guid connectedId, 
+            Guid connectedId,
             CancellationToken cancellationToken = default)
         {
             // 캐시 확인
@@ -134,7 +143,7 @@ namespace AuthHive.Auth.Repositories
 
             return await _context.ConnectedIds
                 .Where(c => c.Id == connectedId && !c.IsDeleted)
-                .AnyAsync(c => c.User.UserProfile != null, cancellationToken);
+                .AnyAsync(c => c.User != null && c.User.UserProfile != null, cancellationToken);
         }
 
         #endregion
@@ -143,10 +152,10 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>언어별 사용자 프로필 조회</summary>
         public async Task<PagedResult<UserProfile>> GetByLanguageAsync(
-            UserLanguage language, 
-            Guid? organizationId = null, 
-            int pageNumber = 1, 
-            int pageSize = 50, 
+            UserLanguage language,
+            Guid? organizationId = null,
+            int pageNumber = 1,
+            int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
             var languageCode = language.ToString().ToLower();
@@ -171,10 +180,10 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>타임존별 사용자 프로필 조회</summary>
         public async Task<PagedResult<UserProfile>> GetByTimeZoneAsync(
-            string timeZone, 
-            Guid? organizationId = null, 
-            int pageNumber = 1, 
-            int pageSize = 50, 
+            string timeZone,
+            Guid? organizationId = null,
+            int pageNumber = 1,
+            int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
             IQueryable<UserProfile> query = _context.UserProfiles
@@ -202,8 +211,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>메타데이터 모드별 프로필 조회</summary>
         public async Task<IEnumerable<UserProfile>> GetByMetadataModeAsync(
-            UserMetadataMode mode, 
-            Guid? organizationId = null, 
+            UserMetadataMode mode,
+            Guid? organizationId = null,
             CancellationToken cancellationToken = default)
         {
             IQueryable<UserProfile> query = _context.UserProfiles
@@ -227,7 +236,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>전화번호로 프로필 조회</summary>
         public async Task<UserProfile?> GetByPhoneNumberAsync(
-            string phoneNumber, 
+            string phoneNumber,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(phoneNumber)) return null;
@@ -237,7 +246,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>이메일로 프로필 조회</summary>
         public async Task<UserProfile?> GetByEmailAsync(
-            string email, 
+            string email,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(email)) return null;
@@ -255,17 +264,17 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 완성도 범위별 조회</summary>
         public async Task<PagedResult<UserProfile>> GetByCompletenessRangeAsync(
-            int minCompleteness, 
-            int maxCompleteness, 
-            Guid? organizationId = null, 
-            int pageNumber = 1, 
-            int pageSize = 50, 
+            int minCompleteness,
+            int maxCompleteness,
+            Guid? organizationId = null,
+            int pageNumber = 1,
+            int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
             IQueryable<UserProfile> query = _context.UserProfiles
                 .Include(p => p.User)
-                .Where(p => !p.IsDeleted && 
-                           p.CompletionPercentage >= minCompleteness && 
+                .Where(p => !p.IsDeleted &&
+                           p.CompletionPercentage >= minCompleteness &&
                            p.CompletionPercentage <= maxCompleteness);
 
             if (organizationId.HasValue)
@@ -285,8 +294,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 이미지가 없는 사용자 조회</summary>
         public async Task<IEnumerable<UserProfile>> GetProfilesWithoutImageAsync(
-            Guid? organizationId = null, 
-            int limit = 100, 
+            Guid? organizationId = null,
+            int limit = 100,
             CancellationToken cancellationToken = default)
         {
             IQueryable<UserProfile> query = _context.UserProfiles
@@ -305,9 +314,9 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>최근 업데이트된 프로필 조회</summary>
         public async Task<IEnumerable<UserProfile>> GetRecentlyUpdatedAsync(
-            DateTime since, 
-            Guid? organizationId = null, 
-            int limit = 100, 
+            DateTime since,
+            Guid? organizationId = null,
+            int limit = 100,
             CancellationToken cancellationToken = default)
         {
             IQueryable<UserProfile> query = _context.UserProfiles
@@ -331,11 +340,11 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 생성 또는 업데이트 (Upsert)</summary>
         public async Task<UserProfile> UpsertAsync(
-            UserProfile profile, 
+            UserProfile profile,
             CancellationToken cancellationToken = default)
         {
             var existing = await FirstOrDefaultAsync(p => p.UserId == profile.UserId);
-            
+
             if (existing == null)
             {
                 profile.CompletionPercentage = profile.CalculateCompletionPercentage();
@@ -352,8 +361,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 완성도 업데이트</summary>
         public async Task<bool> UpdateCompletenessAsync(
-            Guid connectedId, 
-            int completeness, 
+            Guid connectedId,
+            int completeness,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -361,17 +370,17 @@ namespace AuthHive.Auth.Repositories
 
             profile.CompletionPercentage = Math.Max(0, Math.Min(100, completeness));
             profile.UpdatedAt = DateTime.UtcNow;
-            
+
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
         /// <summary>프로필 메타데이터 업데이트</summary>
         public async Task<bool> UpdateMetadataAsync(
-            Guid connectedId, 
-            Dictionary<string, object> metadata, 
+            Guid connectedId,
+            Dictionary<string, object> metadata,
             CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
@@ -379,10 +388,10 @@ namespace AuthHive.Auth.Repositories
 
             profile.ProfileMetadata = JsonSerializer.Serialize(metadata);
             profile.UpdatedAt = DateTime.UtcNow;
-            
+
             await UpdateAsync(profile);
             InvalidateConnectedIdCache(connectedId);
-            
+
             return true;
         }
 
@@ -392,7 +401,7 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 검색</summary>
         public async Task<PagedResult<UserProfile>> SearchAsync(
-            SearchUserProfileRequest request, 
+            SearchUserProfileRequest request,
             CancellationToken cancellationToken = default)
         {
             IQueryable<UserProfile> query = _context.UserProfiles
@@ -402,7 +411,7 @@ namespace AuthHive.Auth.Repositories
             // 검색어 필터
             if (!string.IsNullOrWhiteSpace(request.SearchTerm))
             {
-                query = query.Where(p => 
+                query = query.Where(p =>
                     (p.User.DisplayName != null && p.User.DisplayName.Contains(request.SearchTerm)) ||
                     p.User.Email.Contains(request.SearchTerm) ||
                     (p.PhoneNumber != null && p.PhoneNumber.Contains(request.SearchTerm)) ||
@@ -414,8 +423,8 @@ namespace AuthHive.Auth.Repositories
             if (request.ConnectedId.HasValue)
             {
                 query = query.Where(p => _context.ConnectedIds
-                    .Any(c => c.Id == request.ConnectedId.Value && 
-                              c.UserId == p.UserId && 
+                    .Any(c => c.Id == request.ConnectedId.Value &&
+                              c.UserId == p.UserId &&
                               !c.IsDeleted));
             }
 
@@ -440,14 +449,14 @@ namespace AuthHive.Auth.Repositories
             // 완성도 범위 필터
             if (request.MinCompleteness.HasValue)
                 query = query.Where(p => p.CompletionPercentage >= request.MinCompleteness.Value);
-            
+
             if (request.MaxCompleteness.HasValue)
                 query = query.Where(p => p.CompletionPercentage <= request.MaxCompleteness.Value);
 
             // 프로필 이미지 필터
             if (request.HasProfileImage.HasValue)
             {
-                query = request.HasProfileImage.Value 
+                query = request.HasProfileImage.Value
                     ? query.Where(p => !string.IsNullOrEmpty(p.ProfileImageUrl))
                     : query.Where(p => string.IsNullOrEmpty(p.ProfileImageUrl));
             }
@@ -455,13 +464,13 @@ namespace AuthHive.Auth.Repositories
             // 업데이트 날짜 필터
             if (request.UpdatedAfter.HasValue)
                 query = query.Where(p => p.UpdatedAt.HasValue && p.UpdatedAt >= request.UpdatedAfter.Value);
-            
+
             if (request.UpdatedBefore.HasValue)
                 query = query.Where(p => p.UpdatedAt.HasValue && p.UpdatedAt <= request.UpdatedBefore.Value);
 
             // 정렬 및 페이징
             var sortedQuery = ApplySorting(query, request.SortBy, request.SortDescending);
-            
+
             var totalCount = await query.CountAsync(cancellationToken);
             var profiles = await sortedQuery
                 .Skip((request.PageNumber - 1) * request.PageSize)
@@ -478,8 +487,8 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>프로필 수 집계</summary>
         public async Task<int> GetProfileCountAsync(
-            Guid? organizationId = null, 
-            bool? hasProfileImage = null, 
+            Guid? organizationId = null,
+            bool? hasProfileImage = null,
             CancellationToken cancellationToken = default)
         {
             var query = Query();
@@ -491,7 +500,7 @@ namespace AuthHive.Auth.Repositories
 
             if (hasProfileImage.HasValue)
             {
-                query = hasProfileImage.Value 
+                query = hasProfileImage.Value
                     ? query.Where(p => !string.IsNullOrEmpty(p.ProfileImageUrl))
                     : query.Where(p => string.IsNullOrEmpty(p.ProfileImageUrl));
             }
@@ -528,25 +537,25 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>조직 필터 적용</summary>
         private IQueryable<UserProfile> ApplyOrganizationFilter(
-            IQueryable<UserProfile> query, 
+            IQueryable<UserProfile> query,
             Guid organizationId)
         {
             return query.Where(p => _context.ConnectedIds
-                .Any(c => c.UserId == p.UserId && 
-                          c.OrganizationId == organizationId && 
+                .Any(c => c.UserId == p.UserId &&
+                          c.OrganizationId == organizationId &&
                           !c.IsDeleted));
         }
 
         /// <summary>메타데이터 모드 필터 적용</summary>
         private IQueryable<UserProfile> ApplyMetadataModeFilter(
-            IQueryable<UserProfile> query, 
+            IQueryable<UserProfile> query,
             UserMetadataMode mode)
         {
             return mode switch
             {
-                UserMetadataMode.Minimal => query.Where(p => 
+                UserMetadataMode.Minimal => query.Where(p =>
                     string.IsNullOrEmpty(p.Bio) && string.IsNullOrEmpty(p.Location)),
-                UserMetadataMode.Full => query.Where(p => 
+                UserMetadataMode.Full => query.Where(p =>
                     !string.IsNullOrEmpty(p.Bio) || !string.IsNullOrEmpty(p.Location)),
                 _ => query
             };
@@ -574,25 +583,25 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>정렬 적용</summary>
         private IOrderedQueryable<UserProfile> ApplySorting(
-            IQueryable<UserProfile> query, 
-            string? sortBy, 
+            IQueryable<UserProfile> query,
+            string? sortBy,
             bool descending)
         {
             return sortBy?.ToLower() switch
             {
-                "displayname" => descending 
+                "displayname" => descending
                     ? query.OrderByDescending(p => p.User.DisplayName ?? p.User.Email)
                     : query.OrderBy(p => p.User.DisplayName ?? p.User.Email),
-                "email" => descending 
+                "email" => descending
                     ? query.OrderByDescending(p => p.User.Email)
                     : query.OrderBy(p => p.User.Email),
-                "completeness" => descending 
+                "completeness" => descending
                     ? query.OrderByDescending(p => p.CompletionPercentage)
                     : query.OrderBy(p => p.CompletionPercentage),
-                "lastupdated" => descending 
+                "lastupdated" => descending
                     ? query.OrderByDescending(p => p.UpdatedAt ?? p.CreatedAt)
                     : query.OrderBy(p => p.UpdatedAt ?? p.CreatedAt),
-                _ => descending 
+                _ => descending
                     ? query.OrderByDescending(p => p.CreatedAt)
                     : query.OrderBy(p => p.CreatedAt)
             };

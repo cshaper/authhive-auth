@@ -232,7 +232,7 @@ namespace AuthHive.Auth.Services.Audit
             string action,
             AuditActionType actionType,
             string resourceType,
-            string resourceId,
+            string? resourceId, // Add the '?' to make it nullable
             bool success = true,
             string? metadata = null)
         {

@@ -50,7 +50,20 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
         return await QueryForOrganization(organizationId)
             .FirstOrDefaultAsync(r => r.RoleKey == roleKey);
     }
+    // Add this to your RoleRepository.cs class
 
+    public async Task<IEnumerable<Role>> GetByIdsAsync(IEnumerable<Guid> ids)
+    {
+        var idList = ids.ToList();
+        if (!idList.Any())
+        {
+            return Enumerable.Empty<Role>();
+        }
+
+        return await _context.Roles
+            .Where(r => idList.Contains(r.Id))
+            .ToListAsync();
+    }
     /// <summary>
     /// Application별 RoleKey로 역할 조회
     /// </summary>
@@ -64,7 +77,18 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
                 r.ApplicationId == applicationId &&
                 r.RoleKey == roleKey);
     }
+    public async Task<IEnumerable<Role>> GetByOrganizationIdsAsync(IEnumerable<Guid> organizationIds)
+    {
+        var orgIdList = organizationIds.ToList();
+        if (!orgIdList.Any())
+        {
+            return Enumerable.Empty<Role>();
+        }
 
+        return await _context.Roles
+            .Where(r => orgIdList.Contains(r.OrganizationId))
+            .ToListAsync();
+    }
     #endregion
 
     #region IRoleRepository 구현 - 범위별 조회
