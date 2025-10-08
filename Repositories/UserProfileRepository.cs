@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
@@ -17,13 +16,13 @@ using AuthHive.Core.Models.User.Requests;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
     /// 사용자 프로필 저장소 구현 - AuthHive v15
     /// BaseRepository를 활용하여 최적화된 구조
-    /// SystemAuditableEntity 기반 (조직 독립적)
     /// </summary>
     public class UserProfileRepository : BaseRepository<UserProfile>, IUserProfileRepository
     {
@@ -33,42 +32,59 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<UserProfileRepository> logger,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            ICacheService? cacheService = null) // ⭐️ IMemoryCache 대신 ICacheService로 변경
+            : base(context, organizationContext, cacheService) // ⭐️ BaseRepository에 ICacheService를 전달
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
+
         #region 기본 조회
 
         /// <summary>ConnectedId로 프로필 조회 (캐시 활용)</summary>
+        /// <summary>
+        /// ConnectedId를 통해 UserProfile을 조회합니다. (ConnectedId -> User -> UserProfile)
+        /// ICacheService를 사용하여 캐시 조회 및 저장 로직을 적용합니다.
+        /// </summary>
+        /// <param name="connectedId">ConnectedId 엔티티의 ID</param>
+        /// <param name="cancellationToken">취소 토큰</param>
+
+ /// <summary>
+        /// ConnectedId를 통해 UserProfile을 조회합니다. (ICacheService 활용)
+        /// </summary>
         public async Task<UserProfile?> GetByConnectedIdAsync(
             Guid connectedId,
             CancellationToken cancellationToken = default)
         {
-            // 캐시 확인
-            if (_cache != null)
+            string cacheKey = GetConnectedIdCacheKey(connectedId);
+            UserProfile? profile;
+
+            // 1. ICacheService에서 조회 시도 (null 검사)
+            if (_cacheService != null)
             {
-                string cacheKey = GetConnectedIdCacheKey(connectedId);
-                if (_cache.TryGetValue(cacheKey, out UserProfile? cachedProfile))
+                // ⭐️ 캐시에서 직접 조회
+                profile = await _cacheService.GetAsync<UserProfile>(cacheKey);
+
+                if (profile != null)
                 {
-                    return cachedProfile;
+                    return profile;
                 }
             }
 
-            // ConnectedId -> User -> UserProfile 경로로 조회
+            // 2. 데이터베이스 조회
             var connectedIdEntity = await _context.ConnectedIds
-                .Include(c => c.User)
+                .AsNoTracking()
+                .Include(c => c.User)! 
                 .ThenInclude(u => u!.UserProfile)
                 .FirstOrDefaultAsync(c => c.Id == connectedId && !c.IsDeleted, cancellationToken);
 
-            var profile = connectedIdEntity?.User?.UserProfile;
+            profile = connectedIdEntity?.User?.UserProfile;
 
-            // 캐시 저장
-            if (profile != null && _cache != null)
+            // 3. 캐시 저장 (DB 결과가 있고 ICacheService가 있을 경우)
+            if (profile != null && _cacheService != null)
             {
-                string cacheKey = GetConnectedIdCacheKey(connectedId);
-                _cache.Set(cacheKey, profile, GetCacheOptions());
+                // TTL 15분은 BaseRepository의 기본 TTL을 사용하거나 명시
+                await _cacheService.SetAsync(cacheKey, profile, TimeSpan.FromMinutes(15)); 
             }
 
             return profile;
@@ -127,25 +143,24 @@ namespace AuthHive.Auth.Repositories
         }
 
         /// <summary>프로필 존재 여부 확인</summary>
+        // UserProfileRepository.cs 내 GetByConnectedIdAsync 메서드를 활용하여 구현
+
+        /// <summary>
+        /// ConnectedId를 통해 UserProfile이 존재하는지 확인합니다.
+        /// ICacheService를 활용하여 캐시에서 먼저 존재 여부를 확인합니다.
+        /// </summary>
+        /// <param name="connectedId">ConnectedId 엔티티의 ID</param>
         public async Task<bool> ExistsByConnectedIdAsync(
             Guid connectedId,
             CancellationToken cancellationToken = default)
         {
-            // 캐시 확인
-            if (_cache != null)
-            {
-                string cacheKey = GetConnectedIdCacheKey(connectedId);
-                if (_cache.TryGetValue(cacheKey, out _))
-                {
-                    return true;
-                }
-            }
+            // 1. ICacheService/DB에서 UserProfile을 조회하는 메서드를 재활용합니다.
+            //    (GetByConnectedIdAsync 내부에서 이미 캐시 로직이 처리됨)
+            var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
 
-            return await _context.ConnectedIds
-                .Where(c => c.Id == connectedId && !c.IsDeleted)
-                .AnyAsync(c => c.User != null && c.User.UserProfile != null, cancellationToken);
+            // 2. profile이 null이 아니면 존재합니다.
+            return profile != null;
         }
-
         #endregion
 
         #region 언어 및 지역 설정
@@ -368,29 +383,37 @@ namespace AuthHive.Auth.Repositories
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
             if (profile == null) return false;
 
+            // 프로필 업데이트 로직
             profile.CompletionPercentage = Math.Max(0, Math.Min(100, completeness));
             profile.UpdatedAt = DateTime.UtcNow;
 
+            // DB 업데이트 (UpdateAsync는 BaseRepository에 정의되어 있으며 SaveChangesAsync()는 별도 호출)
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+
+            // ⭐️ 오류 수정: ICacheService를 사용하므로 비동기 Async 메서드를 await하여 호출해야 합니다.
+            await InvalidateConnectedIdCacheAsync(connectedId);
 
             return true;
         }
 
         /// <summary>프로필 메타데이터 업데이트</summary>
         public async Task<bool> UpdateMetadataAsync(
-            Guid connectedId,
-            Dictionary<string, object> metadata,
-            CancellationToken cancellationToken = default)
+          Guid connectedId,
+          Dictionary<string, object> metadata,
+          CancellationToken cancellationToken = default)
         {
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
             if (profile == null) return false;
 
+            // 메타데이터 직렬화 및 업데이트
             profile.ProfileMetadata = JsonSerializer.Serialize(metadata);
             profile.UpdatedAt = DateTime.UtcNow;
 
+            // DB 업데이트
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+
+            // ⭐️ 오류 수정: InvalidateConnectedIdCache를 비동기 버전으로 변경
+            await InvalidateConnectedIdCacheAsync(connectedId);
 
             return true;
         }
@@ -512,28 +535,26 @@ namespace AuthHive.Auth.Repositories
 
         #region Helper Methods
 
-        /// <summary>ConnectedId용 캐시 키 생성</summary>
-        private string GetConnectedIdCacheKey(Guid connectedId)
-        {
-            return $"UserProfile:ConnectedId:{connectedId}";
-        }
+
 
         /// <summary>ConnectedId 캐시 무효화</summary>
-        private void InvalidateConnectedIdCache(Guid connectedId)
+        // UserProfileRepository.cs 내 Private Methods 영역에 추가
+
+        /// <summary>
+        /// ConnectedId를 키로 사용하는 캐시 무효화 (ICacheService 활용)
+        /// </summary>
+        /// <param name="connectedId">ConnectedId 엔티티의 ID</param>
+        protected virtual async Task InvalidateConnectedIdCacheAsync(Guid connectedId)
         {
-            _cache?.Remove(GetConnectedIdCacheKey(connectedId));
+            // BaseRepository의 필드명은 _cacheService로 가정합니다.
+            if (_cacheService == null) return;
+
+            string cacheKey = GetConnectedIdCacheKey(connectedId);
+
+            // ⭐️ ICacheService의 비동기 RemoveAsync 메서드 호출
+            await _cacheService.RemoveAsync(cacheKey);
         }
 
-        /// <summary>캐시 옵션 가져오기</summary>
-        private MemoryCacheEntryOptions GetCacheOptions()
-        {
-            return new MemoryCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15),
-                SlidingExpiration = TimeSpan.FromMinutes(5),
-                Priority = CacheItemPriority.Normal
-            };
-        }
 
         /// <summary>조직 필터 적용</summary>
         private IQueryable<UserProfile> ApplyOrganizationFilter(
@@ -581,6 +602,11 @@ namespace AuthHive.Auth.Repositories
             existing.SmsNotificationsEnabled = source.SmsNotificationsEnabled;
         }
 
+        // 헬퍼 메서드 (클래스 내부에 정의되어 있어야 함)
+        private string GetConnectedIdCacheKey(Guid connectedId)
+        {
+            return $"{nameof(UserProfile)}:ConnectedId:{connectedId}";
+        }
         /// <summary>정렬 적용</summary>
         private IOrderedQueryable<UserProfile> ApplySorting(
             IQueryable<UserProfile> query,

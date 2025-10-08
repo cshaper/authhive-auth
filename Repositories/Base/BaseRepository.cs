@@ -9,6 +9,7 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Repositories.Base
 {
@@ -31,23 +32,17 @@ namespace AuthHive.Auth.Repositories.Base
     {
         protected readonly AuthDbContext _context;
         protected readonly DbSet<TEntity> _dbSet;
-        protected readonly IMemoryCache? _cache;
+        protected readonly ICacheService? _cacheService;
         protected readonly IOrganizationContext _organizationContext;
 
-        // 기본 캐시 설정 - 수정 불필요
-        private readonly MemoryCacheEntryOptions _defaultCacheOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15),
-            SlidingExpiration = TimeSpan.FromMinutes(5),
-            Priority = CacheItemPriority.Normal
-        };
+        private readonly TimeSpan _defaultCacheTtl = TimeSpan.FromMinutes(15);
 
-        protected BaseRepository(AuthDbContext context, IOrganizationContext organizationContext, IMemoryCache? cache = null)
+        protected BaseRepository(AuthDbContext context, IOrganizationContext organizationContext, ICacheService? cacheService = null)
         {
             _context = context ?? throw new ArgumentNullException(nameof(context));
             _organizationContext = organizationContext ?? throw new ArgumentNullException(nameof(organizationContext));
             _dbSet = context.Set<TEntity>();
-            _cache = cache;
+            _cacheService = cacheService;
         }
 
         #region 기본 CRUD (자동 캐시 포함)
@@ -99,27 +94,33 @@ namespace AuthHive.Auth.Repositories.Base
         }
 
         /// <summary>
-        /// ID로 조회 - 캐시 자동 적용
+        /// ID로 조회 - 캐시 자동 적용 (ICacheService 사용)
         /// </summary>
         public virtual async Task<TEntity?> GetByIdAsync(Guid id)
         {
-            // 캐시 확인
-            if (_cache != null)
+            if (_cacheService == null)
             {
-                string cacheKey = GetCacheKey("GetById", id);
-                if (_cache.TryGetValue(cacheKey, out TEntity? cachedEntity))
-                {
-                    return cachedEntity;
-                }
+                // 캐시가 없으면 DB에서 바로 조회하여 반환
+                return await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
             }
 
-            var entity = await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
+            string cacheKey = GetCacheKey("GetById", id);
 
-            // 캐시 저장
-            if (entity != null && _cache != null)
+            // 1. 캐시에서 조회 (ICacheService.GetAsync는 TEntity?를 반환)
+            var entity = await _cacheService.GetAsync<TEntity>(cacheKey);
+
+            if (entity != null)
             {
-                string cacheKey = GetCacheKey("GetById", id);
-                _cache.Set(cacheKey, entity, _defaultCacheOptions);
+                return entity;
+            }
+
+            // 2. DB에서 조회
+            entity = await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
+
+            // 3. DB 결과가 null이 아닐 경우 캐시에 저장 (ICacheService.SetAsync는 TEntity를 요구함)
+            if (entity != null)
+            {
+                await _cacheService.SetAsync(cacheKey, entity, _defaultCacheTtl);
             }
 
             return entity;
@@ -158,20 +159,21 @@ namespace AuthHive.Auth.Repositories.Base
         /// <summary>
         /// ID로 엔티티의 존재 여부를 확인합니다. - 캐시 자동 적용
         /// </summary>
+// BaseRepository.cs 내 ExistsAsync 메서드
+
+        /// <summary>
+        /// ID로 엔티티의 존재 여부를 확인합니다. - 캐시 자동 적용 (ICacheService 사용)
+        /// Note: GetByIdAsync를 호출하여 캐시 로직을 재활용합니다.
+        /// </summary>
         public virtual async Task<bool> ExistsAsync(Guid id)
         {
-            // 캐시에서 먼저 확인
-            if (_cache != null)
-            {
-                string cacheKey = GetCacheKey("GetById", id);
-                if (_cache.TryGetValue(cacheKey, out _))
-                {
-                    return true;
-                }
-            }
+            // 1. GetByIdAsync를 호출하여 캐시/DB에서 엔티티를 조회합니다.
+            //    (GetByIdAsync 내부에서 이미 ICacheService의 GetOrSet 로직이 처리됨)
+            var entity = await GetByIdAsync(id);
 
-            return await Query().AnyAsync(e => e.Id == id);
+            return entity != null;
         }
+
 
         #endregion
 
@@ -226,7 +228,7 @@ namespace AuthHive.Auth.Repositories.Base
 
         public virtual async Task<TEntity> AddAsync(TEntity entity)
         {
-            InvalidateCache(entity.Id);
+            await InvalidateCacheAsync(entity.Id);
             await _dbSet.AddAsync(entity);
             return entity;
         }
@@ -236,64 +238,96 @@ namespace AuthHive.Auth.Repositories.Base
             var entityList = entities.ToList();
             foreach (var entity in entityList)
             {
-                InvalidateCache(entity.Id);
+                await InvalidateCacheAsync(entity.Id);
             }
             await _dbSet.AddRangeAsync(entityList);
         }
 
-        public virtual Task UpdateAsync(TEntity entity)
+        // BaseRepository.cs 내 UpdateAsync 메서드 수정
+
+        public virtual async Task UpdateAsync(TEntity entity)
         {
-            InvalidateCache(entity.Id);
+            // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
+            await InvalidateCacheAsync(entity.Id);
+
             _context.Entry(entity).State = EntityState.Modified;
-            return Task.CompletedTask;
+
+            // 이 메서드가 IUnitOfWork.SaveChangesAsync() 호출 전에 실행되므로,
+            // 변경 상태 설정 후 Task.CompletedTask를 반환하는 기존 패턴을 유지하되 async를 사용해야 함.
+            await Task.CompletedTask;
         }
 
-        public virtual Task UpdateRangeAsync(IEnumerable<TEntity> entities)
+        public virtual async Task UpdateRangeAsync(IEnumerable<TEntity> entities)
         {
+            // CUD 작업은 캐시 무효화를 위해 비동기로 처리되어야 합니다.
             foreach (var entity in entities)
             {
-                InvalidateCache(entity.Id);
+                // ⭐️ ICacheService의 비동기 메서드를 await하여 호출
+                await InvalidateCacheAsync(entity.Id);
             }
+
             _dbSet.UpdateRange(entities);
-            return Task.CompletedTask;
+
+            // 이 메서드는 SaveChangesAsync()를 호출하지 않으므로 Task.CompletedTask를 await합니다.
+            await Task.CompletedTask;
         }
 
-        public virtual Task DeleteAsync(TEntity entity)
+        public virtual async Task DeleteAsync(TEntity entity)
         {
-            InvalidateCache(entity.Id);
+            // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
+            await InvalidateCacheAsync(entity.Id);
+
+            // Soft Delete 로직
             entity.IsDeleted = true;
             entity.DeletedAt = DateTime.UtcNow;
             _dbSet.Update(entity);
-            return Task.CompletedTask;
+
+            // SaveChangesAsync는 상위 레이어(IUnitOfWork)에서 호출되므로,
+            // 이 메서드 자체는 상태 변경 후 완료된 Task를 반환합니다.
+            await Task.CompletedTask;
         }
 
         /// <summary>
         /// ID로 엔티티를 Soft Delete 처리합니다. - 캐시 무효화 자동 처리
         /// </summary>
+        // BaseRepository.cs 내 SoftDeleteAsync 메서드
+
         public virtual async Task SoftDeleteAsync(Guid id)
         {
-            InvalidateCache(id);
+            // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
+            await InvalidateCacheAsync(id);
+
             var entity = await Query().FirstOrDefaultAsync(e => e.Id == id);
 
             if (entity != null)
             {
+                // Soft Delete 로직
                 entity.IsDeleted = true;
                 entity.DeletedAt = DateTime.UtcNow;
                 _dbSet.Update(entity);
+                // Note: SaveChangesAsync는 상위 레이어(UnitOfWork)에서 호출됨
             }
         }
-
-        public virtual Task DeleteRangeAsync(IEnumerable<TEntity> entities)
+        public virtual async Task DeleteRangeAsync(IEnumerable<TEntity> entities)
         {
             var timestamp = DateTime.UtcNow;
+
+            // ⭐️ CUD 작업이므로 async로 선언하고 비동기 호출을 처리해야 함
             foreach (var entity in entities)
             {
-                InvalidateCache(entity.Id);
+                // ❌ InvalidateCache(entity.Id); 
+                await InvalidateCacheAsync(entity.Id); // ⭐️ ICacheService를 사용하도록 수정
+
+                // Soft Delete 로직
                 entity.IsDeleted = true;
                 entity.DeletedAt = timestamp;
             }
+
             _dbSet.UpdateRange(entities);
-            return Task.CompletedTask;
+
+            // 이 메서드가 SaveChangesAsync()를 직접 호출하지 않으므로,
+            // Task.CompletedTask를 await하여 Task<T> 시그니처를 충족시킵니다.
+            await Task.CompletedTask;
         }
 
         #endregion
@@ -512,15 +546,18 @@ namespace AuthHive.Auth.Repositories.Base
             return $"{typeof(TEntity).Name}:{operation}:{orgId}:{paramStr}";
         }
 
-        /// <summary>
-        /// 캐시 무효화 - 조직별 분리
+        /// 캐시 무효화 - 조직별 분리 및 ICacheService 사용
+        /// CUD 작업 후 캐시 일관성을 유지하기 위해 사용됩니다.
         /// </summary>
-        protected virtual void InvalidateCache(Guid entityId)
+        protected virtual async Task InvalidateCacheAsync(Guid entityId)
         {
-            if (_cache == null) return;
+            // ⭐️ ICacheService 필드명은 _cacheService로 가정 (BaseRepository 생성자에서 변경됨)
+            if (_cacheService == null) return;
 
             string cacheKey = GetCacheKey("GetById", entityId);
-            _cache.Remove(cacheKey);
+
+            // ⭐️ ICacheService의 비동기 RemoveAsync 메서드 호출
+            await _cacheService.RemoveAsync(cacheKey);
         }
 
         #endregion

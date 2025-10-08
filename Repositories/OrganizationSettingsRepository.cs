@@ -13,6 +13,7 @@ using Microsoft.Extensions.Caching.Memory;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Interfaces.Organization.Repository.Settings;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -25,11 +26,11 @@ namespace AuthHive.Auth.Repositories
         IOrganizationSettingsQueryRepository,
         IOrganizationSettingsCommandRepository
     {
-        public OrganizationSettingsRepository(
+     public OrganizationSettingsRepository(
             AuthDbContext context,
             IOrganizationContext organizationContext,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            ICacheService? cacheService = null) // ⭐️ ICacheService 타입으로 변경
+            : base(context, organizationContext, cacheService) // ⭐️ BaseRepository에 ICacheService를 전달
         {
         }
 

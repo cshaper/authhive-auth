@@ -3,7 +3,10 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Models.Auth.Events;
+
 
 // using AuthHive.Core.Interfaces.Organization.Service; // 다른 곳에서 사용하지 않는다면, 이 줄을 삭제하거나 주석 처리하는 것이 좋습니다.
 using Microsoft.EntityFrameworkCore;
@@ -19,17 +22,20 @@ namespace AuthHive.Auth.Repositories
     public class AccessTokenRepository : BaseRepository<AccessToken>, IAccessTokenRepository
     {
         private readonly ILogger<AccessTokenRepository> _logger;
+        private readonly IEventBus _eventBus;
 
         public AccessTokenRepository(
-           AuthDbContext context,
-            // --- FIX: BaseRepository가 필요로 하는 정확한 IOrganizationContext 타입을 명시 ---
+            AuthDbContext context,
             IOrganizationContext organizationContext,
-            ILogger<AccessTokenRepository> logger,
-            IMemoryCache? cache = null) : base(context, organizationContext, cache)
+            ILogger<AccessTokenRepository> logger, // 1. 필수
+            IEventBus eventBus,                   // 2. 필수
+            ICacheService? cacheService = null) // ⭐️ 3. 선택적 (모든 필수 매개변수 뒤에 위치)
+            : base(context, organizationContext, cacheService)
         {
+            // BaseRepository가 ILogger를 받지 않으므로 여기서 할당
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
         }
-
         #region Access Token Operations
 
         public async Task<AccessToken?> GetAccessTokenByHashAsync(string tokenHash)
@@ -154,7 +160,15 @@ namespace AuthHive.Auth.Repositories
         public async Task<int> RevokeAllAccessTokensForSessionAsync(Guid sessionId, string reason)
         {
             var now = DateTime.UtcNow;
-            
+
+            // 1. 이벤트 발행에 사용할 ConnectedId를 찾습니다.
+            // 세션과 연결된 토큰 중 하나를 찾아 ConnectedId를 가져옵니다.
+            var connectedId = await Query()
+                .Where(t => t.SessionId == sessionId && !t.IsRevoked)
+                .Select(t => (Guid?)t.ConnectedId)
+                .FirstOrDefaultAsync();
+
+            // 2. ExecuteUpdateAsync를 사용하여 DB에서 직접 대량 업데이트를 실행합니다 (비용 최적화).
             var affectedRows = await Query()
                 .Where(t => t.SessionId == sessionId && !t.IsRevoked)
                 .ExecuteUpdateAsync(updates => updates
@@ -162,11 +176,18 @@ namespace AuthHive.Auth.Repositories
                     .SetProperty(t => t.IsActive, false)
                     .SetProperty(t => t.RevokedAt, now)
                     .SetProperty(t => t.RevokedReason, reason)
-                    .SetProperty(t => t.UpdatedAt, now) // AuditableEntity 속성 갱신
+                    .SetProperty(t => t.UpdatedAt, now)
                 );
 
             if (affectedRows > 0)
             {
+                // ⭐️ IEventBus 발행: 세션별 토큰 폐기 이벤트
+                // ConnectedId를 AggregateId로 사용하고, TokenId는 Guid.Empty로 처리합니다.
+                await _eventBus.PublishAsync(new TokenRevokedEvent(
+                    connectedId.GetValueOrDefault(Guid.Empty), // ConnectedId를 AggregateId로 사용
+                    Guid.Empty,
+                    $"Bulk revocation for session {sessionId}. Count: {affectedRows}. Reason: {reason}"));
+
                 _logger.LogInformation("Revoked {Count} access tokens for Session {SessionId}. Reason: {Reason}",
                     affectedRows, sessionId, reason);
             }
@@ -177,7 +198,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<int> RevokeAllAccessTokensForClientAsync(Guid clientId, string reason)
         {
             var now = DateTime.UtcNow;
-            
+
             var affectedRows = await Query()
                 .Where(t => t.ClientId == clientId && !t.IsRevoked)
                 .ExecuteUpdateAsync(updates => updates
