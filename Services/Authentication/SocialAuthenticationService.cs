@@ -32,7 +32,74 @@ namespace AuthHive.Auth.Services.Authentication
             _logger = logger;
             _httpClient = httpClientFactory.CreateClient();
         }
+        #region IService Implementation
 
+        /// <summary>
+        /// IService.InitializeAsync 구현
+        /// </summary>
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                _logger.LogInformation("Initializing Social Authentication Service");
+
+                // 각 프로바이더 설정 확인
+                var providers = await GetSupportedProvidersAsync(cancellationToken);
+
+                if (providers.IsSuccess == false || providers.Data?.Any() != true)
+                {
+                    _logger.LogWarning("No social authentication providers are configured");
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Social authentication initialized with providers: {Providers}",
+                        string.Join(", ", providers.Data!));
+                }
+
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize Social Authentication Service");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// IService.IsHealthyAsync 구현
+        /// </summary>
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 데이터베이스 연결 확인
+                var canConnect = await _context.Database.CanConnectAsync(cancellationToken);
+
+                if (!canConnect)
+                {
+                    _logger.LogWarning("Social Authentication Service: Database connection failed");
+                    return false;
+                }
+
+                // 최소 하나의 프로바이더가 활성화되어 있는지 확인
+                var providers = await GetSupportedProvidersAsync(cancellationToken);
+                var hasProviders = providers.IsSuccess && providers.Data != null && providers.Data.Any();
+
+                return canConnect && hasProviders;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Health check failed for Social Authentication Service");
+                return false;
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// ISocialAuthenticationService.AuthenticateWithSocialAsync 구현
@@ -236,7 +303,10 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 지원되는 소셜 프로바이더 목록
         /// </summary>
-        public async Task<ServiceResult<IEnumerable<string>>> GetSupportedProvidersAsync()
+        /// <summary>
+        /// 지원되는 소셜 프로바이더 목록
+        /// </summary>
+        public async Task<ServiceResult<IEnumerable<string>>> GetSupportedProvidersAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -262,67 +332,6 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 _logger.LogError(ex, "Error getting supported providers");
                 return ServiceResult<IEnumerable<string>>.Failure("Failed to get supported providers");
-            }
-        }
-
-        /// <summary>
-        /// IService.InitializeAsync 구현
-        /// </summary>
-        public async Task InitializeAsync()
-        {
-            try
-            {
-                _logger.LogInformation("Initializing Social Authentication Service");
-
-                // 각 프로바이더 설정 확인
-                var providers = await GetSupportedProvidersAsync();
-
-                if (providers.IsSuccess == false || providers.Data?.Any() != true)
-                {
-                    _logger.LogWarning("No social authentication providers are configured");
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "Social authentication initialized with providers: {Providers}",
-                        string.Join(", ", providers.Data!));
-                }
-
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize Social Authentication Service");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// IService.IsHealthyAsync 구현
-        /// </summary>
-        public async Task<bool> IsHealthyAsync()
-        {
-            try
-            {
-                // 데이터베이스 연결 확인
-                var canConnect = await _context.Database.CanConnectAsync();
-
-                if (!canConnect)
-                {
-                    _logger.LogWarning("Social Authentication Service: Database connection failed");
-                    return false;
-                }
-
-                // 최소 하나의 프로바이더가 활성화되어 있는지 확인
-                var providers = await GetSupportedProvidersAsync();
-                var hasProviders = providers.IsSuccess && providers.Data != null && providers.Data.Any();
-
-                return canConnect && hasProviders;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Health check failed for Social Authentication Service");
-                return false;
             }
         }
         #region Private Helper Methods

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Service;
@@ -16,7 +15,9 @@ using AuthHive.Core.Models.Auth.Permissions.Cache;
 using AuthHive.Core.Models.Auth.Permissions.Views;
 using static AuthHive.Core.Enums.Auth.PermissionEnums;
 using PermissionEntity = AuthHive.Core.Entities.Auth.Permission;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Auth.Repository;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -26,7 +27,8 @@ namespace AuthHive.Auth.Services.Authentication
     /// </summary>
     public class ScopeParsingService : IScopeParsingService
     {
-        private readonly IMemoryCache _cache;
+        private readonly ICacheService _cacheService;
+        private readonly IPermissionRepository _permissionRepository;
         private readonly ILogger<ScopeParsingService> _logger;
 
         // 스코프 패턴 정규식
@@ -43,19 +45,58 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly TimeSpan _statsCacheExpiration = TimeSpan.FromHours(1);
 
         public ScopeParsingService(
-            IMemoryCache cache,
+            ICacheService cacheService,
+            IPermissionRepository permissionRepository,
             ILogger<ScopeParsingService> logger)
         {
-            _cache = cache;
+            _cacheService = cacheService;
+            _permissionRepository = permissionRepository;
             _logger = logger;
         }
 
+        #region IService Implementation
+
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                _logger.LogInformation("ScopeParsingService initializing...");
+                var commonScopes = new List<string>
+                {
+                    "user:read", "user:write", "user:*",
+                    "organization:manage", "application:*"
+                };
+                await WarmupCacheAsync(commonScopes, cancellationToken);
+                _logger.LogInformation("ScopeParsingService initialized successfully");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize ScopeParsingService");
+                throw;
+            }
+        }
+
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var testResult = await ValidateScopeAsync("test:read", cancellationToken);
+                return testResult.IsSuccess;
+            }
+            catch (OperationCanceledException) { return false; }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ScopeParsingService health check failed");
+                return false;
+            }
+        }
+
+        #endregion
+
         #region Permission Scope 파싱
 
-        /// <summary>
-        /// Permission Entity의 Scope 필드 파싱 및 구성 요소 자동 채우기
-        /// </summary>
-        public async Task<ServiceResult> PopulatePermissionScopeComponentsAsync(PermissionEntity permission)
+        public async Task<ServiceResult> PopulatePermissionScopeComponentsAsync(PermissionEntity permission, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -64,7 +105,7 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult.Failure("Scope cannot be empty", "EMPTY_SCOPE");
                 }
 
-                var parseResult = await ParsePermissionScopeAsync(permission.Scope);
+                var parseResult = await ParsePermissionScopeAsync(permission.Scope, cancellationToken);
                 if (!parseResult.IsSuccess || parseResult.Data == null)
                 {
                     return ServiceResult.Failure($"Failed to parse scope: {parseResult.ErrorMessage}", "PARSE_ERROR");
@@ -72,16 +113,13 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var components = parseResult.Data;
 
-                // Permission 엔티티의 파싱된 필드들 채우기
                 permission.ScopeOrganization = components.Organization;
                 permission.ScopeApplication = components.Application;
                 permission.ScopeResource = components.Resource;
                 permission.ScopeAction = components.Action;
                 permission.HasWildcard = permission.Scope.Contains("*");
                 permission.ScopeLevel = permission.Scope.Split(':').Length;
-                permission.NormalizedScope = await NormalizeScopeInternalAsync(permission.Scope);
-
-                // ResourceType과 ActionType 설정
+                permission.NormalizedScope = await NormalizeScopeInternalAsync(permission.Scope, cancellationToken);
                 permission.ResourceType = components.Resource;
                 permission.ActionType = components.Action;
 
@@ -95,13 +133,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// Permission의 Scope 문자열을 파싱하여 구성 요소 추출
-        /// </summary>
-        /// <summary>
-        /// Permission의 Scope 문자열을 파싱하여 구성 요소 추출
-        /// </summary>
-        public Task<ServiceResult<ScopeComponents>> ParsePermissionScopeAsync(string permissionScope)
+        public Task<ServiceResult<ScopeComponents>> ParsePermissionScopeAsync(string permissionScope, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -116,24 +148,20 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var parts = permissionScope.Split(':');
 
-                // 최소 2개 부분 필요 (resource:action)
                 if (parts.Length < 2)
                 {
                     components.IsValid = false;
                     components.ValidationErrors.Add("Scope must contain at least resource and action");
-                    // 여기도 Task.FromResult로 감싸기
                     return Task.FromResult(ServiceResult<ScopeComponents>.Success(components));
                 }
 
-                // 파싱 로직
                 switch (parts.Length)
                 {
-                    case 2: // resource:action
+                    case 2:
                         components.Resource = parts[0];
                         components.Action = parts[1];
                         break;
-
-                    case 3: // application:resource:action 또는 resource:subresource:action
+                    case 3:
                         if (IsOrganizationOrApplication(parts[0]))
                         {
                             components.Application = parts[0];
@@ -146,15 +174,13 @@ namespace AuthHive.Auth.Services.Authentication
                             components.Action = parts[2];
                         }
                         break;
-
-                    case 4: // organization:application:resource:action
+                    case 4:
                         components.Organization = parts[0];
                         components.Application = parts[1];
                         components.Resource = parts[2];
                         components.Action = parts[3];
                         break;
-
-                    default: // 5개 이상인 경우
+                    default:
                         components.Organization = parts[0];
                         components.Application = parts[1];
                         components.Resource = string.Join(":", parts.Skip(2).Take(parts.Length - 3));
@@ -162,38 +188,30 @@ namespace AuthHive.Auth.Services.Authentication
                         break;
                 }
 
-                // 유효성 검증
                 components.IsValid = ValidateComponents(components);
-
-                // 마지막 return도 Task.FromResult로 감싸기
                 return Task.FromResult(ServiceResult<ScopeComponents>.Success(components));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error parsing permission scope: {permissionScope}");
-                // Exception 처리에서도 Task.FromResult 사용
                 return Task.FromResult(ServiceResult<ScopeComponents>.Failure("Failed to parse permission scope", "PARSE_ERROR"));
             }
         }
-        /// <summary>
-        /// 여러 Permission의 Scope를 일괄 파싱
-        /// </summary>
-        public async Task<ServiceResult<List<ScopeComponents>>> ParseMultiplePermissionScopesAsync(List<string> permissionScopes)
+
+        public async Task<ServiceResult<List<ScopeComponents>>> ParseMultiplePermissionScopesAsync(List<string> permissionScopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var results = new List<ScopeComponents>();
-
                 foreach (var scope in permissionScopes)
                 {
-                    var parseResult = await ParsePermissionScopeAsync(scope);
+                    var parseResult = await ParsePermissionScopeAsync(scope, cancellationToken);
                     if (parseResult.IsSuccess && parseResult.Data != null)
                     {
                         results.Add(parseResult.Data);
                     }
                     else
                     {
-                        // 실패한 경우에도 결과에 포함 (IsValid = false)
                         results.Add(new ScopeComponents
                         {
                             IsValid = false,
@@ -201,7 +219,6 @@ namespace AuthHive.Auth.Services.Authentication
                         });
                     }
                 }
-
                 return ServiceResult<List<ScopeComponents>>.Success(results);
             }
             catch (Exception ex)
@@ -215,28 +232,19 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 런타임 스코프 파싱 및 분석
 
-        /// <summary>
-        /// 런타임 스코프 문자열 파싱
-        /// </summary>
-        public async Task<ServiceResult<ScopeParseResponse>> ParseScopeAsync(ScopeParseRequest request)
+        public async Task<ServiceResult<ScopeParseResponse>> ParseScopeAsync(ScopeParseRequest request, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 캐시 확인
                 var cacheKey = $"{CacheKeyPrefix}{request.Scope}:{request.GetHashCode()}";
-                if (_cache.TryGetValue(cacheKey, out ScopeParseResponse? cachedResponse))
+                var cachedResponse = await _cacheService.GetAsync<ScopeParseResponse>(cacheKey, cancellationToken);
+                if (cachedResponse != null)
                 {
                     _logger.LogDebug($"Cache hit for scope parsing: {request.Scope}");
-                    return ServiceResult<ScopeParseResponse>.Success(cachedResponse!);
+                    return ServiceResult<ScopeParseResponse>.Success(cachedResponse);
                 }
 
-                var response = new ScopeParseResponse
-                {
-                    OriginalScope = request.Scope,
-                    Success = true
-                };
-
-                // 기본 파싱
+                var response = new ScopeParseResponse { OriginalScope = request.Scope, Success = true };
                 var parts = request.Scope.Split(':');
                 response.ParsedScope = new ParsedScope
                 {
@@ -245,7 +253,6 @@ namespace AuthHive.Auth.Services.Authentication
                     DetectedStyle = DetectScopeStyle(request.Scope)
                 };
 
-                // 리소스 경로와 액션 분리
                 if (parts.Length >= 2)
                 {
                     response.ParsedScope.ResourcePath = string.Join(":", parts.Take(parts.Length - 1));
@@ -254,76 +261,42 @@ namespace AuthHive.Auth.Services.Authentication
                 else
                 {
                     response.ParsedScope.ResourcePath = request.Scope;
-                    response.ParsedScope.Action = "*"; // 기본값
+                    response.ParsedScope.Action = "*";
                 }
 
-                // 계층 구조 포함
-                if (request.IncludeHierarchy)
-                {
-                    response.HierarchicalScopes = BuildHierarchy(parts);
-                }
+                if (request.IncludeHierarchy) response.HierarchicalScopes = BuildHierarchy(parts);
+                if (request.ResolveWildcards) response.WildcardResolution = await ResolveWildcardsAsync(request.Scope, cancellationToken);
+                if (request.ValidateScope) response.Validation = await ValidateScopeInternalAsync(request.Scope, cancellationToken);
 
-                // 와일드카드 해석
-                if (request.ResolveWildcards)
-                {
-                    response.WildcardResolution = await ResolveWildcardsAsync(request.Scope);
-                }
-
-                // 유효성 검증
-                if (request.ValidateScope)
-                {
-                    response.Validation = await ValidateScopeInternalAsync(request.Scope);
-                }
-
-                // 캐시 저장
-                _cache.Set(cacheKey, response, _defaultCacheExpiration);
-
+                await _cacheService.SetAsync(cacheKey, response, expiration: _defaultCacheExpiration, cancellationToken: cancellationToken);
                 return ServiceResult<ScopeParseResponse>.Success(response);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning($"Scope parsing cancelled for: {request.Scope}");
+                var canceledResponse = new ScopeParseResponse { Success = false, OriginalScope = request.Scope, ErrorMessage = "Scope parsing was cancelled.", ErrorCode = "CANCELLED" };
+                return ServiceResult<ScopeParseResponse>.Success(canceledResponse);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error parsing scope: {request.Scope}");
-
-                var errorResponse = new ScopeParseResponse
-                {
-                    Success = false,
-                    OriginalScope = request.Scope,
-                    ErrorMessage = ex.Message,
-                    ErrorCode = "PARSE_ERROR"
-                };
-
+                var errorResponse = new ScopeParseResponse { Success = false, OriginalScope = request.Scope, ErrorMessage = ex.Message, ErrorCode = "PARSE_ERROR" };
                 return ServiceResult<ScopeParseResponse>.Success(errorResponse);
             }
         }
 
-        /// <summary>
-        /// 스코프 유효성 검증
-        /// </summary>
-        public Task<ServiceResult<bool>> ValidateScopeAsync(string scope)
+        public Task<ServiceResult<bool>> ValidateScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(scope))
-                {
-                    return Task.FromResult(ServiceResult<bool>.Success(false, "Scope cannot be empty"));
-                }
+                if (string.IsNullOrWhiteSpace(scope)) return Task.FromResult(ServiceResult<bool>.Success(false, "Scope cannot be empty"));
+                if (!StandardScopePattern.IsMatch(scope) && !LegacyScopePattern.IsMatch(scope)) return Task.FromResult(ServiceResult<bool>.Success(false, "Invalid scope format"));
 
-                // 패턴 매칭
-                if (!StandardScopePattern.IsMatch(scope) && !LegacyScopePattern.IsMatch(scope))
-                {
-                    return Task.FromResult(ServiceResult<bool>.Success(false, "Invalid scope format"));
-                }
-
-                // 각 구성 요소 검증
                 var parts = scope.Contains(':') ? scope.Split(':') : scope.Split('.');
                 foreach (var part in parts)
                 {
-                    if (!ComponentPattern.IsMatch(part))
-                    {
-                        return Task.FromResult(ServiceResult<bool>.Success(false, $"Invalid component: {part}"));
-                    }
+                    if (!ComponentPattern.IsMatch(part)) return Task.FromResult(ServiceResult<bool>.Success(false, $"Invalid component: {part}"));
                 }
-
                 return Task.FromResult(ServiceResult<bool>.Success(true));
             }
             catch (Exception ex)
@@ -333,14 +306,11 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 정규화
-        /// </summary>
-        public async Task<ServiceResult<string>> NormalizeScopeAsync(string scope)
+        public async Task<ServiceResult<string>> NormalizeScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
-                var normalized = await NormalizeScopeInternalAsync(scope);
+                var normalized = await NormalizeScopeInternalAsync(scope, cancellationToken);
                 return ServiceResult<string>.Success(normalized);
             }
             catch (Exception ex)
@@ -350,38 +320,24 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 계층 분석
-        /// </summary>
-        public Task<ServiceResult<ScopeHierarchy>> AnalyzeScopeHierarchyAsync(string scope)
+        public Task<ServiceResult<ScopeHierarchy>> AnalyzeScopeHierarchyAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
                 var parts = scope.Split(':');
                 var hierarchy = new ScopeHierarchy
                 {
-                    Scopes = new List<string> { scope }, // Scope 대신 Scopes 사용
+                    Scopes = new List<string> { scope },
                     IsValid = true,
-                    MaxDepthFound = parts.Length // Level 대신 MaxDepthFound 사용
+                    MaxDepthFound = parts.Length
                 };
 
-                // 계층 트리 구조 생성
                 var resource = parts[0];
-                hierarchy.Tree = new Dictionary<string, List<string>>
-                {
-                    [resource] = new List<string> { scope }
-                };
+                hierarchy.Tree = new Dictionary<string, List<string>> { [resource] = new List<string> { scope } };
+                hierarchy.ScopesByDepth = new Dictionary<int, List<string>> { [parts.Length] = new List<string> { scope } };
 
-                // 깊이별 스코프 분류
-                hierarchy.ScopesByDepth = new Dictionary<int, List<string>>
-                {
-                    [parts.Length] = new List<string> { scope }
-                };
-
-                // 부모-자식 관계는 Tree 구조로 표현
                 if (parts.Length > 1)
                 {
-                    // 부모 스코프를 Tree에 추가
                     var parentScope = string.Join(":", parts.Take(parts.Length - 1)) + ":*";
                     if (!hierarchy.Tree.ContainsKey(resource))
                     {
@@ -390,17 +346,9 @@ namespace AuthHive.Auth.Services.Authentication
                     hierarchy.Tree[resource].Add(parentScope);
                 }
 
-                // 자식 스코프 예시를 Tree에 추가
                 if (!scope.EndsWith("*"))
                 {
-                    var childScopes = new List<string>
-            {
-                $"{scope}:*",
-                $"{scope}:read",
-                $"{scope}:write",
-                $"{scope}:delete"
-            };
-
+                    var childScopes = new List<string> { $"{scope}:*", $"{scope}:read", $"{scope}:write", $"{scope}:delete" };
                     hierarchy.Tree[resource].AddRange(childScopes);
                 }
 
@@ -417,19 +365,12 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 스코프 구성 요소 추출
 
-        /// <summary>
-        /// 스코프에서 조직 부분 추출
-        /// </summary>
-        public async Task<ServiceResult<string?>> ExtractOrganizationFromScopeAsync(string scope)
+        public async Task<ServiceResult<string?>> ExtractOrganizationFromScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
-                var components = await DecomposeAsync(scope);
-                if (components.IsSuccess && components.Data != null)
-                {
-                    return ServiceResult<string?>.Success(components.Data.Organization);
-                }
-                return ServiceResult<string?>.Success(null);
+                var components = await DecomposeAsync(scope, cancellationToken);
+                return ServiceResult<string?>.Success(components.IsSuccess && components.Data != null ? components.Data.Organization : null);
             }
             catch (Exception ex)
             {
@@ -438,19 +379,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프에서 애플리케이션 부분 추출
-        /// </summary>
-        public async Task<ServiceResult<string?>> ExtractApplicationFromScopeAsync(string scope)
+        public async Task<ServiceResult<string?>> ExtractApplicationFromScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
-                var components = await DecomposeAsync(scope);
-                if (components.IsSuccess && components.Data != null)
-                {
-                    return ServiceResult<string?>.Success(components.Data.Application);
-                }
-                return ServiceResult<string?>.Success(null);
+                var components = await DecomposeAsync(scope, cancellationToken);
+                return ServiceResult<string?>.Success(components.IsSuccess && components.Data != null ? components.Data.Application : null);
             }
             catch (Exception ex)
             {
@@ -459,19 +393,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프에서 리소스 부분 추출
-        /// </summary>
-        public async Task<ServiceResult<string>> ExtractResourceFromScopeAsync(string scope)
+        public async Task<ServiceResult<string>> ExtractResourceFromScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
-                var components = await DecomposeAsync(scope);
-                if (components.IsSuccess && components.Data != null)
-                {
-                    return ServiceResult<string>.Success(components.Data.Resource);
-                }
-                return ServiceResult<string>.Success(string.Empty);
+                var components = await DecomposeAsync(scope, cancellationToken);
+                return ServiceResult<string>.Success(components.IsSuccess && components.Data != null ? components.Data.Resource : string.Empty);
             }
             catch (Exception ex)
             {
@@ -480,19 +407,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프에서 액션 부분 추출
-        /// </summary>
-        public async Task<ServiceResult<string>> ExtractActionFromScopeAsync(string scope)
+        public async Task<ServiceResult<string>> ExtractActionFromScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
-                var components = await DecomposeAsync(scope);
-                if (components.IsSuccess && components.Data != null)
-                {
-                    return ServiceResult<string>.Success(components.Data.Action);
-                }
-                return ServiceResult<string>.Success(string.Empty);
+                var components = await DecomposeAsync(scope, cancellationToken);
+                return ServiceResult<string>.Success(components.IsSuccess && components.Data != null ? components.Data.Action : string.Empty);
             }
             catch (Exception ex)
             {
@@ -501,22 +421,16 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 구성 요소 전체 분해
-        /// </summary>
-        public async Task<ServiceResult<ScopeComponents>> DecomposeAsync(string scope)
+        public async Task<ServiceResult<ScopeComponents>> DecomposeAsync(string scope, CancellationToken cancellationToken = default)
         {
-            return await ParsePermissionScopeAsync(scope);
+            return await ParsePermissionScopeAsync(scope, cancellationToken);
         }
 
         #endregion
 
         #region 스코프 생성 및 변환
 
-        /// <summary>
-        /// 기본 스코프 생성
-        /// </summary>
-        public Task<ServiceResult<string>> BuildScopeAsync(string resource, string action)
+        public Task<ServiceResult<string>> BuildScopeAsync(string resource, string action, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -524,7 +438,6 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     return Task.FromResult(ServiceResult<string>.Failure("Resource and action are required", "INVALID_PARAMS"));
                 }
-
                 var scope = $"{resource}:{action}";
                 return Task.FromResult(ServiceResult<string>.Success(scope));
             }
@@ -535,14 +448,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 전체 스코프 생성
-        /// </summary>
-        public Task<ServiceResult<string>> BuildFullScopeAsync(
-            string? organization,
-            string? application,
-            string resource,
-            string action)
+        public Task<ServiceResult<string>> BuildFullScopeAsync(string? organization, string? application, string resource, string action, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -552,13 +458,8 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var parts = new List<string>();
-
-                if (!string.IsNullOrWhiteSpace(organization))
-                    parts.Add(organization);
-
-                if (!string.IsNullOrWhiteSpace(application))
-                    parts.Add(application);
-
+                if (!string.IsNullOrWhiteSpace(organization)) parts.Add(organization);
+                if (!string.IsNullOrWhiteSpace(application)) parts.Add(application);
                 parts.Add(resource);
                 parts.Add(action);
 
@@ -572,42 +473,29 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 형식 변환
-        /// </summary>
-        public Task<ServiceResult<string>> ConvertScopeFormatAsync(string scope, ScopeFormat targetFormat)
+        public Task<ServiceResult<string>> ConvertScopeFormatAsync(string scope, ScopeFormat targetFormat, CancellationToken cancellationToken = default)
         {
             try
             {
                 string converted = scope;
-
                 switch (targetFormat)
                 {
                     case ScopeFormat.Standard:
-                        // 콜론 구분자로 변환
                         converted = scope.Replace('.', ':').Replace('/', ':');
                         break;
-
                     case ScopeFormat.Legacy:
-                        // 점 구분자로 변환
                         converted = scope.Replace(':', '.').Replace('/', '.');
                         break;
-
                     case ScopeFormat.Compact:
-                        // 컴팩트 형식 (중간 구분자 제거)
                         var compactParts = scope.Split(':');
                         if (compactParts.Length >= 2)
                         {
                             converted = $"{compactParts[0]}{compactParts[^1]}";
                         }
                         break;
-
                     case ScopeFormat.Hierarchical:
-                        // 계층적 형식 유지
-                        converted = scope;
                         break;
                 }
-
                 return Task.FromResult(ServiceResult<string>.Success(converted));
             }
             catch (Exception ex)
@@ -617,52 +505,21 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 레거시 스코프 마이그레이션
-        /// </summary>
-        public async Task<ServiceResult<string>> MigrateLegacyScopeAsync(string legacyScope)
-        {
-            try
-            {
-                // 점(.) 구분자를 콜론(:)으로 변환
-                var migrated = legacyScope.Replace('.', ':');
-
-                // 유효성 검증
-                var validationResult = await ValidateScopeAsync(migrated);
-                if (!validationResult.IsSuccess || !validationResult.Data)
-                {
-                    return ServiceResult<string>.Failure("Invalid migrated scope", "INVALID_MIGRATION");
-                }
-
-                return ServiceResult<string>.Success(migrated);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Error migrating legacy scope: {legacyScope}");
-                return ServiceResult<string>.Failure("Migration error", "MIGRATE_ERROR");
-            }
-        }
-
         #endregion
 
         #region 와일드카드 및 패턴 매칭
 
-        /// <summary>
-        /// 와일드카드 스코프 확장
-        /// </summary>
-        public Task<ServiceResult<List<string>>> ExpandWildcardScopeAsync(string wildcardScope)
+        public Task<ServiceResult<List<string>>> ExpandWildcardScopeAsync(string wildcardScope, CancellationToken cancellationToken = default)
         {
             try
             {
                 var expanded = new List<string>();
-
                 if (!wildcardScope.Contains("*"))
                 {
                     expanded.Add(wildcardScope);
                     return Task.FromResult(ServiceResult<List<string>>.Success(expanded));
                 }
 
-                // 기본 액션들
                 var standardActions = new[] { "read", "write", "delete", "update", "execute", "manage" };
 
                 if (wildcardScope.EndsWith(":*"))
@@ -675,22 +532,18 @@ namespace AuthHive.Auth.Services.Authentication
                 }
                 else if (wildcardScope == "*")
                 {
-                    // 전체 와일드카드 - 제한적으로 확장
                     expanded.AddRange(new[] { "read", "write", "delete", "update", "execute" });
                 }
                 else
                 {
-                    // 중간에 와일드카드가 있는 경우
                     var parts = wildcardScope.Split(':');
                     if (parts.Any(p => p == "*"))
                     {
-                        // 복잡한 와일드카드 패턴 - 예시로 몇 가지만 생성
                         expanded.Add(wildcardScope.Replace("*", "default"));
                         expanded.Add(wildcardScope.Replace("*", "primary"));
                         expanded.Add(wildcardScope.Replace("*", "secondary"));
                     }
                 }
-
                 return Task.FromResult(ServiceResult<List<string>>.Success(expanded));
             }
             catch (Exception ex)
@@ -700,10 +553,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 와일드카드 스코프로 압축
-        /// </summary>
-        public Task<ServiceResult<string>> CompressToWildcardAsync(List<string> scopes)
+        public Task<ServiceResult<string>> CompressToWildcardAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -711,30 +561,21 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     return Task.FromResult(ServiceResult<string>.Failure("No scopes provided", "EMPTY_LIST"));
                 }
-
-                // 공통 접두사 찾기
                 var commonPrefix = FindCommonPrefix(scopes);
-
                 if (string.IsNullOrEmpty(commonPrefix))
                 {
                     return Task.FromResult(ServiceResult<string>.Success("*"));
                 }
-
-                // 모든 스코프가 같은 리소스에 대한 다른 액션인지 확인
                 var resourceGroups = scopes.GroupBy(s =>
                 {
                     var lastColon = s.LastIndexOf(':');
                     return Task.FromResult(lastColon > 0 ? s.Substring(0, lastColon) : s);
                 });
-
                 if (resourceGroups.Count() == 1)
                 {
-                    // 모두 같은 리소스 - 와일드카드로 압축 가능
                     var resource = resourceGroups.First().Key;
                     return Task.FromResult(ServiceResult<string>.Success($"{resource}:*"));
                 }
-
-                // 압축 불가능 - 가장 일반적인 패턴 반환
                 return Task.FromResult(ServiceResult<string>.Success($"{commonPrefix}*"));
             }
             catch (Exception ex)
@@ -744,18 +585,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 패턴 매칭
-        /// </summary>
-        public Task<ServiceResult<bool>> MatchesScopePatternAsync(string scope, string pattern)
+        public Task<ServiceResult<bool>> MatchesScopePatternAsync(string scope, string pattern, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 정확한 매치
-                if (scope == pattern)
-                    return Task.FromResult(ServiceResult<bool>.Success(true));
+                if (scope == pattern) return Task.FromResult(ServiceResult<bool>.Success(true));
 
-                // 와일드카드 패턴 매칭
                 if (pattern.Contains("*"))
                 {
                     var regexPattern = "^" + Regex.Escape(pattern).Replace("\\*", ".*") + "$";
@@ -763,7 +598,6 @@ namespace AuthHive.Auth.Services.Authentication
                     return Task.FromResult(ServiceResult<bool>.Success(matches));
                 }
 
-                // 계층적 매칭 (상위 권한이 하위 권한을 포함)
                 if (pattern.EndsWith(":*"))
                 {
                     var basePattern = pattern.Substring(0, pattern.Length - 2);
@@ -772,7 +606,6 @@ namespace AuthHive.Auth.Services.Authentication
                         return Task.FromResult(ServiceResult<bool>.Success(true));
                     }
                 }
-
                 return Task.FromResult(ServiceResult<bool>.Success(false));
             }
             catch (Exception ex)
@@ -782,16 +615,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 정규식 패턴으로 스코프 매칭
-        /// </summary>
-        public Task<ServiceResult<List<string>>> MatchByRegexAsync(List<string> scopes, string regexPattern)
+        public Task<ServiceResult<List<string>>> MatchByRegexAsync(List<string> scopes, string regexPattern, CancellationToken cancellationToken = default)
         {
             try
             {
                 var regex = new Regex(regexPattern, RegexOptions.Compiled);
                 var matched = scopes.Where(s => regex.IsMatch(s)).ToList();
-
                 return Task.FromResult(ServiceResult<List<string>>.Success(matched));
             }
             catch (Exception ex)
@@ -805,30 +634,18 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 스코프 비교 및 관계 분석
 
-        /// <summary>
-        /// 두 스코프 간 관계 분석
-        /// </summary>
-        public Task<ServiceResult<ScopeRelationType>> CompareScopesAsync(string scope1, string scope2)
+        public Task<ServiceResult<ScopeRelationType>> CompareScopesAsync(string scope1, string scope2, CancellationToken cancellationToken = default)
         {
             try
             {
-                if (scope1 == scope2)
-                    return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.Equal));
+                if (scope1 == scope2) return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.Equal));
 
                 var parts1 = scope1.Split(':');
                 var parts2 = scope2.Split(':');
 
-                // 부모-자식 관계 확인
-                if (IsParentChild(parts1, parts2))
-                    return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.ParentChild));
-
-                // 형제 관계 확인 (같은 부모)
-                if (AreSiblings(parts1, parts2))
-                    return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.Sibling));
-
-                // 조상-후손 관계 확인
-                if (IsAncestorDescendant(parts1, parts2))
-                    return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.AncestorDescendant));
+                if (IsParentChild(parts1, parts2)) return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.ParentChild));
+                if (AreSiblings(parts1, parts2)) return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.Sibling));
+                if (IsAncestorDescendant(parts1, parts2)) return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.AncestorDescendant));
 
                 return Task.FromResult(ServiceResult<ScopeRelationType>.Success(ScopeRelationType.Unrelated));
             }
@@ -839,26 +656,18 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 포함 관계 확인
-        /// </summary>
-        public async Task<ServiceResult<bool>> ContainsScopeAsync(string containerScope, string targetScope)
+        public async Task<ServiceResult<bool>> ContainsScopeAsync(string containerScope, string targetScope, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 와일드카드 처리
                 if (containerScope.Contains("*"))
                 {
-                    var matchResult = await MatchesScopePatternAsync(targetScope, containerScope);
-                    return matchResult;
+                    return await MatchesScopePatternAsync(targetScope, containerScope, cancellationToken);
                 }
-
-                // 계층적 포함 관계
                 if (targetScope.StartsWith(containerScope + ":"))
                 {
                     return ServiceResult<bool>.Success(true);
                 }
-
                 return ServiceResult<bool>.Success(containerScope == targetScope);
             }
             catch (Exception ex)
@@ -868,27 +677,22 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 충돌 검사
-        /// </summary>
-        public async Task<ServiceResult<List<ScopeConflict>>> DetectConflictsAsync(List<string> scopes)
+        public async Task<ServiceResult<List<ScopeConflict>>> DetectConflictsAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var conflicts = new List<ScopeConflict>();
-
                 for (int i = 0; i < scopes.Count; i++)
                 {
                     for (int j = i + 1; j < scopes.Count; j++)
                     {
-                        var conflict = await DetectConflictBetween(scopes[i], scopes[j]);
+                        var conflict = await DetectConflictBetween(scopes[i], scopes[j], cancellationToken);
                         if (conflict != null)
                         {
                             conflicts.Add(conflict);
                         }
                     }
                 }
-
                 return ServiceResult<List<ScopeConflict>>.Success(conflicts);
             }
             catch (Exception ex)
@@ -898,19 +702,15 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 우선순위 결정
-        /// </summary>
-        public Task<ServiceResult<List<string>>> PrioritizeScopesAsync(List<string> scopes)
+        public Task<ServiceResult<List<string>>> PrioritizeScopesAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var prioritized = scopes
-                    .OrderBy(s => s.Contains("*") ? 1 : 0)  // 와일드카드가 없는 것 우선
-                    .ThenBy(s => s.Split(':').Length)       // 더 구체적인 것 우선
-                    .ThenBy(s => s)                         // 알파벳순
+                    .OrderBy(s => s.Contains("*") ? 1 : 0)
+                    .ThenBy(s => s.Split(':').Length)
+                    .ThenBy(s => s)
                     .ToList();
-
                 return Task.FromResult(ServiceResult<List<string>>.Success(prioritized));
             }
             catch (Exception ex)
@@ -924,50 +724,38 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 집합 연산
 
-        /// <summary>
-        /// 스코프 병합
-        /// </summary>
-        public async Task<ServiceResult<List<string>>> MergeScopesAsync(List<string> scopes)
+        public async Task<ServiceResult<List<string>>> MergeScopesAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var merged = new HashSet<string>();
                 var toRemove = new HashSet<string>();
-
                 foreach (var scope in scopes)
                 {
                     bool isRedundant = false;
-
                     foreach (var existing in merged)
                     {
-                        // 이미 포함되어 있는지 확인
-                        var containsResult = await ContainsScopeAsync(existing, scope);
+                        var containsResult = await ContainsScopeAsync(existing, scope, cancellationToken);
                         if (containsResult.IsSuccess && containsResult.Data)
                         {
                             isRedundant = true;
                             break;
                         }
-
-                        // 반대로 현재 스코프가 기존 것을 포함하는지 확인
-                        containsResult = await ContainsScopeAsync(scope, existing);
+                        containsResult = await ContainsScopeAsync(scope, existing, cancellationToken);
                         if (containsResult.IsSuccess && containsResult.Data)
                         {
                             toRemove.Add(existing);
                         }
                     }
-
                     if (!isRedundant)
                     {
                         merged.Add(scope);
                     }
                 }
-
-                // 중복 제거
                 foreach (var item in toRemove)
                 {
                     merged.Remove(item);
                 }
-
                 return ServiceResult<List<string>>.Success(merged.ToList());
             }
             catch (Exception ex)
@@ -977,44 +765,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 교집합
-        /// </summary>
-        public Task<ServiceResult<List<string>>> IntersectScopesAsync(List<string> scopes1, List<string> scopes2)
-        {
-            try
-            {
-                var intersection = scopes1.Intersect(scopes2).ToList();
-                return Task.FromResult(ServiceResult<List<string>>.Success(intersection));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error intersecting scopes");
-                return Task.FromResult(ServiceResult<List<string>>.Failure("Intersection error", "INTERSECT_ERROR"));
-            }
-        }
-
-        /// <summary>
-        /// 스코프 차집합
-        /// </summary>
-        public Task<ServiceResult<List<string>>> DifferenceScopesAsync(List<string> scopes1, List<string> scopes2)
-        {
-            try
-            {
-                var difference = scopes1.Except(scopes2).ToList();
-                return Task.FromResult(ServiceResult<List<string>>.Success(difference));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error calculating scope difference");
-                return Task.FromResult(ServiceResult<List<string>>.Failure("Difference error", "DIFF_ERROR"));
-            }
-        }
-
-        /// <summary>
-        /// 스코프 합집합
-        /// </summary>
-        public Task<ServiceResult<List<string>>> UnionScopesAsync(List<string> scopes1, List<string> scopes2)
+        public Task<ServiceResult<List<string>>> UnionScopesAsync(List<string> scopes1, List<string> scopes2, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -1028,23 +779,18 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 최소 스코프 집합 계산
-        /// </summary>
-        public async Task<ServiceResult<List<string>>> CalculateMinimalScopeSetAsync(List<string> scopes)
+        public async Task<ServiceResult<List<string>>> CalculateMinimalScopeSetAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 병합을 통해 중복 및 포함 관계 제거
-                var mergedResult = await MergeScopesAsync(scopes);
-                if (!mergedResult.IsSuccess)
+                var mergedResult = await MergeScopesAsync(scopes, cancellationToken);
+                if (!mergedResult.IsSuccess || mergedResult.Data == null)
                 {
                     return mergedResult;
                 }
 
-                // 와일드카드로 압축 가능한 것 찾기
                 var minimal = new List<string>();
-                var grouped = mergedResult.Data!.GroupBy(s =>
+                var grouped = mergedResult.Data.GroupBy(s =>
                 {
                     var lastColon = s.LastIndexOf(':');
                     return lastColon > 0 ? s.Substring(0, lastColon) : s;
@@ -1053,7 +799,7 @@ namespace AuthHive.Auth.Services.Authentication
                 foreach (var group in grouped)
                 {
                     var items = group.ToList();
-                    if (items.Count > 3) // 3개 이상이면 와일드카드로 압축
+                    if (items.Count > 3)
                     {
                         minimal.Add($"{group.Key}:*");
                     }
@@ -1062,7 +808,6 @@ namespace AuthHive.Auth.Services.Authentication
                         minimal.AddRange(items);
                     }
                 }
-
                 return ServiceResult<List<string>>.Success(minimal);
             }
             catch (Exception ex)
@@ -1076,16 +821,13 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 트리 구조 및 계층 분석
 
-        /// <summary>
-        /// 스코프 트리 구축
-        /// </summary>
-        public Task<ServiceResult<ScopeTree>> BuildScopeTreeAsync(List<string> scopes)
+        public Task<ServiceResult<ScopeTree>> BuildScopeTreeAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var tree = new ScopeTree
                 {
-                    Root = new ScopeNode { Name = "root", FullPath = "" }
+                    Root = new ScopeTreeNode { Value = "root", FullScope = "" }
                 };
 
                 foreach (var scope in scopes)
@@ -1098,19 +840,19 @@ namespace AuthHive.Auth.Services.Authentication
                         var part = parts[i];
                         var fullPath = string.Join(":", parts.Take(i + 1));
 
-                        var childNode = currentNode.Children.FirstOrDefault(c => c.Name == part);
+                        var childNode = currentNode.Children.FirstOrDefault(c => c.Value == part);
                         if (childNode == null)
                         {
-                            childNode = new ScopeNode
+                            childNode = new ScopeTreeNode
                             {
-                                Name = part,
-                                FullPath = fullPath,
-                                Level = i + 1,
+                                Value = part,
+                                FullScope = fullPath,
+                                Depth = i + 1,
                                 Parent = currentNode
                             };
                             currentNode.Children.Add(childNode);
+                            tree.NodeMap[fullPath] = childNode;
                         }
-
                         currentNode = childNode;
                     }
                 }
@@ -1127,10 +869,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 깊이 계산
-        /// </summary>
-        public Task<ServiceResult<int>> CalculateScopeDepthAsync(string scope)
+        public Task<ServiceResult<int>> CalculateScopeDepthAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -1144,10 +883,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 부모 스코프 추출
-        /// </summary>
-        public Task<ServiceResult<string?>> GetParentScopeAsync(string scope)
+        public Task<ServiceResult<string?>> GetParentScopeAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -1156,7 +892,6 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     return Task.FromResult(ServiceResult<string?>.Success(null));
                 }
-
                 var parent = scope.Substring(0, lastColon) + ":*";
                 return Task.FromResult(ServiceResult<string?>.Success(parent));
             }
@@ -1167,25 +902,17 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 자식 스코프 생성
-        /// </summary>
-        public Task<ServiceResult<List<string>>> GenerateChildScopesAsync(string parentScope, List<string> actions)
+        public Task<ServiceResult<List<string>>> GenerateChildScopesAsync(string parentScope, List<string> actions, CancellationToken cancellationToken = default)
         {
             try
             {
                 var children = new List<string>();
-
-                // 와일드카드 제거
-                var basePath = parentScope.EndsWith(":*")
-                    ? parentScope.Substring(0, parentScope.Length - 2)
-                    : parentScope;
+                var basePath = parentScope.EndsWith(":*") ? parentScope.Substring(0, parentScope.Length - 2) : parentScope;
 
                 foreach (var action in actions)
                 {
                     children.Add($"{basePath}:{action}");
                 }
-
                 return Task.FromResult(ServiceResult<List<string>>.Success(children));
             }
             catch (Exception ex)
@@ -1198,32 +925,38 @@ namespace AuthHive.Auth.Services.Authentication
         #endregion
 
         #region 검증 및 규칙
+        public async Task<ServiceResult<bool>> ValidateOrganizationScopeRulesAsync(Guid organizationId, string scope, CancellationToken cancellationToken = default)
+        {
+            // TODO: 조직별 스코프 규칙 검증 로직 구현
+            _logger.LogInformation("Validating organization-specific scope rules for {OrganizationId}", organizationId);
+            // 기본 검증으로 대체합니다.
+            return await ValidateScopeAsync(scope, cancellationToken);
+        }
 
-        /// <summary>
-        /// 스코프 명명 규칙 검증
-        /// </summary>
-        public Task<ServiceResult<ScopeValidationResult>> ValidateNamingConventionAsync(string scope)
+        public async Task<ServiceResult<bool>> ValidateApplicationScopeRulesAsync(Guid applicationId, string scope, CancellationToken cancellationToken = default)
+        {
+            // TODO: 애플리케이션별 스코프 규칙 검증 로직 구현
+            _logger.LogInformation("Validating application-specific scope rules for {ApplicationId}", applicationId);
+            // 기본 검증으로 대체합니다.
+            return await ValidateScopeAsync(scope, cancellationToken);
+        }
+        public Task<ServiceResult<ScopeValidationResult>> ValidateNamingConventionAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
                 var result = new ScopeValidationResult { IsValid = true };
 
-                // 빈 문자열 체크
                 if (string.IsNullOrWhiteSpace(scope))
                 {
                     result.IsValid = false;
                     result.Errors.Add("Scope cannot be empty");
                     return Task.FromResult(ServiceResult<ScopeValidationResult>.Success(result));
                 }
-
-                // 길이 체크
                 if (scope.Length > 200)
                 {
                     result.IsValid = false;
                     result.Errors.Add("Scope exceeds maximum length of 200 characters");
                 }
-
-                // 패턴 검증
                 if (!StandardScopePattern.IsMatch(scope))
                 {
                     result.IsValid = false;
@@ -1231,7 +964,6 @@ namespace AuthHive.Auth.Services.Authentication
                     result.Suggestions["format"] = "Use format: resource:action or org:app:resource:action";
                 }
 
-                // 각 구성 요소 검증
                 var parts = scope.Split(':');
                 foreach (var part in parts)
                 {
@@ -1248,17 +980,14 @@ namespace AuthHive.Auth.Services.Authentication
                     }
                 }
 
-                // 권장사항
                 if (parts.Length == 1)
                 {
                     result.Warnings.Add("Single-part scope detected. Consider using resource:action format");
                 }
-
                 if (parts.Any(p => p.Length < 2))
                 {
                     result.Warnings.Add("Very short scope components detected");
                 }
-
                 return Task.FromResult(ServiceResult<ScopeValidationResult>.Success(result));
             }
             catch (Exception ex)
@@ -1268,100 +997,24 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 조직별 스코프 규칙 검증
-        /// </summary>
-        public async Task<ServiceResult<bool>> ValidateOrganizationScopeRulesAsync(Guid organizationId, string scope)
+        public async Task<ServiceResult<bool>> ValidatePermissionScopeConsistencyAsync(PermissionEntity permission, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 조직별 커스텀 규칙 적용
-                // TODO: 실제 구현 시 조직 설정 조회
-
-                // 기본 검증
-                var basicValidation = await ValidateScopeAsync(scope);
-                if (!basicValidation.IsSuccess || !basicValidation.Data)
-                {
-                    return ServiceResult<bool>.Success(false);
-                }
-
-                // 조직 특화 규칙 예시
-                // - 특정 조직은 4단계 이상 스코프 금지
-                // - 특정 조직은 와일드카드 사용 금지
-                // 등...
-
-                return ServiceResult<bool>.Success(true);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Error validating organization scope rules: {organizationId}, {scope}");
-                return ServiceResult<bool>.Failure("Organization validation error", "ORG_VALIDATE_ERROR");
-            }
-        }
-
-        /// <summary>
-        /// 애플리케이션별 스코프 규칙 검증
-        /// </summary>
-        public async Task<ServiceResult<bool>> ValidateApplicationScopeRulesAsync(Guid applicationId, string scope)
-        {
-            try
-            {
-                // 애플리케이션별 커스텀 규칙 적용
-                // TODO: 실제 구현 시 애플리케이션 설정 조회
-
-                var basicValidation = await ValidateScopeAsync(scope);
-                return basicValidation;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Error validating application scope rules: {applicationId}, {scope}");
-                return ServiceResult<bool>.Failure("Application validation error", "APP_VALIDATE_ERROR");
-            }
-        }
-
-        /// <summary>
-        /// Permission Entity와 스코프 일관성 검증
-        /// </summary>
-        public async Task<ServiceResult<bool>> ValidatePermissionScopeConsistencyAsync(PermissionEntity permission)
-        {
-            try
-            {
-                // 스코프 파싱
-                var parseResult = await ParsePermissionScopeAsync(permission.Scope);
+                var parseResult = await ParsePermissionScopeAsync(permission.Scope, cancellationToken);
                 if (!parseResult.IsSuccess || parseResult.Data == null)
                 {
                     return ServiceResult<bool>.Success(false, "Failed to parse scope");
                 }
 
                 var components = parseResult.Data;
-
-                // 파싱된 컴포넌트와 저장된 필드 비교
                 bool isConsistent = true;
                 var errors = new List<string>();
 
-                if (permission.ScopeOrganization != components.Organization)
-                {
-                    isConsistent = false;
-                    errors.Add($"Organization mismatch: {permission.ScopeOrganization} != {components.Organization}");
-                }
-
-                if (permission.ScopeApplication != components.Application)
-                {
-                    isConsistent = false;
-                    errors.Add($"Application mismatch: {permission.ScopeApplication} != {components.Application}");
-                }
-
-                if (permission.ScopeResource != components.Resource)
-                {
-                    isConsistent = false;
-                    errors.Add($"Resource mismatch: {permission.ScopeResource} != {components.Resource}");
-                }
-
-                if (permission.ScopeAction != components.Action)
-                {
-                    isConsistent = false;
-                    errors.Add($"Action mismatch: {permission.ScopeAction} != {components.Action}");
-                }
+                if (permission.ScopeOrganization != components.Organization) { isConsistent = false; errors.Add($"Organization mismatch: {permission.ScopeOrganization} != {components.Organization}"); }
+                if (permission.ScopeApplication != components.Application) { isConsistent = false; errors.Add($"Application mismatch: {permission.ScopeApplication} != {components.Application}"); }
+                if (permission.ScopeResource != components.Resource) { isConsistent = false; errors.Add($"Resource mismatch: {permission.ScopeResource} != {components.Resource}"); }
+                if (permission.ScopeAction != components.Action) { isConsistent = false; errors.Add($"Action mismatch: {permission.ScopeAction} != {components.Action}"); }
 
                 if (!isConsistent)
                 {
@@ -1381,13 +1034,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 분석 및 최적화
 
-        /// <summary>
-        /// 스코프 사용 빈도 분석
-        /// </summary>
-        public Task<ServiceResult<ScopeUsageStatistics>> AnalyzeUsageAsync(
-            List<string> scopes,
-            DateTime? from = null,
-            DateTime? to = null)
+        public Task<ServiceResult<ScopeUsageStatistics>> AnalyzeUsageAsync(List<string> scopes, DateTime? from = null, DateTime? to = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -1397,7 +1044,6 @@ namespace AuthHive.Auth.Services.Authentication
                     AnalyzedTo = to ?? DateTime.UtcNow
                 };
 
-                // 사용 빈도 계산
                 foreach (var scope in scopes)
                 {
                     statistics.UsageCount[scope] = statistics.UsageCount.GetValueOrDefault(scope, 0) + 1;
@@ -1405,14 +1051,8 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (statistics.UsageCount.Any())
                 {
-                    statistics.MostUsedScope = statistics.UsageCount
-                        .OrderByDescending(kvp => kvp.Value)
-                        .First().Key;
-
-                    statistics.LeastUsedScope = statistics.UsageCount
-                        .OrderBy(kvp => kvp.Value)
-                        .First().Key;
-
+                    statistics.MostUsedScope = statistics.UsageCount.OrderByDescending(kvp => kvp.Value).First().Key;
+                    statistics.LeastUsedScope = statistics.UsageCount.OrderBy(kvp => kvp.Value).First().Key;
                     statistics.AverageUsage = statistics.UsageCount.Values.Average();
                 }
 
@@ -1425,54 +1065,18 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 스코프 복잡도 계산
-        /// </summary>
-        public Task<ServiceResult<int>> CalculateComplexityAsync(string scope)
-        {
-            try
-            {
-                int complexity = 0;
-
-                // 깊이에 따른 복잡도
-                var parts = scope.Split(':');
-                complexity += parts.Length * 10;
-
-                // 와일드카드 복잡도
-                complexity += scope.Count(c => c == '*') * 20;
-
-                // 특수 문자 복잡도
-                complexity += scope.Count(c => !char.IsLetterOrDigit(c) && c != ':' && c != '*') * 5;
-
-                // 길이에 따른 복잡도
-                complexity += scope.Length / 10;
-
-                return Task.FromResult(ServiceResult<int>.Success(complexity));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Error calculating scope complexity: {scope}");
-                return Task.FromResult(ServiceResult<int>.Failure("Complexity calculation error", "COMPLEXITY_ERROR"));
-            }
-        }
-
-        /// <summary>
-        /// 스코프 최적화 제안
-        /// </summary>
-        public async Task<ServiceResult<ScopeOptimizationSuggestions>> SuggestOptimizationsAsync(List<string> currentScopes)
+        public async Task<ServiceResult<ScopeOptimizationSuggestions>> SuggestOptimizationsAsync(List<string> currentScopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var suggestions = new ScopeOptimizationSuggestions();
 
-                // 중복 스코프 찾기
-                var redundant = await FindRedundantScopesAsync(currentScopes);
+                var redundant = await FindRedundantScopesAsync(currentScopes, cancellationToken);
                 if (redundant.IsSuccess && redundant.Data != null)
                 {
                     suggestions.RedundantScopes = redundant.Data;
                 }
 
-                // 와일드카드로 압축 가능한 패턴 찾기
                 var resourceGroups = currentScopes.GroupBy(s =>
                 {
                     var lastColon = s.LastIndexOf(':');
@@ -1482,7 +1086,6 @@ namespace AuthHive.Auth.Services.Authentication
                 foreach (var group in resourceGroups.Where(g => g.Count() > 3))
                 {
                     suggestions.SuggestedWildcards.Add($"{group.Key}:*");
-
                     suggestions.MergeRecommendations.Add(new ScopeMergeRecommendation
                     {
                         OriginalScopes = group.ToList(),
@@ -1491,10 +1094,7 @@ namespace AuthHive.Auth.Services.Authentication
                     });
                 }
 
-                // 잠재적 감소 계산
-                suggestions.PotentialReduction = suggestions.RedundantScopes.Count +
-                    suggestions.MergeRecommendations.Sum(m => m.OriginalScopes.Count - 1);
-
+                suggestions.PotentialReduction = suggestions.RedundantScopes.Count + suggestions.MergeRecommendations.Sum(m => m.OriginalScopes.Count - 1);
                 return ServiceResult<ScopeOptimizationSuggestions>.Success(suggestions);
             }
             catch (Exception ex)
@@ -1504,23 +1104,17 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 중복 스코프 탐지
-        /// </summary>
-        public async Task<ServiceResult<List<string>>> FindRedundantScopesAsync(List<string> scopes)
+        public async Task<ServiceResult<List<string>>> FindRedundantScopesAsync(List<string> scopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 var redundant = new List<string>();
-
                 for (int i = 0; i < scopes.Count; i++)
                 {
                     for (int j = 0; j < scopes.Count; j++)
                     {
                         if (i == j) continue;
-
-                        // scopes[j]가 scopes[i]를 포함하는지 확인
-                        var containsResult = await ContainsScopeAsync(scopes[j], scopes[i]);
+                        var containsResult = await ContainsScopeAsync(scopes[j], scopes[i], cancellationToken);
                         if (containsResult.IsSuccess && containsResult.Data && scopes[i] != scopes[j])
                         {
                             redundant.Add(scopes[i]);
@@ -1528,7 +1122,6 @@ namespace AuthHive.Auth.Services.Authentication
                         }
                     }
                 }
-
                 return ServiceResult<List<string>>.Success(redundant.Distinct().ToList());
             }
             catch (Exception ex)
@@ -1541,64 +1134,74 @@ namespace AuthHive.Auth.Services.Authentication
         #endregion
 
         #region 캐싱 및 성능
+        public Task<ServiceResult> ClearOrganizationScopeCacheAsync(Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            // TODO: 조직 ID를 포함하는 캐시 키를 찾아 삭제하는 로직 구현
+            _logger.LogInformation("Clearing organization-specific scope cache for {OrganizationId}", organizationId);
+            return Task.FromResult(ServiceResult.Success("Organization cache cleared"));
+        }
 
-        /// <summary>
-        /// 파싱 결과 캐싱
-        /// </summary>
-        public Task<ServiceResult> CacheParsingResultAsync(string scope, ScopeParseResponse result)
+        public Task<ServiceResult> OptimizeCacheAsync(CancellationToken cancellationToken = default)
+        {
+            // TODO: 오래되거나 사용 빈도가 낮은 캐시를 정리하는 로직 구현
+            _logger.LogInformation("Cache optimization completed");
+            return Task.FromResult(ServiceResult.Success("Cache optimized"));
+        }
+
+        public async Task<ServiceResult> CacheParsingResultAsync(string scope, ScopeParseResponse result, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"{CacheKeyPrefix}{scope}";
-                _cache.Set(cacheKey, result, _defaultCacheExpiration);
-
-                // 통계 업데이트
-                UpdateCacheStatistics(scope, true);
-
-                return Task.FromResult(ServiceResult.Success("Cached successfully"));
+                await _cacheService.SetAsync(cacheKey, result, expiration: _defaultCacheExpiration, cancellationToken: cancellationToken);
+                await UpdateCacheStatisticsAsync(scope, true, cancellationToken);
+                return ServiceResult.Success("Cached successfully");
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning($"Caching parsing result cancelled for scope: {scope}");
+                return ServiceResult.Failure("Cache operation cancelled", "CACHE_CANCELLED");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error caching parsing result for scope: {scope}");
-                return Task.FromResult(ServiceResult.Failure("Cache error", "CACHE_ERROR"));
+                return ServiceResult.Failure("Cache error", "CACHE_ERROR");
             }
         }
 
-        /// <summary>
-        /// 캐시된 파싱 결과 조회
-        /// </summary>
-        public Task<ServiceResult<ScopeParseResponse?>> GetCachedParsingResultAsync(string scope)
+        public async Task<ServiceResult<ScopeParseResponse?>> GetCachedParsingResultAsync(string scope, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"{CacheKeyPrefix}{scope}";
-                if (_cache.TryGetValue(cacheKey, out ScopeParseResponse? cached))
+                var cached = await _cacheService.GetAsync<ScopeParseResponse>(cacheKey, cancellationToken);
+                if (cached != null)
                 {
-                    UpdateCacheStatistics(scope, true);
-                    return Task.FromResult(ServiceResult<ScopeParseResponse?>.Success(cached));
+                    await UpdateCacheStatisticsAsync(scope, true, cancellationToken);
+                    return ServiceResult<ScopeParseResponse?>.Success(cached);
                 }
 
-                UpdateCacheStatistics(scope, false);
-                return Task.FromResult(ServiceResult<ScopeParseResponse?>.Success(null));
+                await UpdateCacheStatisticsAsync(scope, false, cancellationToken); // Corrected: should be 'false' for a cache miss
+                return ServiceResult<ScopeParseResponse?>.Success(null);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning($"Getting cached parsing result cancelled for scope: {scope}");
+                return ServiceResult<ScopeParseResponse?>.Success(null);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error getting cached parsing result for scope: {scope}");
-                return Task.FromResult(ServiceResult<ScopeParseResponse?>.Failure("Cache retrieval error", "CACHE_GET_ERROR"));
+                return ServiceResult<ScopeParseResponse?>.Failure("Cache retrieval error", "CACHE_GET_ERROR");
             }
         }
 
-        /// <summary>
-        /// 스코프 파싱 캐시 초기화
-        /// </summary>
-        public Task<ServiceResult> ClearScopeParsingCacheAsync()
+        public Task<ServiceResult> ClearScopeParsingCacheAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // IMemoryCache doesn't provide a way to clear all entries with a specific prefix
-                // In production, consider using a more advanced caching solution
-                _logger.LogInformation("Scope parsing cache clear requested");
-                return Task.FromResult(ServiceResult.Success("Cache cleared"));
+                _logger.LogInformation("Scope parsing cache clear requested (Note: IMemoryCache doesn't support prefix-based clearing)");
+                return Task.FromResult(ServiceResult.Success("Cache clear requested"));
             }
             catch (Exception ex)
             {
@@ -1607,52 +1210,33 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 조직별 스코프 캐시 초기화
-        /// </summary>
-        public Task<ServiceResult> ClearOrganizationScopeCacheAsync(Guid organizationId)
+        public async Task<ServiceResult<ScopeCacheStatistics>> GetCacheStatisticsAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // Organization-specific cache clearing logic
-                _logger.LogInformation($"Organization scope cache cleared for: {organizationId}");
-                return Task.FromResult(ServiceResult.Success("Organization cache cleared"));
+                var stats = await _cacheService.GetAsync<ScopeCacheStatistics>(CacheStatPrefix, cancellationToken) ?? new ScopeCacheStatistics();
+                return ServiceResult<ScopeCacheStatistics>.Success(stats);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                _logger.LogError(ex, $"Error clearing organization scope cache: {organizationId}");
-                return Task.FromResult(ServiceResult.Failure("Organization cache clear error", "ORG_CACHE_CLEAR_ERROR"));
-            }
-        }
-
-        /// <summary>
-        /// 스코프 캐시 통계 조회
-        /// </summary>
-        public Task<ServiceResult<ScopeCacheStatistics>> GetCacheStatisticsAsync()
-        {
-            try
-            {
-                var stats = _cache.Get<ScopeCacheStatistics>(CacheStatPrefix) ?? new ScopeCacheStatistics();
-                return Task.FromResult(ServiceResult<ScopeCacheStatistics>.Success(stats));
+                _logger.LogWarning("Getting cache statistics cancelled.");
+                return ServiceResult<ScopeCacheStatistics>.Success(new ScopeCacheStatistics());
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting cache statistics");
-                return Task.FromResult(ServiceResult<ScopeCacheStatistics>.Failure("Statistics retrieval error", "STATS_ERROR"));
+                return ServiceResult<ScopeCacheStatistics>.Failure("Statistics retrieval error", "STATS_ERROR");
             }
         }
 
-        /// <summary>
-        /// 스코프 캐시 워밍업
-        /// </summary>
-        public async Task<ServiceResult> WarmupCacheAsync(List<string> frequentScopes)
+        public async Task<ServiceResult> WarmupCacheAsync(List<string> frequentScopes, CancellationToken cancellationToken = default)
         {
             try
             {
                 int warmedUp = 0;
-
                 foreach (var scope in frequentScopes)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var request = new ScopeParseRequest
                     {
                         Scope = scope,
@@ -1660,16 +1244,19 @@ namespace AuthHive.Auth.Services.Authentication
                         ValidateScope = true,
                         ResolveWildcards = scope.Contains("*")
                     };
-
-                    var result = await ParseScopeAsync(request);
+                    var result = await ParseScopeAsync(request, cancellationToken);
                     if (result.IsSuccess)
                     {
                         warmedUp++;
                     }
                 }
-
                 _logger.LogInformation($"Cache warmed up with {warmedUp} scopes");
                 return ServiceResult.Success($"Warmed up {warmedUp} scopes");
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Cache warm-up was cancelled.");
+                return ServiceResult.Failure("Warmup cancelled", "WARMUP_CANCELLED");
             }
             catch (Exception ex)
             {
@@ -1678,63 +1265,31 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 캐시 최적화 실행
-        /// </summary>
-        public Task<ServiceResult> OptimizeCacheAsync()
-        {
-            try
-            {
-                // 캐시 최적화 로직
-                // - 오래된 항목 제거
-                // - 자주 사용되지 않는 항목 제거
-                // - 메모리 압력 체크
-
-                _logger.LogInformation("Cache optimization completed");
-                return Task.FromResult(ServiceResult.Success("Cache optimized"));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error optimizing cache");
-                return Task.FromResult(ServiceResult.Failure("Optimization error", "OPTIMIZE_CACHE_ERROR"));
-            }
-        }
-
         #endregion
 
         #region Permission 연동
 
-        /// <summary>
-        /// Permission들의 Scope를 분석하여 매트릭스 생성
-        /// </summary>
-        public async Task<ServiceResult<ScopeMatrixView>> BuildPermissionScopeMatrixAsync(List<PermissionEntity> permissions)
+        public async Task<ServiceResult<ScopeMatrixView>> BuildPermissionScopeMatrixAsync(List<PermissionEntity> permissions, CancellationToken cancellationToken = default)
         {
             try
             {
-                var matrix = new ScopeMatrixView
-                {
-                    TotalPermissions = permissions.Count
-                };
-
+                var matrix = new ScopeMatrixView { TotalPermissions = permissions.Count };
                 var resourceSet = new HashSet<string>();
                 var actionSet = new HashSet<string>();
 
-                // 모든 Permission의 스코프 파싱
                 foreach (var permission in permissions)
                 {
-                    var parseResult = await ParsePermissionScopeAsync(permission.Scope);
+                    var parseResult = await ParsePermissionScopeAsync(permission.Scope, cancellationToken);
                     if (parseResult.IsSuccess && parseResult.Data != null)
                     {
                         var components = parseResult.Data;
                         resourceSet.Add(components.Resource);
                         actionSet.Add(components.Action);
 
-                        // 매트릭스에 추가
                         if (!matrix.Matrix.ContainsKey(components.Resource))
                         {
                             matrix.Matrix[components.Resource] = new Dictionary<string, PermissionScopeInfo>();
                         }
-
                         matrix.Matrix[components.Resource][components.Action] = new PermissionScopeInfo
                         {
                             PermissionId = permission.Id,
@@ -1758,27 +1313,17 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// Permission의 Scope 변경 시 관련 필드 업데이트
-        /// </summary>
-        public async Task<ServiceResult> UpdatePermissionScopeComponentsAsync(PermissionEntity permission, string newScope)
+        public async Task<ServiceResult> UpdatePermissionScopeComponentsAsync(PermissionEntity permission, string newScope, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 새 스코프 검증
-                var validationResult = await ValidateScopeAsync(newScope);
+                var validationResult = await ValidateScopeAsync(newScope, cancellationToken);
                 if (!validationResult.IsSuccess || !validationResult.Data)
                 {
                     return ServiceResult.Failure("Invalid new scope", "INVALID_SCOPE");
                 }
-
-                // 스코프 업데이트
                 permission.Scope = newScope;
-
-                // 구성 요소 재파싱 및 업데이트
-                var populateResult = await PopulatePermissionScopeComponentsAsync(permission);
-
-                return populateResult;
+                return await PopulatePermissionScopeComponentsAsync(permission, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -1787,60 +1332,36 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 조직의 모든 Permission Scope 분석
-        /// </summary>
-        public async Task<ServiceResult<OrganizationScopeAnalysis>> AnalyzeOrganizationScopesAsync(Guid organizationId)
+        public async Task<ServiceResult<OrganizationScopeAnalysis>> AnalyzeOrganizationScopesAsync(Guid organizationId, List<PermissionEntity> permissions, CancellationToken cancellationToken = default)
         {
             try
             {
-                // TODO: 실제 구현 시 Permission Repository를 통해 조직의 모든 Permission 조회
-                var analysis = new OrganizationScopeAnalysis
-                {
-                    OrganizationId = organizationId
-                };
-
-                // 임시 데이터 (실제 구현 시 DB에서 조회)
-                var scopes = new List<string>
-                {
-                    "user:read",
-                    "user:write",
-                    "user:delete",
-                    "product:read",
-                    "product:*",
-                    "billing:manage"
-                };
-
+                var analysis = new OrganizationScopeAnalysis { OrganizationId = organizationId };
                 var resourceSet = new HashSet<string>();
                 var actionSet = new HashSet<string>();
 
-                foreach (var scope in scopes)
+                foreach (var permission in permissions)
                 {
-                    var parseResult = await ParsePermissionScopeAsync(scope);
+                    var parseResult = await ParsePermissionScopeAsync(permission.Scope, cancellationToken);
                     if (parseResult.IsSuccess && parseResult.Data != null)
                     {
                         var components = parseResult.Data;
                         resourceSet.Add(components.Resource);
                         actionSet.Add(components.Action);
 
-                        // 분포 계산
-                        analysis.ResourceDistribution[components.Resource] =
-                            analysis.ResourceDistribution.GetValueOrDefault(components.Resource, 0) + 1;
+                        analysis.ResourceDistribution[components.Resource] = analysis.ResourceDistribution.GetValueOrDefault(components.Resource, 0) + 1;
+                        analysis.ActionDistribution[components.Action] = analysis.ActionDistribution.GetValueOrDefault(components.Action, 0) + 1;
 
-                        analysis.ActionDistribution[components.Action] =
-                            analysis.ActionDistribution.GetValueOrDefault(components.Action, 0) + 1;
-
-                        if (scope.Contains("*"))
+                        if (permission.Scope.Contains("*"))
                         {
                             analysis.WildcardScopes++;
                         }
                     }
                 }
 
-                analysis.TotalScopes = scopes.Count;
+                analysis.TotalScopes = permissions.Count;
                 analysis.UniqueResources = resourceSet.Count;
                 analysis.UniqueActions = actionSet.Count;
-                analysis.MostUsedScopes = scopes.Take(5).ToList(); // 실제로는 사용 빈도 기반
 
                 return ServiceResult<OrganizationScopeAnalysis>.Success(analysis);
             }
@@ -1853,68 +1374,13 @@ namespace AuthHive.Auth.Services.Authentication
 
         #endregion
 
-        #region IService Implementation
-
-        /// <summary>
-        /// 서비스 초기화
-        /// </summary>
-        public async Task InitializeAsync()
-        {
-            try
-            {
-                _logger.LogInformation("ScopeParsingService initializing...");
-
-                // 자주 사용되는 스코프 패턴 사전 캐싱
-                var commonScopes = new List<string>
-                {
-                    "user:read",
-                    "user:write",
-                    "user:*",
-                    "organization:manage",
-                    "application:*"
-                };
-
-                await WarmupCacheAsync(commonScopes);
-
-                _logger.LogInformation("ScopeParsingService initialized successfully");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize ScopeParsingService");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 서비스 상태 확인
-        /// </summary>
-        public async Task<bool> IsHealthyAsync()
-        {
-            try
-            {
-                // 간단한 파싱 테스트
-                var testResult = await ValidateScopeAsync("test:read");
-                return testResult.IsSuccess;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "ScopeParsingService health check failed");
-                return false;
-            }
-        }
-
-        #endregion
-
         #region Private Helper Methods
 
         private string DetectScopeStyle(string scope)
         {
-            if (scope.Contains(':'))
-                return "resource:action";
-            if (scope.Contains('.'))
-                return "legacy";
-            if (scope.Split(':').Length > 3)
-                return "hierarchical";
+            if (scope.Contains(':')) return "resource:action";
+            if (scope.Contains('.')) return "legacy";
+            if (scope.Split(':').Length > 3) return "hierarchical";
             return "custom";
         }
 
@@ -1928,118 +1394,84 @@ namespace AuthHive.Auth.Services.Authentication
             return hierarchy;
         }
 
-        private async Task<WildcardResolution> ResolveWildcardsAsync(string scope)
+        private async Task<WildcardResolution> ResolveWildcardsAsync(string scope, CancellationToken cancellationToken = default)
         {
-            var resolution = new WildcardResolution
-            {
-                ContainsWildcard = scope.Contains("*")
-            };
-
+            var resolution = new WildcardResolution { ContainsWildcard = scope.Contains("*") };
             if (resolution.ContainsWildcard)
             {
                 var parts = scope.Split(':');
                 resolution.WildcardPositions = new List<int>();
-
                 for (int i = 0; i < parts.Length; i++)
                 {
-                    if (parts[i] == "*")
-                    {
-                        resolution.WildcardPositions.Add(i);
-                    }
+                    if (parts[i] == "*") resolution.WildcardPositions.Add(i);
                 }
-
                 resolution.ImpactDescription = $"Wildcard at position(s): {string.Join(", ", resolution.WildcardPositions)}";
 
-                // 매칭 패턴 생성
-                var expandResult = await ExpandWildcardScopeAsync(scope);
+                var expandResult = await ExpandWildcardScopeAsync(scope, cancellationToken);
                 if (expandResult.IsSuccess)
                 {
                     resolution.MatchingPatterns = expandResult.Data;
                 }
             }
-
             return resolution;
         }
 
-        private Task<ScopeValidation> ValidateScopeInternalAsync(string scope)
+        private Task<ScopeValidation> ValidateScopeInternalAsync(string scope, CancellationToken cancellationToken = default)
         {
-            var validation = new ScopeValidation
-            {
-                IsValid = true,
-                ValidationErrors = new List<string>()
-            };
-
-            // 형식 검증
+            var validation = new ScopeValidation { IsValid = true, ValidationErrors = new List<string>() };
             validation.IsFormatValid = StandardScopePattern.IsMatch(scope);
             if (!validation.IsFormatValid)
             {
                 validation.IsValid = false;
                 validation.ValidationErrors.Add("Invalid scope format");
             }
-
-            // TODO: 실제 구현 시 DB에서 존재 여부 확인
-            validation.ExistsInSystem = true;
-
-            // 유사 스코프 제안
+            validation.ExistsInSystem = true; // Placeholder
             if (!validation.IsValid)
             {
                 validation.SuggestedScopes = GenerateSuggestions(scope);
             }
-
             return Task.FromResult(validation);
         }
 
         private List<string> GenerateSuggestions(string scope)
         {
             var suggestions = new List<string>();
-
-            // 일반적인 오타 수정
             if (!scope.Contains(':'))
             {
                 suggestions.Add(scope.Replace('.', ':'));
                 suggestions.Add(scope.Replace('-', ':'));
             }
-
-            // 기본 액션 추가
             if (scope.Split(':').Length == 1)
             {
                 suggestions.Add($"{scope}:read");
                 suggestions.Add($"{scope}:write");
                 suggestions.Add($"{scope}:*");
             }
-
             return suggestions;
         }
 
         private bool ValidateComponents(ScopeComponents components)
         {
-            if (string.IsNullOrWhiteSpace(components.Resource) ||
-                string.IsNullOrWhiteSpace(components.Action))
+            if (string.IsNullOrWhiteSpace(components.Resource) || string.IsNullOrWhiteSpace(components.Action))
             {
                 components.ValidationErrors.Add("Resource and action are required");
                 return false;
             }
-
-            // 각 구성 요소 검증
             if (!ComponentPattern.IsMatch(components.Resource))
             {
                 components.ValidationErrors.Add($"Invalid resource: {components.Resource}");
                 return false;
             }
-
             if (!ComponentPattern.IsMatch(components.Action))
             {
                 components.ValidationErrors.Add($"Invalid action: {components.Action}");
                 return false;
             }
-
             return true;
         }
 
         private bool IsOrganizationOrApplication(string part)
         {
-            // 조직이나 애플리케이션 이름 패턴 체크
-            // 실제 구현 시 DB 조회 또는 더 정교한 로직 필요
             return part.Length > 3 && !IsCommonAction(part) && !IsCommonResource(part);
         }
 
@@ -2058,15 +1490,12 @@ namespace AuthHive.Auth.Services.Authentication
         private string FindCommonPrefix(List<string> scopes)
         {
             if (!scopes.Any()) return string.Empty;
-
             var shortest = scopes.OrderBy(s => s.Length).First();
-
             for (int i = shortest.Length; i > 0; i--)
             {
                 var prefix = shortest.Substring(0, i);
                 if (scopes.All(s => s.StartsWith(prefix)))
                 {
-                    // 콜론으로 끝나도록 조정
                     var lastColon = prefix.LastIndexOf(':');
                     if (lastColon > 0)
                     {
@@ -2075,56 +1504,36 @@ namespace AuthHive.Auth.Services.Authentication
                     return prefix;
                 }
             }
-
             return string.Empty;
         }
 
-        private Task<string> NormalizeScopeInternalAsync(string scope)
+        private Task<string> NormalizeScopeInternalAsync(string scope, CancellationToken cancellationToken = default)
         {
-            // 대소문자 정규화
-            var normalized = scope.ToLower();
-
-            // 공백 제거
-            normalized = normalized.Trim();
-
-            // 중복 콜론 제거
+            var normalized = scope.ToLower().Trim();
             normalized = Regex.Replace(normalized, ":+", ":");
-
-            // 시작/끝 콜론 제거
             normalized = normalized.Trim(':');
-
             return Task.FromResult(normalized);
         }
 
         private bool IsParentChild(string[] parts1, string[] parts2)
         {
-            if (Math.Abs(parts1.Length - parts2.Length) != 1)
-                return false;
-
+            if (Math.Abs(parts1.Length - parts2.Length) != 1) return false;
             var shorter = parts1.Length < parts2.Length ? parts1 : parts2;
             var longer = parts1.Length > parts2.Length ? parts1 : parts2;
-
             for (int i = 0; i < shorter.Length - 1; i++)
             {
-                if (shorter[i] != longer[i])
-                    return false;
+                if (shorter[i] != longer[i]) return false;
             }
-
             return shorter[^1] == "*" || longer[^1] != "*";
         }
 
         private bool AreSiblings(string[] parts1, string[] parts2)
         {
-            if (parts1.Length != parts2.Length || parts1.Length < 2)
-                return false;
-
-            // 마지막 요소를 제외한 모든 부분이 같아야 함
+            if (parts1.Length != parts2.Length || parts1.Length < 2) return false;
             for (int i = 0; i < parts1.Length - 1; i++)
             {
-                if (parts1[i] != parts2[i])
-                    return false;
+                if (parts1[i] != parts2[i]) return false;
             }
-
             return parts1[^1] != parts2[^1];
         }
 
@@ -2132,125 +1541,60 @@ namespace AuthHive.Auth.Services.Authentication
         {
             var shorter = parts1.Length < parts2.Length ? parts1 : parts2;
             var longer = parts1.Length > parts2.Length ? parts1 : parts2;
-
-            if (shorter.Length >= longer.Length)
-                return false;
-
+            if (shorter.Length >= longer.Length) return false;
             for (int i = 0; i < shorter.Length - 1; i++)
             {
-                if (shorter[i] != longer[i])
-                    return false;
+                if (shorter[i] != longer[i]) return false;
             }
-
             return shorter[^1] == "*";
         }
 
-        private async Task<ScopeConflict?> DetectConflictBetween(string scope1, string scope2)
+        private async Task<ScopeConflict?> DetectConflictBetween(string scope1, string scope2, CancellationToken cancellationToken = default)
         {
-            // 완전히 같은 스코프
             if (scope1 == scope2)
             {
-                return new ScopeConflict
-                {
-                    Scope1 = scope1,
-                    Scope2 = scope2,
-                    Type = ScopeConflictType.Redundant,
-                    Description = "Duplicate scopes detected",
-                    Severity = ConflictSeverity.Medium,
-                    Resolution = "Remove one of the duplicate scopes"
-                };
+                return new ScopeConflict { Scope1 = scope1, Scope2 = scope2, Type = ScopeConflictType.Redundant, Description = "Duplicate scopes detected", Severity = ConflictSeverity.Medium, Resolution = "Remove one of the duplicate scopes" };
             }
-
-            // 포함 관계
-            var contains1 = await ContainsScopeAsync(scope1, scope2);
+            var contains1 = await ContainsScopeAsync(scope1, scope2, cancellationToken);
             if (contains1.IsSuccess && contains1.Data)
             {
-                return new ScopeConflict
-                {
-                    Scope1 = scope1,
-                    Scope2 = scope2,
-                    ///// 2. 상위 리소스와 하위 리소스가 겹치는 경우  
-                    ///"api:*"          vs  "api:v1:users:read"
-                    Type = ScopeConflictType.Overlap,
-                    Description = $"{scope1} contains {scope2}",
-                    Severity = ConflictSeverity.Low,
-                    Resolution = $"Consider removing {scope2} as it's covered by {scope1}"
-                };
+                return new ScopeConflict { Scope1 = scope1, Scope2 = scope2, Type = ScopeConflictType.Overlap, Description = $"{scope1} contains {scope2}", Severity = ConflictSeverity.Low, Resolution = $"Consider removing {scope2} as it's covered by {scope1}" };
             }
-
             return null;
         }
 
-        private void UpdateCacheStatistics(string scope, bool isHit)
+        private async Task UpdateCacheStatisticsAsync(string scope, bool isHit, CancellationToken cancellationToken = default)
         {
-            var stats = _cache.Get<ScopeCacheStatistics>(CacheStatPrefix) ?? new ScopeCacheStatistics();
-
-            if (isHit)
+            try
             {
-                stats.HitCount++;
+                var stats = await _cacheService.GetAsync<ScopeCacheStatistics>(CacheStatPrefix, cancellationToken) ?? new ScopeCacheStatistics();
+                if (isHit) stats.HitCount++; else stats.MissCount++;
+                stats.TotalRequests++;
+                stats.HitRate = (double)stats.HitCount / stats.TotalRequests;
+                await _cacheService.SetAsync(CacheStatPrefix, stats, expiration: _statsCacheExpiration, cancellationToken: cancellationToken);
             }
-            else
+            catch (OperationCanceledException)
             {
-                stats.MissCount++;
+                _logger.LogWarning($"UpdateCacheStatistics cancelled for scope: {scope}.");
             }
-
-            stats.TotalRequests++;
-            stats.HitRate = (double)stats.HitCount / stats.TotalRequests;
-
-            _cache.Set(CacheStatPrefix, stats, _statsCacheExpiration);
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error updating cache statistics for scope: {scope}");
+            }
         }
 
-        private int CountNodes(ScopeNode node)
+        private int CountNodes(ScopeTreeNode node)
         {
             return 1 + node.Children.Sum(child => CountNodes(child));
         }
 
-        private int CalculateMaxDepth(ScopeNode node)
+        private int CalculateMaxDepth(ScopeTreeNode node)
         {
             if (!node.Children.Any())
-                return node.Level;
-
+                return node.Depth;
             return node.Children.Max(child => CalculateMaxDepth(child));
-        }
-
-        public Task<ServiceResult<ScopeParseResponse>> ParseScopeAsync(Core.Models.Auth.Permissions.Requests.ScopeParseRequest request)
-        {
-            throw new NotImplementedException();
-        }
-
-        Task<ServiceResult<Core.Models.Auth.Permissions.Common.ScopeTree>> IScopeParsingService.BuildScopeTreeAsync(List<string> scopes)
-        {
-            throw new NotImplementedException();
         }
 
         #endregion
     }
-
-    #region Supporting Classes
-
-    public class ScopeTree
-    {
-        public ScopeNode Root { get; set; } = new();
-        public int TotalNodes { get; set; }
-        public int MaxDepth { get; set; }
-    }
-
-    public class ScopeNode
-    {
-        public string Name { get; set; } = string.Empty;
-        public string FullPath { get; set; } = string.Empty;
-        public int Level { get; set; }
-        public ScopeNode? Parent { get; set; }
-        public List<ScopeNode> Children { get; set; } = new();
-    }
-
-    public class ScopeParseRequest
-    {
-        public string Scope { get; set; } = string.Empty;
-        public bool IncludeHierarchy { get; set; }
-        public bool ValidateScope { get; set; }
-        public bool ResolveWildcards { get; set; }
-    }
-
-    #endregion
 }

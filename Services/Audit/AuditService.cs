@@ -83,16 +83,25 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 서비스 상태 확인
         /// </summary>
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // Repository 연결 상태 확인
+                // 1. Repository 쿼리 준비
                 var testQuery = _auditLogRepository.Query().Take(1);
-                await Task.Run(() => testQuery.Any());
+
+                // 2. Task.Run() 대신 ORM의 Async 메서드를 사용합니다.
+                // 3. CancellationToken을 직접 전달하여 쿼리 취소를 가능하게 합니다.
+                await testQuery.AnyAsync(cancellationToken);
+
                 return true;
             }
-            catch
+            catch (OperationCanceledException)
+            {
+                // 취소 요청 시 예외가 발생하면 false를 반환하거나 다시 throw 할 수 있습니다.
+                return false;
+            }
+            catch // 데이터베이스 연결 실패 등 다른 예외
             {
                 return false;
             }
@@ -101,11 +110,13 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 서비스 초기화
         /// </summary>
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
-            // 캐시 초기화
+            // 캐시 초기화 (로직이 없다면 로깅만 수행)
             _logger.LogInformation("AuditService initialized");
-            await Task.CompletedTask;
+
+            // 🌟 즉시 완료된 Task 객체를 반환하여 인터페이스 계약을 만족시키고 오버헤드를 줄입니다.
+            return Task.CompletedTask;
         }
 
         #endregion
@@ -228,13 +239,14 @@ namespace AuthHive.Auth.Services.Audit
         /// 간편 로그 메서드 - v15: ConnectedId 중심 로깅
         /// </summary>
         public async Task LogActionAsync(
-            Guid? performedByConnectedId,
-            string action,
-            AuditActionType actionType,
-            string resourceType,
-            string? resourceId, // Add the '?' to make it nullable
-            bool success = true,
-            string? metadata = null)
+           Guid? performedByConnectedId,
+           string action,
+           AuditActionType actionType,
+           string resourceType,
+           string? resourceId,
+           bool success = true,
+           string? metadata = null,
+           CancellationToken cancellationToken = default)
         {
             try
             {
@@ -257,15 +269,15 @@ namespace AuthHive.Auth.Services.Audit
                 // 조직 정보 추가 (ConnectedId에서 추출)
                 if (performedByConnectedId.HasValue)
                 {
-                    var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(performedByConnectedId.Value);
+                    var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(performedByConnectedId.Value, cancellationToken);
                     if (connectedIdEntity != null)
                     {
                         auditLog.TargetOrganizationId = connectedIdEntity.OrganizationId;
                     }
                 }
 
-                await _auditLogRepository.AddAsync(auditLog);
-                await _unitOfWork.SaveChangesAsync();
+                await _auditLogRepository.AddAsync(auditLog, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             catch (Exception ex)
             {

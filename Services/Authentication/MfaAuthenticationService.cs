@@ -84,13 +84,28 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         #region IService Implementation
-
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            try { await _userRepository.CountAsync(); return true; }
-            catch (Exception ex) { _logger.LogWarning(ex, "MfaAuthenticationService health check failed"); return false; }
+            try
+            {
+                // CancellationToken 전달 및 CountAsync의 필터링 인수가 있다면 null 명시
+                await _userRepository.CountAsync(predicate: null, cancellationToken);
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "MfaAuthenticationService health check failed");
+                return false;
+            }
         }
-        public Task InitializeAsync() => Task.CompletedTask;
+
+        // CancellationToken을 추가하고, 효율적인 Task.CompletedTask 반환 유지
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
         #endregion
 
         #region MFA 인증 플로우

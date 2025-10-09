@@ -23,6 +23,9 @@ using StackExchange.Redis;
 using Serilog;
 using AuthHive.Infrastructure.Events;
 using AuthHive.Business.Services.Organization;
+using AuthHive.Auth.Services.Authorization;
+using AuthHive.Auth.Services.Infra.Cache;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 Log.Logger = new LoggerConfiguration()
    .WriteTo.Console()
@@ -89,7 +92,9 @@ try
     builder.Services.AddScoped<IOrganizationService, OrganizationService>();
     builder.Services.AddScoped<IOrganizationHierarchyService, OrganizationHierarchyService>();
     builder.Services.AddScoped<IOrganizationSettingsService, OrganizationSettingsService>();
-
+    
+    builder.Services.AddScoped<IPlanRestrictionService, PlanRestrictionService>();
+    builder.Services.AddTransient<ICacheWarmupStrategy, PermissionCacheWarmupStrategy>();
     // Handlers
     builder.Services.AddScoped<IOrganizationSettingsHierarchyHandler, OrganizationSettingsHierarchyHandler>();
     builder.Services.AddScoped<IOrganizationSettingsLifecycleHandler, OrganizationSettingsLifecycleHandler>();

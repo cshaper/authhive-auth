@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
@@ -15,87 +14,75 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.User.Requests;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache; // REFACTORED: Use the core caching interface
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
     /// 사용자 기능 프로필 저장소 구현 - AuthHive v15
-    /// BaseRepository를 활용하여 최적화된 구조
+    /// ICacheService 추상화를 통해 캐싱 전략을 캡슐화하고, BaseRepository를 활용하여 최적화된 구조
     /// </summary>
     public class UserFeatureProfileRepository : BaseRepository<UserFeatureProfile>, IUserFeatureProfileRepository
     {
         private readonly ILogger<UserFeatureProfileRepository> _logger;
+        // REFACTORED: ICacheService is now the single source for caching, inherited from BaseRepository.
+        private readonly ICacheService _cacheService;
 
         public UserFeatureProfileRepository(
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<UserFeatureProfileRepository> logger,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            // REFACTORED: Removed direct dependency on IMemoryCache.
+            // The more generic ICacheService is injected and passed to the base class.
+            ICacheService cacheService)
+            : base(context, organizationContext, cacheService)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _cacheService = cacheService; // REFACTORED: Assign the injected cache service.
         }
+
 
         #region 기본 조회
 
-        /// <summary>ConnectedId로 기능 프로필 조회 (캐시 활용)</summary>
+
+
+        /// <summary>여러 ConnectedId의 기능 프로필 일괄 조회</summary>
         public async Task<UserFeatureProfile?> GetByConnectedIdAsync(
             Guid connectedId,
             CancellationToken cancellationToken = default)
         {
-            // 캐시 확인
-            if (_cache != null)
+            string cacheKey = GetConnectedIdCacheKey(connectedId);
+
+            // 1. ICacheService에서 GetAsync를 사용하여 먼저 캐시 조회를 시도합니다.
+            var cachedProfile = await _cacheService.GetAsync<UserFeatureProfile>(cacheKey);
+
+            // 2. 캐시에서 데이터를 찾았다면, 즉시 반환합니다 (Cache Hit)
+            if (cachedProfile != null)
             {
-                string cacheKey = GetConnectedIdCacheKey(connectedId);
-                if (_cache.TryGetValue(cacheKey, out UserFeatureProfile? cachedProfile))
-                {
-                    return cachedProfile;
-                }
+                _logger.LogDebug("Cache hit for UserFeatureProfile with ConnectedId: {ConnectedId}.", connectedId);
+                return cachedProfile;
             }
 
-            // ConnectedId → User → UserFeatureProfile 경로로 조회
-            var connectedIdEntity = await _context.ConnectedIds
+            // 3. 캐시에 데이터가 없다면 (Cache Miss), 데이터베이스에서 조회합니다.
+            _logger.LogDebug("Cache miss for UserFeatureProfile with ConnectedId: {ConnectedId}. Fetching from database.", connectedId);
+
+            var profileFromDb = await _context.ConnectedIds
+                .AsNoTracking()
                 .Include(c => c.User)
                 .ThenInclude(u => u!.UserFeatureProfile)
-                .FirstOrDefaultAsync(c => c.Id == connectedId && !c.IsDeleted, cancellationToken);
+                .Select(c => c.User!.UserFeatureProfile) // 필요한 데이터만 선택하여 효율성 증대
+                .FirstOrDefaultAsync(p => p != null && _context.ConnectedIds.Any(c => c.Id == connectedId && c.UserId == p.UserId && !c.IsDeleted), cancellationToken);
 
-            var profile = connectedIdEntity?.User?.UserFeatureProfile;
-
-            // 캐시 저장
-            if (profile != null && _cache != null)
+            // 4. 데이터베이스에서 조회한 결과를 캐시에 저장합니다.
+            //    (다음 요청부터는 캐시에서 바로 가져올 수 있도록)
+            if (profileFromDb != null)
             {
-                string cacheKey = GetConnectedIdCacheKey(connectedId);
-                _cache.Set(cacheKey, profile, GetCacheOptions());
+                // 캐시 만료 정책은 SetAsync 메서드 내부의 ICacheService 구현체가 담당합니다.
+                await _cacheService.SetAsync(cacheKey, profileFromDb);
             }
 
-            return profile;
-        }
-
-        /// <summary>여러 ConnectedId의 기능 프로필 일괄 조회</summary>
-        public async Task<IEnumerable<UserFeatureProfile>> GetByConnectedIdsAsync(
-            IEnumerable<Guid> connectedIds,
-            CancellationToken cancellationToken = default)
-        {
-            var connectedIdList = connectedIds.ToList();
-            if (!connectedIdList.Any())
-            {
-                return Enumerable.Empty<UserFeatureProfile>();
-            }
-
-            var profiles = await _context.ConnectedIds
-                // 1. 초기 필터링
-                .Where(c => connectedIdList.Contains(c.Id) && !c.IsDeleted)
-
-                // 2. User와 UserFeatureProfile이 null이 아닌 데이터만 안전하게 필터링
-                .Where(c => c.User != null && c.User.UserFeatureProfile != null)
-
-                // 3. '!' 연산자를 사용하여 컴파일러 경고를 해결하고 최종 데이터 선택
-                .Select(c => c.User!.UserFeatureProfile!)
-
-                .ToListAsync(cancellationToken);
-
-            // profiles의 타입이 List<UserFeatureProfile>이므로 '!' 없이 반환
-            return profiles;
+            // 5. 조회된 결과를 반환합니다.
+            return profileFromDb;
         }
 
         /// <summary>조직별 기능 프로필 조회</summary>
@@ -105,18 +92,18 @@ namespace AuthHive.Auth.Repositories
             int pageSize = 50,
             CancellationToken cancellationToken = default)
         {
-            // BaseRepository의 GetPagedByOrganizationAsync 활용
             var (items, totalCount) = await GetPagedByOrganizationAsync(
                 organizationId,
                 pageNumber,
                 pageSize,
-                null, // additionalPredicate
-                p => p.LastActivityAt ?? p.CreatedAt, // orderBy
-                true // isDescending
+                null,
+                p => p.LastActivityAt ?? p.CreatedAt,
+                true
             );
 
             return PagedResult<UserFeatureProfile>.Create(items, totalCount, pageNumber, pageSize);
         }
+
 
         #endregion
 
@@ -127,18 +114,18 @@ namespace AuthHive.Auth.Repositories
             UserFeatureProfile profile,
             CancellationToken cancellationToken = default)
         {
+            // NOTE: The service layer is responsible for invalidating the cache after this operation,
+            // as it has the 'connectedId' context which this method lacks.
             var existing = await FirstOrDefaultAsync(p => p.UserId == profile.UserId);
 
             if (existing == null)
             {
-                // 새 프로필 생성
                 profile.ProfileCompleteness = CalculateProfileCompleteness(profile);
                 profile.ActiveAddonCount = CountActiveAddons(profile.ActiveAddons);
                 return await AddAsync(profile);
             }
             else
             {
-                // 기존 프로필 업데이트
                 UpdateProfileFromSource(existing, profile);
                 await UpdateAsync(existing);
                 return existing;
@@ -154,14 +141,38 @@ namespace AuthHive.Auth.Repositories
             if (profile == null) return false;
 
             profile.LastActivityAt = DateTime.UtcNow;
-            profile.UpdatedAt = DateTime.UtcNow;
-
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+
+            // REFACTORED: Use the async cache service for invalidation.
+            await _cacheService.RemoveAsync(GetConnectedIdCacheKey(connectedId));
 
             return true;
         }
+        /// <summary>
+        /// 여러 ConnectedId에 해당하는 기능 프로필 목록을 한 번에 조회합니다.
+        /// </summary>
+        /// <param name="connectedIds">조회할 ConnectedId의 컬렉션</param>
+        /// <param name="cancellationToken">취소 토큰</param>
+        /// <returns>요청된 UserFeatureProfile의 컬렉션</returns>
+        public async Task<IEnumerable<UserFeatureProfile>> GetByConnectedIdsAsync(
+            IEnumerable<Guid> connectedIds,
+            CancellationToken cancellationToken = default)
+        {
+            var connectedIdList = connectedIds.ToList();
+            if (!connectedIdList.Any())
+            {
+                return Enumerable.Empty<UserFeatureProfile>();
+            }
 
+            // 이 쿼리는 효율적으로 동작하므로 변경할 필요가 없습니다.
+            var profiles = await _context.ConnectedIds
+                .Where(c => connectedIdList.Contains(c.Id) && !c.IsDeleted)
+                .Where(c => c.User != null && c.User.UserFeatureProfile != null)
+                .Select(c => c.User!.UserFeatureProfile!)
+                .ToListAsync(cancellationToken);
+
+            return profiles;
+        }
         /// <summary>프로필 메타데이터 업데이트</summary>
         public async Task<bool> UpdateMetadataAsync(
             Guid connectedId,
@@ -172,24 +183,71 @@ namespace AuthHive.Auth.Repositories
             if (profile == null) return false;
 
             profile.Metadata = JsonSerializer.Serialize(metadata);
-            profile.UpdatedAt = DateTime.UtcNow;
-
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+
+            await _cacheService.RemoveAsync(GetConnectedIdCacheKey(connectedId));
 
             return true;
         }
 
         #endregion
 
-        #region 애드온 관리
 
+
+        #region 애드온 관리
+        /// <summary>
+        /// [최종] 특정 애드온을 구독한 조직에 속한 모든 사용자의 프로필 목록을 조회합니다.
+        /// 이 메서드는 AuthHive라는 SaaS 서비스를 운영하는 내부 팀이 특정 상황에서 반드시 필요로 하는 기능입니다.
+        /// OrganizationAddon 테이블을 사용하여 정확하고 효율적으로 검색합니다.
+        /// </summary>
+        /// <param name="addonKey">조회할 애드온의 고유 키</param>
+        /// <param name="organizationId">
+        ///   (선택 사항) 검색 범위를 특정 조직으로 더욱 제한하고 싶을 때 사용합니다.
+        ///   예: '보안 애드온'을 사용하는 'A조직'의 사용자만 조회
+        /// </param>
+        /// <param name="cancellationToken">취소 토큰</param>
+        /// <returns>조건에 맞는 사용자 프로필의 컬렉션</returns>
+        public async Task<IEnumerable<UserFeatureProfile>> GetProfilesInOrgsWithAddonAsync(
+            string addonKey,
+            Guid? organizationId = null,
+            CancellationToken cancellationToken = default)
+        {
+            // 1. OrganizationAddon 테이블에서 특정 애드온을 구독한 조직들의 ID를 찾습니다.
+            var orgIdsWithAddonQuery = _context.OrganizationAddons
+                .Where(oa => oa.AddonKey == addonKey)
+                .Select(oa => oa.OrganizationId);
+
+            // 2. (선택적 필터링) 만약 특정 조직 ID가 주어졌다면, 그 조직이 애드온을 사용하는지 확인하며 검색 범위를 좁힙니다.
+            if (organizationId.HasValue)
+            {
+                orgIdsWithAddonQuery = orgIdsWithAddonQuery.Where(id => id == organizationId.Value);
+            }
+
+            // 3. UserFeatureProfile을 기준으로 쿼리를 시작합니다.
+            var profilesQuery = Query();
+
+            // 4. 위에서 찾은 조직(orgIdsWithAddonQuery)에 속한 사용자의 프로필만 필터링합니다.
+            // UserFeatureProfile -> User -> ConnectedId -> OrganizationId 경로로 연결하여 확인합니다.
+            profilesQuery = profilesQuery.Where(profile =>
+                _context.ConnectedIds.Any(c =>
+                    c.UserId == profile.UserId &&
+                    orgIdsWithAddonQuery.Contains(c.OrganizationId) // 사용자가 속한 조직이 애드온을 구독했는지 확인
+                )
+            );
+
+            // 5. 최종 결과를 가져옵니다.
+            return await profilesQuery
+                .Include(p => p.User)
+                .OrderByDescending(p => p.LastActivityAt ?? p.CreatedAt)
+                .ToListAsync(cancellationToken);
+        }
         /// <summary>활성 애드온 추가</summary>
         public async Task<bool> AddActiveAddonAsync(
             Guid connectedId,
             string addonKey,
             CancellationToken cancellationToken = default)
         {
+            // Pricing/plan validation should be done in the service layer BEFORE calling this repository method.
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
             if (profile == null) return false;
 
@@ -199,10 +257,9 @@ namespace AuthHive.Auth.Repositories
             currentAddons.Add(addonKey);
             profile.ActiveAddons = JsonSerializer.Serialize(currentAddons);
             profile.ActiveAddonCount = currentAddons.Count;
-            profile.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+            await _cacheService.RemoveAsync(GetConnectedIdCacheKey(connectedId));
 
             return true;
         }
@@ -221,53 +278,50 @@ namespace AuthHive.Auth.Repositories
 
             profile.ActiveAddons = JsonSerializer.Serialize(currentAddons);
             profile.ActiveAddonCount = currentAddons.Count;
-            profile.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+            await _cacheService.RemoveAsync(GetConnectedIdCacheKey(connectedId));
 
             return true;
         }
 
         /// <summary>활성 애드온 목록 업데이트</summary>
+
+        /// <summary>
+        /// 활성 애드온 목록을 한 번에 업데이트합니다.
+        /// </summary>
+        /// <param name="connectedId">사용자의 고유 연결 ID</param>
+        /// <param name="addonKeys">새롭게 설정할 애드온 키 목록</param>
+        /// <param name="cancellationToken">취소 토큰</param>
+        /// <returns>업데이트 성공 여부</returns>
         public async Task<bool> UpdateActiveAddonsAsync(
             Guid connectedId,
             IEnumerable<string> addonKeys,
             CancellationToken cancellationToken = default)
         {
+            // 1. GetByConnectedIdAsync는 이제 ICacheService를 통해 캐시된 프로필을 가져옵니다.
             var profile = await GetByConnectedIdAsync(connectedId, cancellationToken);
-            if (profile == null) return false;
+            if (profile == null)
+            {
+                return false;
+            }
 
-            var addonList = addonKeys.ToList();
+            // 2. 비즈니스 로직: 프로필의 애드온 목록을 업데이트합니다.
+            var addonList = addonKeys.Distinct().ToList(); // 중복된 애드온 키를 제거합니다.
             profile.ActiveAddons = JsonSerializer.Serialize(addonList);
             profile.ActiveAddonCount = addonList.Count;
             profile.UpdatedAt = DateTime.UtcNow;
 
+            // 3. 데이터베이스에 변경 사항을 저장합니다.
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+
+            // 4. REFACTORED: ICacheService를 사용하여 비동기적으로 캐시를 무효화합니다.
+            // 이전 InvalidateConnectedIdCache(connectedId) 호출이 이 코드로 대체되었습니다.
+            await _cacheService.RemoveAsync(GetConnectedIdCacheKey(connectedId));
 
             return true;
         }
 
-        /// <summary>특정 애드온을 활성화한 사용자들 조회</summary>
-        public async Task<IEnumerable<UserFeatureProfile>> GetUsersWithAddonAsync(
-            string addonKey,
-            Guid? organizationId = null,
-            CancellationToken cancellationToken = default)
-        {
-            var query = Query().Where(p => p.ActiveAddons.Contains($"\"{addonKey}\""));
-
-            if (organizationId.HasValue)
-            {
-                query = QueryForOrganization(organizationId.Value)
-                    .Where(p => p.ActiveAddons.Contains($"\"{addonKey}\""));
-            }
-
-            return await query
-                .Include(p => p.User)
-                .OrderByDescending(p => p.LastActivityAt ?? p.CreatedAt)
-                .ToListAsync(cancellationToken);
-        }
 
         #endregion
 
@@ -286,7 +340,7 @@ namespace AuthHive.Auth.Repositories
             profile.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+            await InvalidateConnectedIdCacheAsync(connectedId);
 
             return true;
         }
@@ -305,7 +359,7 @@ namespace AuthHive.Auth.Repositories
             profile.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+            await InvalidateConnectedIdCacheAsync(connectedId);
 
             return profile.TotalApiCalls;
         }
@@ -333,7 +387,7 @@ namespace AuthHive.Auth.Repositories
             profile.MostUsedFeature = GetMostUsedFeature(usageStats);
 
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+            await InvalidateConnectedIdCacheAsync(connectedId);
 
             return true;
         }
@@ -359,7 +413,7 @@ namespace AuthHive.Auth.Repositories
             profile.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(profile);
-            InvalidateConnectedIdCache(connectedId);
+            await InvalidateConnectedIdCacheAsync(connectedId);
 
             return true;
         }
@@ -515,20 +569,10 @@ namespace AuthHive.Auth.Repositories
         }
 
         /// <summary>ConnectedId 캐시 무효화</summary>
-        private void InvalidateConnectedIdCache(Guid connectedId)
+        private async Task InvalidateConnectedIdCacheAsync(Guid connectedId)
         {
-            _cache?.Remove(GetConnectedIdCacheKey(connectedId));
-        }
-
-        /// <summary>캐시 옵션 가져오기</summary>
-        private MemoryCacheEntryOptions GetCacheOptions()
-        {
-            return new MemoryCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15),
-                SlidingExpiration = TimeSpan.FromMinutes(5),
-                Priority = CacheItemPriority.Normal
-            };
+            // _cache 대신 _cacheService를 사용하고, 비동기 메서드를 호출합니다.
+            await _cacheService.RemoveAsync(GetConnectedIdCacheKey(connectedId));
         }
 
         /// <summary>JSON 문자열 배열 역직렬화</summary>

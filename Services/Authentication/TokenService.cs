@@ -39,7 +39,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IOAuthClientRepository _clientRepository;
         private readonly ISessionRepository _sessionRepository;
         private readonly ILogger<TokenService> _logger;
-        
+
         private readonly IUnitOfWork _unitOfWork;
         private readonly PasetoTokenProvider _pasetoTokenProvider;
 
@@ -68,14 +68,18 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 서비스의 상태를 확인합니다. (Health Check)
         /// </summary>
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
                 // DB에 정상적으로 접근 가능한지 확인
-                await _accessTokenRepository.CountAsync();
-                await _refreshTokenRepository.CountAsync();
+                await _accessTokenRepository.CountAsync(cancellationToken: cancellationToken);
+                await _refreshTokenRepository.CountAsync(cancellationToken: cancellationToken);
                 return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
             }
             catch (Exception ex)
             {
@@ -87,7 +91,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 서비스 초기화 로직 (현재는 특별한 작업 없음)
         /// </summary>
-        public Task InitializeAsync() => Task.CompletedTask;
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         /// <summary>
         /// 세션 엔티티를 기반으로 액세스 토큰을 생성합니다. (내부 시스템용)

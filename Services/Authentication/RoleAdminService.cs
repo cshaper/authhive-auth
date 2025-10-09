@@ -55,7 +55,53 @@ namespace AuthHive.Auth.Services.Authentication
             _auditService = auditService;
             _logger = logger;
         }
+        #region IService Implementation
 
+        /// <summary>
+        /// 서비스 초기화
+        /// </summary>
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                _logger.LogInformation("RoleAdminService initializing...");
+
+                // async 없이 Task.CompletedTask를 반환하여 최적화
+                _logger.LogInformation("RoleAdminService initialized successfully");
+                return Task.CompletedTask;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to initialize RoleAdminService");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// 서비스 상태 확인
+        /// </summary>
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // Repository 연결 상태 확인
+                // AnyAsync에 CancellationToken을 전달합니다.
+                var testQuery = await _roleRepository.AnyAsync(r => true, cancellationToken);
+
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "RoleAdminService health check failed");
+                return false;
+            }
+        }
+
+        #endregion
         #region 상태 관리
 
         /// <summary>
@@ -452,15 +498,20 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 권한 복사
         /// </summary>
-        public async Task<ServiceResult> CopyPermissionsAsync(Guid sourceRoleId, Guid targetRoleId, Guid actorId, bool overwrite = false)
+        public async Task<ServiceResult> CopyPermissionsAsync(
+          Guid sourceRoleId,
+          Guid targetRoleId,
+          Guid actorId,
+          bool overwrite = false,
+          CancellationToken cancellationToken = default)
         {
             try
             {
-                await _unitOfWork.BeginTransactionAsync();
+                await _unitOfWork.BeginTransactionAsync(cancellationToken);
 
                 // Validate that both roles exist and are in the same organization
-                var sourceRole = await _roleRepository.GetByIdAsync(sourceRoleId);
-                var targetRole = await _roleRepository.GetByIdAsync(targetRoleId);
+                var sourceRole = await _roleRepository.GetByIdAsync(sourceRoleId, cancellationToken);
+                var targetRole = await _roleRepository.GetByIdAsync(targetRoleId, cancellationToken);
 
                 if (sourceRole == null) return ServiceResult.NotFound("Source role not found.");
                 if (targetRole == null) return ServiceResult.NotFound("Target role not found.");
@@ -470,7 +521,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 // Get permissions from the source role
-                var sourcePermissions = await _rolePermissionRepository.GetByRoleAsync(sourceRoleId);
+                var sourcePermissions = await _rolePermissionRepository.GetByRoleAsync(sourceRoleId, cancellationToken: cancellationToken);
                 if (!sourcePermissions.Any())
                 {
                     return ServiceResult.Failure("Source role has no permissions to copy.", "NO_PERMISSIONS");
@@ -479,13 +530,13 @@ namespace AuthHive.Auth.Services.Authentication
                 // If in overwrite mode, remove all existing permissions from the target role
                 if (overwrite)
                 {
-                    await _rolePermissionRepository.RemoveAllPermissionsAsync(targetRoleId, $"Overwrite by {actorId} for permission copy");
+                    await _rolePermissionRepository.RemoveAllPermissionsAsync(targetRoleId, $"Overwrite by {actorId} for permission copy", cancellationToken);
                 }
 
                 // Performance Optimization: Get target permissions once to avoid N+1 queries
                 var targetPermissionIds = overwrite
                     ? new HashSet<Guid>()
-                    : (await _rolePermissionRepository.GetByRoleAsync(targetRoleId)).Select(p => p.PermissionId).ToHashSet();
+                    : (await _rolePermissionRepository.GetByRoleAsync(targetRoleId, cancellationToken: cancellationToken)).Select(p => p.PermissionId).ToHashSet();
 
                 var permissionsAdded = 0;
                 // Copy permissions
@@ -495,38 +546,42 @@ namespace AuthHive.Auth.Services.Authentication
                     if (!targetPermissionIds.Contains(permission.PermissionId))
                     {
                         await _rolePermissionRepository.AssignPermissionAsync(
-                            targetRoleId,
-                            permission.PermissionId,
-                            actorId, // Use the actorId for the audit trail
-                            $"Copied from role '{sourceRole.Name}' ({sourceRoleId})");
+             targetRoleId,
+             permission.PermissionId,
+             actorId,
+             reason: $"Copied from role '{sourceRole.Name}' ({sourceRoleId})",
+             expiresAt: null,
+             cancellationToken: cancellationToken);
                         permissionsAdded++;
                     }
                 }
 
                 if (permissionsAdded > 0 || overwrite)
                 {
-                    await _unitOfWork.SaveChangesAsync();
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
                 // Add Audit Log
                 await _auditService.LogActionAsync(
-                    actorId,
-                    "CopyRolePermissions",
-                    AuditActionType.Update, // Copying permissions is a form of update
-                    $"Copied {permissionsAdded} permissions from role {sourceRoleId} to {targetRoleId}. Overwrite: {overwrite}",
-                    System.Text.Json.JsonSerializer.Serialize(new { sourceRoleId, targetRoleId, actorId, overwrite, permissionsAdded })
-                );
+             actorId,                    // performedByConnectedId
+             "CopyRolePermissions",      // action
+             AuditActionType.Update,     // actionType
+             "Role",                     // resourceType ← 빠짐
+             targetRoleId.ToString(),    // resourceId ← 빠짐
+             success: true,              // success
+             metadata: System.Text.Json.JsonSerializer.Serialize(new { sourceRoleId, targetRoleId, actorId, overwrite, permissionsAdded })
+         );
 
                 // Publish event for cache invalidation on the target role
-                await _eventBus.PublishAsync(new RoleUpdatedEvent(targetRoleId, targetRole.OrganizationId));
+                await _eventBus.PublishAsync(new RoleUpdatedEvent(targetRoleId, targetRole.OrganizationId), cancellationToken);
 
                 return ServiceResult.Success("Permissions copied successfully.");
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 _logger.LogError(ex, $"Error copying permissions from {sourceRoleId} to {targetRoleId}");
 
                 return ServiceResult.Failure(
@@ -534,7 +589,6 @@ namespace AuthHive.Auth.Services.Authentication
                     "COPY_ERROR");
             }
         }
-
         #endregion
 
         #region 내보내기/가져오기
@@ -676,7 +730,7 @@ namespace AuthHive.Auth.Services.Authentication
                             "PLAN_LIMIT_EXCEEDED");
                     }
                 }
-                
+
                 // 각 역할 처리
                 foreach (var role in rolesToImport)
                 {
@@ -794,48 +848,6 @@ namespace AuthHive.Auth.Services.Authentication
                     "CLEANUP_ERROR");
             }
         }
-        #region IService Implementation
 
-        /// <summary>
-        /// 서비스 초기화
-        /// </summary>
-        public async Task InitializeAsync()
-        {
-            try
-            {
-                _logger.LogInformation("RoleAdminService initializing...");
-
-                // 캐시 워밍업이나 초기 설정이 필요한 경우 여기에 구현
-                await Task.CompletedTask;
-
-                _logger.LogInformation("RoleAdminService initialized successfully");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize RoleAdminService");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 서비스 상태 확인
-        /// </summary>
-        public async Task<bool> IsHealthyAsync()
-        {
-            try
-            {
-                // Repository 연결 상태 확인
-                var testQuery = await _roleRepository.AnyAsync(r => true);
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "RoleAdminService health check failed");
-                return false;
-            }
-        }
-
-        #endregion
     }
 }

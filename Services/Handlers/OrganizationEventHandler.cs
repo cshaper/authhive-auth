@@ -49,15 +49,23 @@ namespace AuthHive.Organization.Handlers
         }
 
         #region IService Implementation
-        public Task InitializeAsync()
+        // OrganizationEventHandler.cs 파일 내 (수정 완료)
+
+        // 🌟 'async' 키워드를 제거합니다.
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
+            // CancellationToken을 받지만, 이 로직은 동기적이므로 사용하지 않습니다.
             _logger.LogInformation("OrganizationEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync();
+
+            var isCacheHealthy = await _cacheService.IsHealthyAsync(cancellationToken);
+            var isAuditHealthy = await _auditService.IsHealthyAsync(cancellationToken);
+
+            return isCacheHealthy && isAuditHealthy;
         }
         #endregion
 
@@ -68,9 +76,9 @@ namespace AuthHive.Organization.Handlers
             // OrganizationCreatedEvent는 BaseEvent를 상속받아 AggregateId를 가짐
             var organizationId = @event.AggregateId;
             var createdBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             await LogOrgEventAsync("ORGANIZATION_CREATED", AuditActionType.Create, createdBy, organizationId, @event);
-            
+
             // 신규 조직 생성 시, 기본 설정을 캐시에 미리 넣어 'Cache Warming'을 할 수 있습니다.
             // 예: await _cacheService.SetAsync(GetOrgCacheKey(organizationId), newlyCreatedOrgDto);
         }
@@ -79,10 +87,10 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var updatedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             // 1. 감사 로그 기록
             await LogOrgEventAsync("ORGANIZATION_UPDATED", AuditActionType.Update, updatedBy, organizationId, @event);
-            
+
             // 2. (가장 중요) 해당 조직의 캐시를 무효화하여 다음 요청 시 새로운 정보를 가져오도록 합니다.
             await InvalidateOrganizationCacheAsync(organizationId);
         }
@@ -91,9 +99,9 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var deletedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             await LogOrgEventAsync("ORGANIZATION_DELETED", AuditActionType.Delete, deletedBy, organizationId, @event, AuditEventSeverity.Critical);
-            
+
             // 조직 삭제 시 관련 캐시(조직 정보, 사용자 권한 등)를 모두 정리합니다.
             await InvalidateOrganizationCacheAsync(organizationId);
             await InvalidateAllUserPermissionsInOrgAsync(organizationId);
@@ -107,17 +115,17 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var activatedBy = @event.TriggeredBy ?? Guid.Empty;
-            
-            await LogOrgEventAsync("ORGANIZATION_ACTIVATED", AuditActionType.Update, activatedBy, organizationId, 
+
+            await LogOrgEventAsync("ORGANIZATION_ACTIVATED", AuditActionType.Update, activatedBy, organizationId,
                 new { @event.PreviousStatus, @event.Reason });
-            
+
             await InvalidateOrganizationCacheAsync(organizationId);
-            
+
             // 조직이 활성화되면 하위 조직들도 영향을 받을 수 있으므로 권한 재계산
             await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: true);
-            
+
             _logger.LogInformation(
-                "Organization activated: {OrganizationId}, Previous: {PreviousStatus}, Reason: {Reason}", 
+                "Organization activated: {OrganizationId}, Previous: {PreviousStatus}, Reason: {Reason}",
                 organizationId, @event.PreviousStatus, @event.Reason);
         }
 
@@ -125,7 +133,7 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var suspendedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             // Log the suspension with the reason from the event
             var auditLog = new AuditLog
             {
@@ -145,16 +153,16 @@ namespace AuthHive.Organization.Handlers
                 })
             };
             await _auditService.LogAsync(auditLog);
-            
+
             await InvalidateOrganizationCacheAsync(organizationId);
-            
+
             // When organization is suspended, invalidate all user permissions
             await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: true);
-            
+
             _logger.LogWarning(
-                "Organization {OrganizationId} suspended. Previous status: {PreviousStatus}, Reason: {Reason}", 
-                organizationId, 
-                @event.PreviousStatus, 
+                "Organization {OrganizationId} suspended. Previous status: {PreviousStatus}, Reason: {Reason}",
+                organizationId,
+                @event.PreviousStatus,
                 @event.Reason);
         }
 
@@ -162,18 +170,18 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var deactivatedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             await LogOrgEventAsync("ORGANIZATION_DEACTIVATED", AuditActionType.Update, deactivatedBy, organizationId,
                 new { @event.PreviousStatus, @event.Reason },
                 AuditEventSeverity.Warning);
-            
+
             await InvalidateOrganizationCacheAsync(organizationId);
-            
+
             // 비활성화된 조직의 모든 사용자 권한 무효화
             await InvalidateAllUserPermissionsInOrgAsync(organizationId, includeChildren: false);
-            
+
             _logger.LogWarning(
-                "Organization deactivated: {OrganizationId}, Previous: {PreviousStatus}, Reason: {Reason}", 
+                "Organization deactivated: {OrganizationId}, Previous: {PreviousStatus}, Reason: {Reason}",
                 organizationId, @event.PreviousStatus, @event.Reason);
         }
 
@@ -185,16 +193,16 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var updatedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             await LogOrgEventAsync("ORGANIZATION_PARENT_CHANGED", AuditActionType.Update, updatedBy, organizationId, @event);
 
             // 조직의 계층 구조가 변경되면, 자신과 부모의 캐시를 모두 무효화합니다.
             await InvalidateOrganizationCacheAsync(organizationId);
-            
-            if (@event.OldParentId.HasValue) 
+
+            if (@event.OldParentId.HasValue)
                 await InvalidateOrganizationCacheAsync(@event.OldParentId.Value);
-                
-            if (@event.NewParentId.HasValue) 
+
+            if (@event.NewParentId.HasValue)
                 await InvalidateOrganizationCacheAsync(@event.NewParentId.Value);
 
             // 권한 상속 모델을 사용하는 경우, 조직 이동은 모든 하위 구성원의 권한에 영향을 줄 수 있습니다.
@@ -209,14 +217,14 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var verifiedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             await LogOrgEventAsync("DOMAIN_VERIFIED", AuditActionType.Update, verifiedBy, organizationId,
                 new { @event.DomainName, @event.VerificationMethod, @event.VerifiedAt });
-            
+
             await InvalidateOrganizationCacheAsync(organizationId);
-            
+
             _logger.LogInformation(
-                "Domain verified for organization: {OrganizationId}, Domain: {DomainName}, Method: {Method}", 
+                "Domain verified for organization: {OrganizationId}, Domain: {DomainName}, Method: {Method}",
                 organizationId, @event.DomainName, @event.VerificationMethod);
         }
 
@@ -224,14 +232,14 @@ namespace AuthHive.Organization.Handlers
         {
             var organizationId = @event.AggregateId;
             var changedBy = @event.TriggeredBy ?? Guid.Empty;
-            
+
             await LogOrgEventAsync("PRIMARY_DOMAIN_CHANGED", AuditActionType.Update, changedBy, organizationId,
                 new { @event.OldDomain, @event.NewDomain, @event.Reason });
-            
+
             await InvalidateOrganizationCacheAsync(organizationId);
-            
+
             _logger.LogInformation(
-                "Primary domain changed for organization: {OrganizationId}, Old: {OldDomain}, New: {NewDomain}", 
+                "Primary domain changed for organization: {OrganizationId}, Old: {OldDomain}, New: {NewDomain}",
                 organizationId, @event.OldDomain, @event.NewDomain);
         }
 

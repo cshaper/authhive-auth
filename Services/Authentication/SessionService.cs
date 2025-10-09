@@ -51,16 +51,24 @@ namespace AuthHive.Auth.Services.Session
         }
 
         #region IService Implementation
-        public Task InitializeAsync() => Task.CompletedTask;
-        public async Task<bool> IsHealthyAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                await _sessionRepository.CountAsync();
+                await _sessionRepository.CountAsync(cancellationToken: cancellationToken); // ◀◀ Named parameter 사용
                 return true;
             }
-            catch
+            catch (OperationCanceledException)
             {
+                // 취소 요청 시에는 비정상 상태로 간주
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // DB 연결 실패 등의 일반적인 예외 처리
+                _logger.LogWarning(ex, "SessionService health check failed.");
                 return false;
             }
         }

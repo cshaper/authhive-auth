@@ -60,18 +60,20 @@ namespace AuthHive.Auth.Services.Authentication
             _logger = logger;
         }
 
-        #region IService Implementation (InitializeAsync, IsHealthyAsync)
+        #region IService Implementation
 
         /// <summary>
         /// 서비스 초기화
         /// </summary>
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogInformation("RoleService initializing...");
-                await Task.CompletedTask;
+
+                // async 없이 Task.CompletedTask를 반환하여 최적화
                 _logger.LogInformation("RoleService initialized successfully");
+                return Task.CompletedTask;
             }
             catch (Exception ex)
             {
@@ -83,12 +85,17 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 서비스 상태 확인
         /// </summary>
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                var testQuery = await _roleRepository.AnyAsync(r => true);
+                // AnyAsync에 CancellationToken을 전달합니다.
+                var testQuery = await _roleRepository.AnyAsync(r => true, cancellationToken);
                 return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
             }
             catch (Exception ex)
             {
@@ -721,7 +728,7 @@ namespace AuthHive.Auth.Services.Authentication
                     {
                         // ⭐️ 감사 로그: 실패 기록 (순환 참조)
                         await LogRoleActionAsync(
-                            movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update, 
+                            movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update,
                             false, "Circular reference detected.", RoleConstants.ErrorCodes.CircularReference);
 
                         return ServiceResult.Failure(
@@ -740,7 +747,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // ⭐️ 감사 로그: 성공 기록
                 await LogRoleActionAsync(
-                    movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update, 
+                    movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update,
                     true, $"ParentRoleId changed from {oldParentId} to {newParentId}.");
 
                 _logger.LogInformation($"Role {roleId} moved to parent {newParentId}");
@@ -750,22 +757,22 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error moving role {roleId}");
-                
+
                 // ⭐️ 감사 로그: 시스템 에러 기록 (null 검사 후 호출)
                 // role이 null이 아니거나, 시스템 에러 로그에 필요한 최소한의 정보가 있을 때만 호출
-                if (role != null) 
+                if (role != null)
                 {
                     await LogRoleActionAsync(
-                        movedByConnectedId, 
-                        roleId, 
+                        movedByConnectedId,
+                        roleId,
                         role.RoleKey, // ⭐️ 수정됨: role 객체 참조를 통해 접근
-                        AuditActionType.Update, 
-                        false, 
-                        $"System error: {ex.Message}", 
+                        AuditActionType.Update,
+                        false,
+                        $"System error: {ex.Message}",
                         RoleConstants.ErrorCodes.SystemError
                     );
                 }
-                
+
                 return ServiceResult.Failure(
                     "An error occurred while moving the role.",
                     RoleConstants.ErrorCodes.SystemError);
@@ -1015,22 +1022,27 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 역할의 권한 조회
         /// </summary>
+        /// <summary>
+        /// 역할의 권한 조회
+        /// </summary>
         public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetPermissionsAsync(
             Guid roleId,
-            bool includeInherited = false)
+            bool includeInherited = false,
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 var rolePermissions = await _rolePermissionRepository.GetByRoleAsync(
                     roleId,
                     activeOnly: true,
-                    includeInherited: includeInherited);
+                    includeInherited: includeInherited,
+                    cancellationToken: cancellationToken);
 
                 var permissionDtos = new List<PermissionDto>();
 
                 foreach (var rp in rolePermissions)
                 {
-                    var permission = await _permissionRepository.GetByIdAsync(rp.PermissionId);
+                    var permission = await _permissionRepository.GetByIdAsync(rp.PermissionId, cancellationToken);
                     if (permission != null)
                     {
                         permissionDtos.Add(new PermissionDto
@@ -1054,7 +1066,6 @@ namespace AuthHive.Auth.Services.Authentication
                     RoleConstants.ErrorCodes.SystemError);
             }
         }
-
         #endregion
 
         #region 상태 및 유효성 검증

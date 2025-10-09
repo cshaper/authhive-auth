@@ -47,11 +47,16 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         // IService 구현
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                return await _context.Database.CanConnectAsync();
+                // CancellationToken을 Database.CanConnectAsync()에 전달합니다.
+                return await _context.Database.CanConnectAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
             }
             catch (Exception ex)
             {
@@ -59,7 +64,9 @@ namespace AuthHive.Auth.Services.Authentication
                 return false;
             }
         }
-        public Task InitializeAsync() => Task.CompletedTask;
+
+        // CancellationToken을 추가하고, 효율적인 Task.CompletedTask 반환을 유지합니다.
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         // 회원가입
         public async Task<ServiceResult<AuthenticationResponse>> RegisterAsync(

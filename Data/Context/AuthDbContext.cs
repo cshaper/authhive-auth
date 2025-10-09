@@ -10,6 +10,7 @@ using System.Linq.Expressions;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Entities.Business.Platform;
 using AuthHive.Core.Models.Auth.Authentication;
+
 namespace AuthHive.Auth.Data.Context
 {
     public class AuthDbContext : DbContext
@@ -642,7 +643,7 @@ namespace AuthHive.Auth.Data.Context
                     .HasFilter("\"IsActive\" = true"); // 활성 토큰의 만료 체크용
             });
             #endregion
-
+            
             #region Audit 설정
             modelBuilder.Entity<AuditLog>(entity =>
             {

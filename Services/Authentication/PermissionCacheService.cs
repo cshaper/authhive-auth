@@ -56,20 +56,21 @@ namespace AuthHive.Auth.Services.Permissions
         }
 
         #region Core Cache Operations
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("PermissionCacheService Initialized. Starting cache warm-up...");
-            return WarmupFrequentlyUsedPermissionsAsync();
+            // WarmupFrequentlyUsedPermissionsAsync도 CancellationToken을 받도록 수정했다고 가정하고 전달
+            return WarmupFrequentlyUsedPermissionsAsync(cancellationToken);
         }
 
         /// <summary>
         /// 서비스의 건강 상태를 확인합니다. 이 서비스는 캐시 서비스에 의존합니다.
         /// </summary>
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return await _cacheService.IsHealthyAsync();
+            // _cacheService.IsHealthyAsync에도 CancellationToken을 전달
+            return await _cacheService.IsHealthyAsync(cancellationToken);
         }
-
         #endregion
         /// <summary>
         /// ID로 권한을 조회합니다.
@@ -78,7 +79,7 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] 캐시 히트율 95% 목표, 미스 시 DB 조회 후 캐싱
         /// [왜] ID 기반 조회는 역할 관리 시 빈번하게 발생
         /// </summary>
-        public async Task<ServiceResult<PermissionDto>> GetByIdAsync(Guid id)
+        public async Task<ServiceResult<PermissionDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
@@ -90,19 +91,24 @@ namespace AuthHive.Auth.Services.Permissions
                     );
                 }
 
+                // 작업 시작 전에 취소 요청이 있었는지 확인합니다.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var cacheKey = $"{PermissionConstants.Cache.PermissionCacheKeyPrefix}id:{id}";
 
-                // GetOrSetAsync에 non-nullable 타입 보장
+                // GetOrSetAsync에 CancellationToken을 전달합니다.
                 var permission = await _cacheService.GetOrSetAsync<PermissionDto>(
                     cacheKey,
                     async () =>
                     {
-                        var dto = await LoadPermissionFromDatabaseAsync(id);
+                        // DB 조회 메서드에도 CancellationToken을 전달합니다.
+                        var dto = await LoadPermissionFromDatabaseAsync(id, cancellationToken);
                         if (dto == null)
                             throw new InvalidOperationException($"Permission {id} not found");
                         return dto;
                     },
-                    TimeSpan.FromSeconds(PermissionConstants.Cache.PermissionCacheTtl)
+                    TimeSpan.FromSeconds(PermissionConstants.Cache.PermissionCacheTtl),
+                    cancellationToken // ◀◀ GetOrSetAsync 자체에도 CancellationToken 전달
                 );
 
                 if (permission == null)
@@ -113,6 +119,11 @@ namespace AuthHive.Auth.Services.Permissions
 
                 return ServiceResult<PermissionDto>.Success(permission);
             }
+            catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
+            {
+                _logger.LogWarning("GetByIdAsync operation was cancelled for ID: {PermissionId}", id);
+                return ServiceResult<PermissionDto>.Failure("Operation was cancelled.", "CANCELLED");
+            }
             catch (InvalidOperationException)
             {
                 return ServiceResult<PermissionDto>.NotFound($"Permission with ID {id} not found");
@@ -120,10 +131,10 @@ namespace AuthHive.Auth.Services.Permissions
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving permission by ID: {PermissionId}", id);
-                return await FallbackToDatabase(id);
+                // Fallback 메서드에도 CancellationToken을 전달합니다.
+                return await FallbackToDatabase(id, cancellationToken); // ◀◀ 수정
             }
         }
-
         /// <summary>
         /// Scope로 권한을 조회합니다.
         /// 
@@ -131,7 +142,7 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] Scope 정규화 → 캐시 조회 → 미스 시 DB 조회
         /// [왜] "organization:read" 같은 Scope는 모든 조직 관련 API에서 검증
         /// </summary>
-        public async Task<ServiceResult<PermissionDto>> GetByScopeAsync(string scope)
+        public async Task<ServiceResult<PermissionDto>> GetByScopeAsync(string scope, CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
@@ -143,19 +154,25 @@ namespace AuthHive.Auth.Services.Permissions
                     );
                 }
 
+                // 작업 시작 전에 취소 요청이 있었는지 확인
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var normalizedScope = NormalizeScope(scope);
                 var cacheKey = $"{PermissionConstants.Cache.PermissionCacheKeyPrefix}scope:{normalizedScope}";
 
+                // GetOrSetAsync에 CancellationToken 전달
                 var permission = await _cacheService.GetOrSetAsync<PermissionDto>(
                     cacheKey,
                     async () =>
                     {
-                        var dto = await LoadPermissionByScopeFromDatabaseAsync(normalizedScope);
+                        // DB 조회 메서드에도 CancellationToken 전달
+                        var dto = await LoadPermissionByScopeFromDatabaseAsync(normalizedScope, cancellationToken);
                         if (dto == null)
                             throw new InvalidOperationException($"Permission with scope {scope} not found");
                         return dto;
                     },
-                    TimeSpan.FromSeconds(PermissionConstants.Cache.PermissionCacheTtl)
+                    TimeSpan.FromSeconds(PermissionConstants.Cache.PermissionCacheTtl),
+                    cancellationToken // ◀◀ GetOrSetAsync 자체에도 CancellationToken 전달
                 );
 
                 if (permission == null)
@@ -165,6 +182,11 @@ namespace AuthHive.Auth.Services.Permissions
                 }
 
                 return ServiceResult<PermissionDto>.Success(permission);
+            }
+            catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
+            {
+                _logger.LogWarning("GetByScopeAsync operation was cancelled for scope: {Scope}", scope);
+                return ServiceResult<PermissionDto>.Failure("Operation was cancelled.", "CANCELLED");
             }
             catch (InvalidOperationException)
             {
@@ -179,7 +201,6 @@ namespace AuthHive.Auth.Services.Permissions
                 );
             }
         }
-
         /// <summary>
         /// 전체 권한 트리를 조회합니다.
         /// 
@@ -187,16 +208,21 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] 전체 트리 빌드 → 캐싱 → 카테고리별 집계
         /// [왜] 트리 구성은 CPU 집약적 (평균 200ms 소요)
         /// </summary>
-        public async Task<ServiceResult<PermissionTreeResponse>> GetTreeAsync()
+        public async Task<ServiceResult<PermissionTreeResponse>> GetTreeAsync(CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
+                // 작업 시작 전에 취소 요청이 있었는지 확인합니다.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var cacheKey = $"{PermissionConstants.Cache.PermissionTreeCacheKeyPrefix}full";
 
                 var tree = await _cacheService.GetOrSetAsync(
                     cacheKey,
-                    async () => await BuildPermissionTreeAsync(),
-                    PermissionConstants.Cache.TreeCacheTtl  // TimeSpan 타입이므로 바로 사용
+                    // BuildPermissionTreeAsync에도 CancellationToken을 전달합니다.
+                    async () => await BuildPermissionTreeAsync(cancellationToken), // ◀◀ 수정
+                    PermissionConstants.Cache.TreeCacheTtl,
+                    cancellationToken // ◀◀ GetOrSetAsync 자체에도 CancellationToken 전달
                 );
 
                 if (tree == null)
@@ -210,9 +236,14 @@ namespace AuthHive.Auth.Services.Permissions
 
                 // 캐시 정보 설정
                 tree.CacheKey = cacheKey;
-                tree.CacheExpiresAt = DateTime.UtcNow.Add(PermissionConstants.Cache.TreeCacheTtl);  // Add() 사용
+                tree.CacheExpiresAt = DateTime.UtcNow.Add(PermissionConstants.Cache.TreeCacheTtl);
 
                 return ServiceResult<PermissionTreeResponse>.Success(tree);
+            }
+            catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
+            {
+                _logger.LogWarning("GetTreeAsync operation was cancelled.");
+                return ServiceResult<PermissionTreeResponse>.Failure("Operation was cancelled.", "CANCELLED");
             }
             catch (Exception ex)
             {
@@ -234,18 +265,22 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] 계층적 무효화 - 자신 + 트리
         /// [왜] 권한 변경은 즉시 반영되어야 보안 유지
         /// </summary>
-        public async Task InvalidatePermissionAsync(Guid permissionId)
+        public async Task InvalidatePermissionAsync(Guid permissionId, CancellationToken cancellationToken = default) 
         {
             try
             {
                 _logger.LogInformation("Invalidating cache for permission: {PermissionId}", permissionId);
+
+                // 작업 시작 전에 취소 요청이 있었는지 확인합니다.
+                cancellationToken.ThrowIfCancellationRequested();
 
                 var permission = await _permissionRepository.GetWithRelatedDataAsync(
                     permissionId,
                     includeParent: false,
                     includeChildren: false,
                     includeRoles: false,
-                    includeValidationLogs: false
+                    includeValidationLogs: false,
+                    cancellationToken // ◀◀ Repository 호출에 CancellationToken 전달
                 );
 
                 if (permission == null)
@@ -256,30 +291,33 @@ namespace AuthHive.Auth.Services.Permissions
 
                 // ID 캐시 제거
                 var idCacheKey = $"{PermissionConstants.Cache.PermissionCacheKeyPrefix}id:{permissionId}";
-                await _cacheService.RemoveAsync(idCacheKey);
+                await _cacheService.RemoveAsync(idCacheKey, cancellationToken); // ◀◀ 캐시 제거에 CancellationToken 전달
 
                 // Scope 캐시 제거
                 if (!string.IsNullOrEmpty(permission.Scope))
                 {
                     var normalizedScope = NormalizeScope(permission.Scope);
                     var scopeCacheKey = $"{PermissionConstants.Cache.PermissionCacheKeyPrefix}scope:{normalizedScope}";
-                    await _cacheService.RemoveAsync(scopeCacheKey);
+                    await _cacheService.RemoveAsync(scopeCacheKey, cancellationToken); // ◀◀ 캐시 제거에 CancellationToken 전달
                 }
 
                 // 트리 캐시 무효화
-                await _cacheService.RemoveByPatternAsync($"{PermissionConstants.Cache.PermissionTreeCacheKeyPrefix}*");
+                await _cacheService.RemoveByPatternAsync($"{PermissionConstants.Cache.PermissionTreeCacheKeyPrefix}*", cancellationToken); // ◀◀ 캐시 제거에 CancellationToken 전달
 
                 _logger.LogInformation(
                     "Cache invalidated for permission: {PermissionId}, Scope: {Scope}",
                     permissionId, permission.Scope
                 );
             }
+            catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
+            {
+                _logger.LogWarning("Cache invalidation was cancelled for permission: {PermissionId}", permissionId);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error invalidating permission cache: {PermissionId}", permissionId);
             }
         }
-
         /// <summary>
         /// 모든 권한 캐시를 새로고침합니다.
         /// 
@@ -287,87 +325,65 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] 패턴 매칭 삭제 → 자주 사용 권한 Warm-up
         /// [왜] 일관성 보장 및 Cold Start 방지
         /// </summary>
-        public async Task RefreshAllAsync()
+        public async Task RefreshAllAsync(CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
                 _logger.LogInformation("Refreshing all permission caches");
 
+                // 작업 시작 전에 취소 요청이 있었는지 확인합니다.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // 모든 권한 캐시 제거
-                await _cacheService.RemoveByPatternAsync($"{PermissionConstants.Cache.PermissionCacheKeyPrefix}*");
+                await _cacheService.RemoveByPatternAsync($"{PermissionConstants.Cache.PermissionCacheKeyPrefix}*", cancellationToken); // ◀◀ 수정
 
                 // Warm-up
-                await WarmupFrequentlyUsedPermissionsAsync();
+                await WarmupFrequentlyUsedPermissionsAsync(cancellationToken); // ◀◀ 수정
 
                 // 트리 재생성
-                await GetTreeAsync();
+                await GetTreeAsync(cancellationToken); // ◀◀ 수정
 
                 _logger.LogInformation("All permission caches refreshed successfully");
+            }
+            catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
+            {
+                _logger.LogWarning("Permission cache refresh was cancelled.");
+                // 취소된 경우 예외를 다시 던지지 않아 정상적인 중단으로 처리합니다.
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error refreshing all permission caches");
-                throw;
+                throw; // 취소가 아닌 다른 예외는 다시 던져서 문제를 알립니다.
             }
         }
 
         #endregion
 
         #region Private Helper Methods
-
-        private async Task<PermissionDto?> LoadPermissionFromDatabaseAsync(Guid id)
+        private async Task<PermissionDto?> LoadPermissionFromDatabaseAsync(
+            Guid id,
+            CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             var permission = await _permissionRepository.GetWithRelatedDataAsync(
                 id,
                 includeParent: true,
                 includeChildren: false,
                 includeRoles: false,
-                includeValidationLogs: false
-            );
+                includeValidationLogs: false,
+                cancellationToken); // ◀◀ CancellationToken 전달
+
+            return permission != null ? MapToDto(permission) : null;
+        }
+        private async Task<PermissionDto?> LoadPermissionByScopeFromDatabaseAsync(
+            string normalizedScope,
+            CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
+        {
+            // Repository 호출 시 CancellationToken을 전달합니다.
+            var permission = await _permissionRepository.GetByScopeAsync(normalizedScope, cancellationToken); // ◀◀ 수정
 
             return permission != null ? MapToDto(permission) : null;
         }
 
-        private async Task<PermissionDto?> LoadPermissionByScopeFromDatabaseAsync(string normalizedScope)
-        {
-            var permission = await _permissionRepository.GetByScopeAsync(normalizedScope);
-            return permission != null ? MapToDto(permission) : null;
-        }
-
-        private async Task<PermissionTreeResponse> BuildPermissionTreeAsync()
-        {
-            var allPermissions = await _permissionRepository.GetPermissionTreeAsync(
-                rootPermissionId: null,
-                maxDepth: null
-            );
-
-            var permissionList = allPermissions.ToList();
-
-            var response = new PermissionTreeResponse
-            {
-                TotalNodes = permissionList.Count,
-                ActiveCount = permissionList.Count(p => p.IsActive),
-                SystemPermissionCount = permissionList.Count(p => p.IsSystemPermission),
-                WildcardPermissionCount = permissionList.Count(p => p.HasWildcard),
-                Nodes = BuildTreeNodes(permissionList, null, 0),
-                GeneratedAt = DateTime.UtcNow
-            };
-
-            // 카테고리별 집계
-            response.CountByCategory = permissionList
-                .GroupBy(p => p.Category)
-                .ToDictionary(g => g.Key, g => g.Count());
-
-            // 레벨별 집계
-            response.CountByLevel = permissionList
-                .GroupBy(p => p.Level)
-                .ToDictionary(g => g.Key, g => g.Count());
-
-            // 최대 깊이 계산
-            response.MaxDepth = CalculateMaxDepth(response.Nodes);
-
-            return response;
-        }
 
         private List<PermissionNode> BuildTreeNodes(List<PermissionEntity> allPermissions, Guid? parentId, int depth)
         {
@@ -409,12 +425,16 @@ namespace AuthHive.Auth.Services.Permissions
             return scope.Trim().ToLowerInvariant();
         }
 
-        private async Task<ServiceResult<PermissionDto>> FallbackToDatabase(Guid id)
+        private async Task<ServiceResult<PermissionDto>> FallbackToDatabase(
+     Guid id,
+     CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
                 _logger.LogWarning("Falling back to database for permission: {PermissionId}", id);
-                var permission = await _permissionRepository.GetByIdAsync(id);
+
+                // Repository 호출 시 CancellationToken을 전달합니다.
+                var permission = await _permissionRepository.GetByIdAsync(id, cancellationToken); // ◀◀ 수정
 
                 if (permission == null)
                 {
@@ -423,6 +443,11 @@ namespace AuthHive.Auth.Services.Permissions
 
                 var dto = MapToDto(permission);
                 return ServiceResult<PermissionDto>.Success(dto);
+            }
+            catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
+            {
+                _logger.LogWarning("FallbackToDatabase operation was cancelled for ID: {PermissionId}", id);
+                return ServiceResult<PermissionDto>.Failure("Operation was cancelled.", "CANCELLED");
             }
             catch (Exception ex)
             {
@@ -434,7 +459,7 @@ namespace AuthHive.Auth.Services.Permissions
             }
         }
 
-        private async Task WarmupFrequentlyUsedPermissionsAsync()
+        private async Task WarmupFrequentlyUsedPermissionsAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -448,13 +473,14 @@ namespace AuthHive.Auth.Services.Permissions
                 // 추가 핵심 권한들
                 var additionalScopes = new[]
                 {
-                    "organization:read",
-                    "organization:write",
-                    "user:read",
-                    "user:manage",
-                    "application:read",
-                    "billing:read"
-                };
+            "organization:read",
+            "organization:write",
+
+            "user:read",
+            "user:manage",
+            "application:read",
+            "billing:read"
+        };
 
                 var allScopes = coreScopes.Concat(additionalScopes).Distinct();
 
@@ -462,10 +488,15 @@ namespace AuthHive.Auth.Services.Permissions
                 var semaphore = new SemaphoreSlim(5);
                 var tasks = allScopes.Select(async scope =>
                 {
-                    await semaphore.WaitAsync();
+                    // 본격적인 작업 시작 전에 취소 요청이 있었는지 확인합니다.
+                    cancellationToken.ThrowIfCancellationRequested(); // ◀◀ 수정
+
+                    // WaitAsync에 CancellationToken을 전달합니다.
+                    await semaphore.WaitAsync(cancellationToken); // ◀◀ 수정
                     try
                     {
-                        await GetByScopeAsync(scope);
+                        // GetByScopeAsync에도 CancellationToken을 전달합니다.
+                        await GetByScopeAsync(scope, cancellationToken); // ◀◀ 수정
                     }
                     finally
                     {
@@ -477,11 +508,17 @@ namespace AuthHive.Auth.Services.Permissions
 
                 _logger.LogInformation("Warmup completed for {Count} core permissions", allScopes.Count());
             }
+            catch (OperationCanceledException) // ◀◀ 추가
+            {
+                // 작업 취소는 오류가 아니므로 경고 로그만 남깁니다.
+                _logger.LogWarning("Cache warmup was cancelled.");
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Error during cache warmup");
             }
         }
+
 
         private PermissionDto MapToDto(PermissionEntity entity)
         {
@@ -593,7 +630,41 @@ namespace AuthHive.Auth.Services.Permissions
 
             return maxDepth;
         }
+        private async Task<PermissionTreeResponse> BuildPermissionTreeAsync(
+            CancellationToken cancellationToken = default) // ◀◀ CancellationToken 추가
+        {
+            var allPermissions = await _permissionRepository.GetPermissionTreeAsync(
+                rootPermissionId: null,
+                maxDepth: null,
+                cancellationToken); // ◀◀ CancellationToken 전달
 
+            var permissionList = allPermissions.ToList();
+
+            var response = new PermissionTreeResponse
+            {
+                TotalNodes = permissionList.Count,
+                ActiveCount = permissionList.Count(p => p.IsActive),
+                SystemPermissionCount = permissionList.Count(p => p.IsSystemPermission),
+                WildcardPermissionCount = permissionList.Count(p => p.HasWildcard),
+                Nodes = BuildTreeNodes(permissionList, null, 0),
+                GeneratedAt = DateTime.UtcNow
+            };
+
+            // 카테고리별 집계
+            response.CountByCategory = permissionList
+                .GroupBy(p => p.Category)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            // 레벨별 집계
+            response.CountByLevel = permissionList
+                .GroupBy(p => p.Level)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            // 최대 깊이 계산
+            response.MaxDepth = CalculateMaxDepth(response.Nodes);
+
+            return response;
+        }
         private string BuildPath(List<PermissionEntity> allPermissions, PermissionEntity permission)
         {
             var path = new List<string> { permission.Scope };
@@ -616,57 +687,6 @@ namespace AuthHive.Auth.Services.Permissions
         }
 
         #endregion
-
-        #region ICacheService Implementation
-
-        public Task<T?> GetAsync<T>(string key) where T : class
-            => _cacheService.GetAsync<T>(key);
-
-        public Task SetAsync<T>(string key, T value, TimeSpan? expiration = null) where T : class
-            => _cacheService.SetAsync(key, value, expiration);
-
-        public Task<bool> ExistsAsync(string key)
-            => _cacheService.ExistsAsync(key);
-
-        public Task RemoveAsync(string key)
-            => _cacheService.RemoveAsync(key);
-
-        public Task RemoveByPatternAsync(string pattern)
-            => _cacheService.RemoveByPatternAsync(pattern);
-
-        public Task<T> GetOrSetAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null) where T : class
-            => _cacheService.GetOrSetAsync(key, factory, expiration);
-
-        public Task<long> IncrementAsync(string key, long value = 1)
-            => _cacheService.IncrementAsync(key, value);
-
-        public Task<long> DecrementAsync(string key, long value = 1)
-            => _cacheService.DecrementAsync(key, value);
-
-        public Task<bool> AcquireLockAsync(string key, string value, TimeSpan expiration)
-            => _cacheService.AcquireLockAsync(key, value, expiration);
-
-        public Task<bool> ReleaseLockAsync(string key, string value)
-            => _cacheService.ReleaseLockAsync(key, value);
-
-        public Task<bool> ExtendLockAsync(string key, string value, TimeSpan expiration)
-            => _cacheService.ExtendLockAsync(key, value, expiration);
-
-        public Task<IDictionary<string, T?>> GetMultipleAsync<T>(IEnumerable<string> keys) where T : class
-            => _cacheService.GetMultipleAsync<T>(keys);
-
-        public Task SetMultipleAsync<T>(IDictionary<string, T> items, TimeSpan? expiration = null) where T : class
-            => _cacheService.SetMultipleAsync(items, expiration);
-
-        public Task RemoveMultipleAsync(IEnumerable<string> keys)
-            => _cacheService.RemoveMultipleAsync(keys);
-
-        public Task FlushAsync()
-            => _cacheService.FlushAsync();
-
-        public Task<CacheStatistics> GetStatisticsAsync()
-            => _cacheService.GetStatisticsAsync();
-
-        #endregion
+      
     }
 }

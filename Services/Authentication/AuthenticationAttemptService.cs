@@ -124,21 +124,36 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// Check service health status
         /// </summary>
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // 리포지토리 접근성 확인
-                await _attemptLogRepository.CountAsync();
+                // 1. 리포지토리 접근성 확인 (DB I/O)
+                // 🌟 CountAsync에 cancellationToken을 전달합니다. (IRepository 수정 가정)
+                // CountAsync(predicate, cancellationToken) 형태이므로, predicate는 null로 명시합니다.
+                await _attemptLogRepository.CountAsync(predicate: null, cancellationToken: cancellationToken);
 
-                // 캐시 동작 확인
+                // 2. 캐시 동작 확인 (Cache I/O)
                 string healthCheckKey = "health_check";
-                await _cacheService.SetStringAsync(healthCheckKey, true.ToString(), TimeSpan.FromSeconds(10));
+                TimeSpan cacheDuration = TimeSpan.FromSeconds(10);
 
-                // Remove를 await RemoveAsync로 수정
-                await _cacheService.RemoveAsync(healthCheckKey);
+                // 🌟 SetStringAsync에 CancellationToken을 전달하고, 인자 이름을 'expiration'으로 수정합니다.
+                await _cacheService.SetStringAsync(
+                    key: healthCheckKey,
+                    value: true.ToString(),
+                    expiration: cacheDuration, // 👈 인자 이름 수정
+                    cancellationToken: cancellationToken); // 👈 CancellationToken 전달
+
+                // 3. RemoveAsync 확인
+                // 🌟 RemoveAsync에도 CancellationToken을 전달합니다.
+                await _cacheService.RemoveAsync(healthCheckKey, cancellationToken);
 
                 return true;
+            }
+            catch (OperationCanceledException)
+            {
+                // 취소 요청 시에는 헬스 체크 실패가 아닌 '취소'로 처리될 수 있습니다.
+                return false;
             }
             catch (Exception ex)
             {
@@ -147,11 +162,10 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// Initialize service
-        /// </summary>
-        public Task InitializeAsync()
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
+            // CancellationToken은 이 메서드에서 사용되지 않지만, 인터페이스 구현을 위해 추가합니다.
             _logger.LogInformation("AuthenticationAttemptService initialized");
             return Task.CompletedTask;
         }

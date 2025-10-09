@@ -31,6 +31,7 @@ namespace AuthHive.Auth.Services.Authorization
 {
     public class PermissionValidationService : IPermissionValidationService
     {
+        private readonly IPlanRestrictionService _planRestrictionService;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IUserApplicationAccessRepository _accessRepository;
         private readonly IOrganizationRepository _organizationRepository;
@@ -48,6 +49,7 @@ namespace AuthHive.Auth.Services.Authorization
         }
 
         public PermissionValidationService(
+            IPlanRestrictionService planRestrictionService,
             IUnitOfWork unitOfWork,
             IUserApplicationAccessRepository accessRepository,
             IOrganizationRepository organizationRepository,
@@ -58,6 +60,7 @@ namespace AuthHive.Auth.Services.Authorization
             IDateTimeProvider dateTimeProvider,
             ILogger<PermissionValidationService> logger)
         {
+            _planRestrictionService = planRestrictionService;
             _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
             _accessRepository = accessRepository ?? throw new ArgumentNullException(nameof(accessRepository));
             _organizationRepository = organizationRepository ?? throw new ArgumentNullException(nameof(organizationRepository));
@@ -68,8 +71,9 @@ namespace AuthHive.Auth.Services.Authorization
             _dateTimeProvider = dateTimeProvider ?? throw new ArgumentNullException(nameof(dateTimeProvider));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
+        #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -79,17 +83,21 @@ namespace AuthHive.Auth.Services.Authorization
                     {
                         try
                         {
-                            await _roleService.GetPermissionsAsync(Guid.Empty, false);
+                            await _roleService.GetPermissionsAsync(Guid.Empty, false, cancellationToken);
                             return true;
                         }
                         catch { return false; }
-                    }),
-                    _cacheService.IsHealthyAsync(),
-                    _auditService.IsHealthyAsync()
+                    }, cancellationToken),
+                    _cacheService.IsHealthyAsync(cancellationToken),
+                    _auditService.IsHealthyAsync(cancellationToken)
                 };
 
                 var results = await Task.WhenAll(tasks);
                 return results.All(r => r);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
             }
             catch (Exception ex)
             {
@@ -98,14 +106,15 @@ namespace AuthHive.Auth.Services.Authorization
             }
         }
 
-        public async Task InitializeAsync()
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("PermissionValidationService initialized at {Time}",
                 _dateTimeProvider.UtcNow);
 
-            await WarmUpCacheAsync();
+            await _planRestrictionService.WarmUpCacheAsync(cancellationToken);
         }
 
+        #endregion
         public async Task<ServiceResult<bool>> HasAllPermissionsAsync(PermissionValidationRequest request)
         {
             var validationResult = await ValidatePermissionsAsync(request);
@@ -672,31 +681,6 @@ namespace AuthHive.Auth.Services.Authorization
                 "standard" => TimeSpan.FromMinutes(10),
                 _ => TimeSpan.FromMinutes(5)
             };
-        }
-
-        private async Task WarmUpCacheAsync()
-        {
-            try
-            {
-                _logger.LogDebug("Warming up permission cache...");
-
-                // 애플리케이션 시작 시 모든 요금제 등급에 대한 제한 사항을 미리 캐시에 로드합니다.
-                // 이렇게 하면 첫 권한 요청 시 DB 조회 없이 캐시에서 바로 데이터를 가져올 수 있습니다.
-                var pricingTiers = new[] { "free", "standard", "business", "enterprise" };
-
-                var warmUpTasks = pricingTiers.Select(tier =>
-                            GetPlanRestrictionsAsync(tier, Guid.Empty) // Guid.Empty는 조직 특정 제한이 아닌, 기본 템플릿을 의미합니다.
-                        );
-
-                // 모든 요금제의 캐싱 작업이 완료될 때까지 비동기적으로 기다립니다.
-                await Task.WhenAll(warmUpTasks);
-
-                _logger.LogInformation("Permission cache warmed up successfully for {Count} pricing tiers.", pricingTiers.Length);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to warm up permission cache");
-            }
         }
 
         private async Task LogSecurityEventAsync(

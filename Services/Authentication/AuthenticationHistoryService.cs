@@ -86,14 +86,27 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region IService 구현
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                if (!_cacheService.IsHealthyAsync().Result) return false;
-                await _attemptRepository.CountAsync();
-                await _auditRepository.CountAsync();
+                // 1. Deadlock 위험 제거: .Result 대신 await를 사용하고 CancellationToken을 전달합니다.
+                if (!await _cacheService.IsHealthyAsync(cancellationToken))
+                {
+                    return false;
+                }
+
+                // 2. Repository 접근성 확인 (DB I/O)
+                // CancellationToken을 전달하고, predicate 인수를 명시적으로 null로 전달하여 CS1503/CS1739 오류 방지
+                await _attemptRepository.CountAsync(predicate: null, cancellationToken);
+                await _auditRepository.CountAsync(predicate: null, cancellationToken);
+
                 return true;
+            }
+            catch (OperationCanceledException)
+            {
+                // 취소 요청 시에는 헬스 체크 실패가 아닌 '취소'로 처리됩니다.
+                return false;
             }
             catch (Exception ex)
             {
@@ -102,12 +115,11 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("AuthenticationHistoryService initialized");
-            return _cacheService.InitializeAsync();
+            return _cacheService.InitializeAsync(cancellationToken);
         }
-
         #endregion
 
         #region 인증 시도 기록

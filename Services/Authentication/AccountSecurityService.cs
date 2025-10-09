@@ -702,20 +702,30 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                return await _userRepository.CountAsync() >= 0;
+                await _userRepository.CountAsync(
+                   predicate: null, // 필터링 조건 (없으므로 null)
+                   cancellationToken: cancellationToken);
+
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                // 취소 요청 시에는 비정상 상태로 간주
+                return false;
             }
             catch (Exception ex)
             {
+                // DB 연결 실패 등의 일반적인 예외 처리
                 _logger.LogWarning(ex, "AccountSecurityService health check failed.");
                 return false;
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // ◀◀ CancellationToken 추가
         {
             _logger.LogInformation("AccountSecurityService initialized.");
             return Task.CompletedTask;
