@@ -50,18 +50,23 @@ namespace AuthHive.Auth.Handlers.User
         }
 
         #region IService Implementation
-        public async Task InitializeAsync()
+        // UserActivityEventHandler.cs
+
+        public async Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
-            await WarmUpActivityRulesAsync();
+            // Pass the token to the long-running async operation
+            await WarmUpActivityRulesAsync(cancellationToken);
+
             _logger.LogInformation("UserActivityEventHandler initialized");
+            // No need to return Task.CompletedTask here, as the method is already async due to the await above.
         }
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
-            return IsEnabled && await _cacheService.IsHealthyAsync();
+            // Pass the token to the dependency's health check
+            return IsEnabled && await _cacheService.IsHealthyAsync(cancellationToken);
         }
-
-        private async Task WarmUpActivityRulesAsync()
+        private async Task WarmUpActivityRulesAsync(CancellationToken cancellationToken = default)
         {
             try
             {

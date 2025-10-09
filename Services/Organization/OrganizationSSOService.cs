@@ -64,25 +64,30 @@ namespace AuthHive.Auth.Services.Organization
         }
 
         #region IService Implementation
+        // OrganizationSSOService.cs
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                await _ssoRepository.CountAsync();
+
+                await _ssoRepository.CountAsync(null, cancellationToken);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                // Log the exception for diagnostics (added ex argument)
+                _logger.LogError(ex, "OrganizationSSOService health check failed");
                 return false;
             }
         }
 
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) 
         {
             _logger.LogInformation("OrganizationSSOService 초기화 시작");
-            await Task.CompletedTask;
             _logger.LogInformation("OrganizationSSOService 초기화 완료");
+            // Direct return avoids the unnecessary async state machine overhead.
+            return Task.CompletedTask;
         }
 
         #endregion
@@ -157,7 +162,7 @@ namespace AuthHive.Auth.Services.Organization
                 return ServiceResult<OrganizationSSOResponse>.Failure($"Failed to configure SSO: {ex.Message}");
             }
         }
-        public async Task<ServiceResult<AuthenticationOutcome>> ProcessSsoResponseAsync(Guid organizationId, string samlResponse)
+        public async Task<ServiceResult<AuthenticationOutcome>> ProcessSsoResponseAsync(Guid organizationId, string samlResponse, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -216,7 +221,7 @@ namespace AuthHive.Auth.Services.Organization
                 }
 
                 // 4. ConnectedId를 찾거나 생성합니다.
-                var connectedIdResult = await _connectedIdService.GetOrCreateAsync(user.Id, organizationId);
+                var connectedIdResult = await _connectedIdService.GetOrCreateAsync(user.Id, organizationId, cancellationToken);
                 if (!connectedIdResult.IsSuccess || connectedIdResult.Data == null)
                 {
                     return ServiceResult<AuthenticationOutcome>.Failure("Failed to get or create a connection for the user to the organization.", "CONNECTED_ID_ERROR");

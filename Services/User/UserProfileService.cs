@@ -105,14 +105,13 @@ namespace AuthHive.Auth.Services.User
         }
 
         #region IService Implementation
-
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                await _profileRepository.CountAsync();
-                await _cacheService.ExistsAsync("health:check"); // GetAsync 보다 ExistsAsync가 더 가벼움
-                return await _eventHandler.IsHealthyAsync(); // 🟢 FIX: IService의 표준 메서드 호출
+                await _profileRepository.AnyAsync(p => true, cancellationToken);
+                await _cacheService.ExistsAsync("health:check", cancellationToken); // GetAsync보다 ExistsAsync가 더 가벼움
+                return await _eventHandler.IsHealthyAsync(cancellationToken);  // 🟢 FIX: IService의 표준 메서드 호출
             }
             catch (Exception ex)
             {
@@ -121,14 +120,15 @@ namespace AuthHive.Auth.Services.User
             }
         }
 
-        public async Task InitializeAsync()
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             var initTime = _dateTimeProvider.UtcNow;
             _logger.LogInformation("UserProfileService initializing at {Time}", initTime);
-            await WarmupCacheAsync();
-            await _eventHandler.InitializeAsync();
+            await WarmupCacheAsync(cancellationToken);
+            await _eventHandler.InitializeAsync(cancellationToken);
             _logger.LogInformation("UserProfileService initialized successfully at {Time}", initTime);
         }
+
 
         #endregion
 
@@ -835,7 +835,7 @@ namespace AuthHive.Auth.Services.User
             }
         }
 
-        private async Task WarmupCacheAsync()
+        private async Task WarmupCacheAsync(CancellationToken cancellationToken = default)
         {
             try
             {

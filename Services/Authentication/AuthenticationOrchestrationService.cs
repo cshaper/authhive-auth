@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Requests;
 using AuthHive.Core.Models.Auth.Authentication.Responses;
@@ -34,6 +35,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IConnectedIdService _connectedIdService;
         private readonly IAuthenticationCacheService _authCacheService;
         private readonly ILogger<AuthenticationOrchestrationService> _logger;
+        private readonly IDateTimeProvider _dateTimeProvider;
 
         public AuthenticationOrchestrationService(
             IPasswordService passwordService,
@@ -46,7 +48,8 @@ namespace AuthHive.Auth.Services.Authentication
             ISessionService sessionService,
             IConnectedIdService connectedIdService,
             IAuthenticationCacheService authCacheService,
-            ILogger<AuthenticationOrchestrationService> logger)
+            ILogger<AuthenticationOrchestrationService> logger,
+            IDateTimeProvider dateTimeProvider)
         {
             _passwordService = passwordService;
             _socialAuthService = socialAuthService;
@@ -59,16 +62,24 @@ namespace AuthHive.Auth.Services.Authentication
             _connectedIdService = connectedIdService;
             _authCacheService = authCacheService;
             _logger = logger;
+            _dateTimeProvider = dateTimeProvider;
         }
 
         #region IService Implementation
-        public Task<bool> IsHealthyAsync() => Task.FromResult(true);
-        public Task InitializeAsync()
+
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            _logger.LogInformation("AuthenticationOrchestrationService initialized");
+            return Task.FromResult(true);
+        }
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            _logger.LogInformation("AuthenticationOrchestrationService initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
+
         #endregion
+
 
         #region Main Authentication Flow
         public async Task<ServiceResult<AuthenticationResponse>> AuthenticateAsync(AuthenticationRequest request)

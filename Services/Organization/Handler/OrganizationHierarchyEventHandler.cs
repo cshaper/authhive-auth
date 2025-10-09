@@ -73,21 +73,32 @@ namespace AuthHive.Auth.Organization.Handlers
             _logger = logger;
             _eventBus = eventBus;
         }
-
         #region IService Implementation
 
-        public Task InitializeAsync()
+        // Add CancellationToken to comply with async service interface standards.
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("OrganizationHierarchyEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
+            // The method is already optimized by returning Task.CompletedTask directly.
             return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        // Add CancellationToken and run health checks concurrently for performance.
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync();
+            // Start both health checks concurrently.
+            var cacheTask = _cacheService.IsHealthyAsync(cancellationToken);
+            var auditTask = _auditService.IsHealthyAsync(cancellationToken);
+
+            // Wait for both to complete. Task.WhenAll also respects the CancellationToken.
+            await Task.WhenAll(cacheTask, auditTask);
+
+            // Combine the results.
+            return cacheTask.Result && auditTask.Result;
         }
 
         #endregion
+
 
         #region IOrganizationHierarchyEventHandler Implementation
 

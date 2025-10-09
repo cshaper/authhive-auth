@@ -69,11 +69,14 @@ namespace AuthHive.Auth.Services.Organization
 
         #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        // OrganizationMembershipService.cs
+
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                return await _context.Database.CanConnectAsync();
+                // Pass the token to the underlying database connection check.
+                return await _context.Database.CanConnectAsync(cancellationToken);
             }
             catch (Exception ex)
             {
@@ -82,16 +85,16 @@ namespace AuthHive.Auth.Services.Organization
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
+            // The method body is already optimized for returning a completed task.
             _logger.LogInformation("OrganizationMembershipService initialized");
             return Task.CompletedTask;
         }
-
         #endregion
 
         #region 멤버 초대 및 수락
-        
+
         public async Task<ServiceResult<OrganizationMembershipDto>> InviteMemberAsync(
             Guid organizationId,
             string email,
@@ -124,7 +127,7 @@ namespace AuthHive.Auth.Services.Organization
                     var updatedDto = _mapper.Map<OrganizationMembershipDto>(existingInvite);
                     return ServiceResult<OrganizationMembershipDto>.Success(updatedDto, "Invitation has been resent");
                 }
-                
+
                 var existingConnected = await _context.ConnectedIds
                     .Include(c => c.User)
                     .FirstOrDefaultAsync(c => c.User != null && c.User.Email == email && !c.User.IsDeleted);
@@ -137,7 +140,7 @@ namespace AuthHive.Auth.Services.Organization
                         return ServiceResult<OrganizationMembershipDto>.Failure("User is already an active member of this organization");
                     }
                 }
-                
+
                 Guid targetConnectedId;
                 if (existingConnected == null)
                 {
@@ -167,7 +170,7 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     targetConnectedId = existingConnected.Id;
                 }
-                
+
                 var invitationToken = GenerateInvitationToken();
                 var membership = new OrganizationMembership
                 {
@@ -228,7 +231,7 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     return ServiceResult<OrganizationMembershipDto>.Failure("Invitation has already been used or is invalid");
                 }
-                
+
                 membership.ConnectedId = connectedId;
                 membership.Status = OrganizationMembershipStatus.Active;
                 membership.AcceptedAt = DateTime.UtcNow;
@@ -238,7 +241,7 @@ namespace AuthHive.Auth.Services.Organization
 
                 await _membershipRepository.UpdateAsync(membership);
                 await _unitOfWork.SaveChangesAsync();
-                
+
                 InvalidateOrganizationMembersCache(membership.OrganizationId);
                 InvalidateMemberCache(membership.OrganizationId, connectedId);
 
@@ -286,7 +289,7 @@ namespace AuthHive.Auth.Services.Organization
                 }
 
                 var totalCount = await query.CountAsync();
-                
+
                 var items = await query
                     .OrderBy(m => m.JoinedAt)
                     .Skip((pageNumber - 1) * pageSize)
@@ -304,7 +307,7 @@ namespace AuthHive.Auth.Services.Organization
                 return ServiceResult<PagedResult<OrganizationMembershipDto>>.Failure("Failed to retrieve members");
             }
         }
-        
+
         public async Task<ServiceResult<OrganizationMembershipDto>> GetMemberAsync(
             Guid organizationId,
             Guid connectedId)
@@ -355,11 +358,11 @@ namespace AuthHive.Auth.Services.Organization
                 return ServiceResult<OrganizationMembershipDto>.Failure("Failed to retrieve member");
             }
         }
-        
+
         #endregion
 
         #region 멤버 역할 및 상태 관리
-        
+
         public async Task<ServiceResult<bool>> ChangeMemberRoleAsync(
             Guid organizationId,
             Guid targetConnectedId,
@@ -487,7 +490,7 @@ namespace AuthHive.Auth.Services.Organization
                 return ServiceResult<bool>.Failure("Failed to remove member");
             }
         }
-        
+
         public async Task<bool> UpdateMemberStatusAsync(
             Guid organizationId,
             Guid connectedId,
@@ -497,9 +500,9 @@ namespace AuthHive.Auth.Services.Organization
             var result = await ChangeMemberStatusAsync(organizationId, connectedId, newStatus, "Status updated via simplified method.", updatedBy);
             return result.IsSuccess && result.Data;
         }
-        
+
         #endregion
-        
+
         #region 일괄 작업
 
         public async Task<ServiceResult<BulkOperationResult>> BulkInviteMembersAsync(
@@ -527,7 +530,7 @@ namespace AuthHive.Auth.Services.Organization
                         if (!string.IsNullOrEmpty(memberInfo.JobTitle) || !string.IsNullOrEmpty(memberInfo.Department))
                         {
                             var profile = await _context.OrganizationMemberProfiles
-                                .FirstOrDefaultAsync(p => p.OrganizationId == organizationId && 
+                                .FirstOrDefaultAsync(p => p.OrganizationId == organizationId &&
                                                         p.ConnectedId == inviteResult.Data.ConnectedId);
 
                             if (profile == null)
@@ -623,9 +626,9 @@ namespace AuthHive.Auth.Services.Organization
                         KeyPermissions = new List<string>(),
                         // ✨ 6. [오류 수정] CS0019: '==' 및 '!=' 연산자를 'OrganizationMemberRole' 및 'string'에 적용할 수 없음
                         // .ToString() 없이 Enum 값을 직접 비교합니다.
-                        HasAdminPermissions = membership.MemberRole == OrganizationMemberRole.Admin || 
+                        HasAdminPermissions = membership.MemberRole == OrganizationMemberRole.Admin ||
                                               membership.MemberRole == OrganizationMemberRole.Owner,
-                        HasWritePermissions = membership.MemberRole != OrganizationMemberRole.Member && 
+                        HasWritePermissions = membership.MemberRole != OrganizationMemberRole.Member &&
                                               membership.MemberRole != OrganizationMemberRole.Guest
                     }
                 };
@@ -798,16 +801,16 @@ namespace AuthHive.Auth.Services.Organization
 
                 var allMembers = await _membershipRepository.GetMembersAsync(organizationId, true);
                 var activeMembers = allMembers.Where(m => m.Status == OrganizationMembershipStatus.Active).ToList();
-                
+
                 var thisMonthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1);
                 var lastMonthStart = thisMonthStart.AddMonths(-1);
-                
+
                 var lastMonthMemberCount = allMembers
                     .Count(m => m.JoinedAt < thisMonthStart && m.JoinedAt >= lastMonthStart);
-                
+
                 var newMembersThisMonthCount = allMembers
                     .Count(m => m.JoinedAt >= thisMonthStart);
-                
+
                 decimal growthRate = 0;
                 if (lastMonthMemberCount > 0)
                 {

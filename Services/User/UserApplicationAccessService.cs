@@ -65,25 +65,26 @@ namespace AuthHive.Auth.Services.User
         }
 
         #region IService Implementation
-        public Task InitializeAsync()
-        {
-            _logger.LogInformation("UserApplicationAccessService initialized.");
-            return Task.CompletedTask;
-        }
+public Task InitializeAsync(CancellationToken cancellationToken = default)
+{
+    _logger.LogInformation("UserApplicationAccessService initialized.");
+    return Task.CompletedTask;
+}
 
-        public async Task<bool> IsHealthyAsync()
-        {
-            try
-            {
-                await _accessRepository.ExistsAsync(Guid.Empty, Guid.Empty);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "UserApplicationAccessService health check failed.");
-                return false;
-            }
-        }
+public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+{
+    try
+    {
+        await _accessRepository.ExistsAsync(Guid.Empty, Guid.Empty, cancellationToken);
+        return true;
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "UserApplicationAccessService health check failed.");
+        return false;
+    }
+}
+
         #endregion
         
         #region 접근 권한 CRUD

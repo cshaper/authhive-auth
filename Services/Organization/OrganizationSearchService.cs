@@ -51,13 +51,15 @@ namespace AuthHive.Auth.Services.Organization
         }
 
         #region IService Implementation
+        // OrganizationSearchService.cs
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                var testQuery = await _searchRepository.GetCountByStatusAsync();
+                var testQuery = await _searchRepository.GetCountByStatusAsync(cancellationToken);
                 return true;
+
             }
             catch (Exception ex)
             {
@@ -65,12 +67,12 @@ namespace AuthHive.Auth.Services.Organization
                 return false;
             }
         }
-
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("Initializing OrganizationSearchService");
-            await Task.CompletedTask;
             _logger.LogInformation("OrganizationSearchService initialized successfully");
+            // Directly return the completed task. The log messages run synchronously before this return.
+            return Task.CompletedTask;
         }
 
         #endregion
@@ -88,7 +90,7 @@ namespace AuthHive.Auth.Services.Organization
                 if (request == null)
                 {
                     return ServiceResult<OrganizationListResponse>.Failure(
-                        "Search request cannot be null", 
+                        "Search request cannot be null",
                         "INVALID_REQUEST");
                 }
 
@@ -141,7 +143,7 @@ namespace AuthHive.Auth.Services.Organization
                 foreach (var org in organizations)
                 {
                     var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id);
-                    
+
                     organizationResponses.Add(new OrganizationResponse
                     {
                         Id = org.Id,
@@ -205,8 +207,8 @@ namespace AuthHive.Auth.Services.Organization
 
                 // Repository 호출
                 var organizations = await _searchRepository.GetUserOrganizationsAsync(
-                    userId, 
-                    activeOnly: true, 
+                    userId,
+                    activeOnly: true,
                     includeInherited: false);
 
                 // DTO 변환
@@ -214,7 +216,7 @@ namespace AuthHive.Auth.Services.Organization
                 foreach (var org in organizations)
                 {
                     var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id);
-                    
+
                     var dto = new OrganizationDto
                     {
                         Id = org.Id,
@@ -245,11 +247,11 @@ namespace AuthHive.Auth.Services.Organization
                         CreatedAt = org.CreatedAt,
                         UpdatedAt = org.UpdatedAt
                     };
-                    
+
                     // 추가 통계 정보
                     var capabilities = await _capabilityAssignmentRepository.GetCapabilitiesAsync(org.Id);
                     dto.AdditionalCapabilitiesCount = capabilities.Count() - 1; // Primary 제외
-                    
+
                     organizationDtos.Add(dto);
                 }
 
@@ -293,11 +295,11 @@ namespace AuthHive.Auth.Services.Organization
                 }
 
                 // Repository 호출
-                var allowedStatuses = new[] { 
-                    OrganizationMembershipStatus.Active, 
-                    OrganizationMembershipStatus.Pending 
+                var allowedStatuses = new[] {
+                    OrganizationMembershipStatus.Active,
+                    OrganizationMembershipStatus.Pending
                 };
-                
+
                 var organizations = await _searchRepository.GetAccessibleOrganizationsAsync(
                     connectedId,
                     allowedStatuses,
@@ -308,7 +310,7 @@ namespace AuthHive.Auth.Services.Organization
                 foreach (var org in organizations)
                 {
                     var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id);
-                    
+
                     var dto = new OrganizationDto
                     {
                         Id = org.Id,
@@ -339,7 +341,7 @@ namespace AuthHive.Auth.Services.Organization
                         CreatedAt = org.CreatedAt,
                         UpdatedAt = org.UpdatedAt
                     };
-                    
+
                     organizationDtos.Add(dto);
                 }
 

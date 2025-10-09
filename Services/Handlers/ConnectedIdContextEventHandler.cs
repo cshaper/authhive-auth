@@ -52,27 +52,30 @@ namespace AuthHive.Auth.Services.Handlers
         }
 
         #region IService Implementation
-
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
         {
             try
             {
                 // 의존 서비스들의 상태 확인
-                await _cacheService.GetAsync<string>("health_check");
+                // CancellationToken을 하위 서비스에 전달하여 취소/타임아웃을 지원합니다.
+                await _cacheService.GetAsync<string>("health_check", cancellationToken);
                 return true;
             }
-            catch
+            catch (Exception ex) // 예외 타입을 명시하는 것이 좋지만, 현재 형태를 유지합니다.
             {
+                // 로깅은 catch 블록에서 발생하는 문제의 추적을 위해 유지
+                _logger.LogError(ex, "Health check failed due to exception.");
                 return false;
             }
         }
 
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
         {
             _logger.LogInformation("ConnectedIdContextEventHandler initialized");
-            await Task.CompletedTask;
-        }
 
+            // 불필요한 'async/await Task.CompletedTask' 대신 Task를 직접 반환하여 오버헤드를 제거합니다.
+            return Task.CompletedTask;
+        }
         #endregion
 
         #region 컨텍스트 생명주기 이벤트
@@ -358,7 +361,7 @@ namespace AuthHive.Auth.Services.Handlers
             {
                 // 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.miss.{cacheType.ToLower()}");
-                
+
                 if (fallbackUsed)
                 {
                     await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.fallback");
@@ -960,13 +963,13 @@ namespace AuthHive.Auth.Services.Handlers
                 foreach (var evt in eventList)
                 {
                     await semaphore.WaitAsync();
-                    
+
                     var task = ProcessSingleEventAsync(evt).ContinueWith(t =>
                     {
                         semaphore.Release();
                         return t.Result;
                     });
-                    
+
                     tasks.Add(task);
                 }
 
@@ -993,7 +996,7 @@ namespace AuthHive.Auth.Services.Handlers
             {
                 stopwatch.Stop();
                 result.ProcessingTimeMs = stopwatch.ElapsedMilliseconds;
-                
+
                 // 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.batch.processed", result.ProcessedCount);
                 await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.batch.duration", result.ProcessingTimeMs);

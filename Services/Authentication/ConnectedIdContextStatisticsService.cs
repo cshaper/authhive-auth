@@ -19,7 +19,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
-using AuthHive.Core.Constants.Auth; 
+using AuthHive.Core.Constants.Auth;
+using AuthHive.Core.Interfaces.Infra;
 
 namespace AuthHive.Auth.Services.Authentication
 {
@@ -36,6 +37,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IOrganizationSettingsRepository _orgSettingsRepository;
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IRoleService _roleService;
+        private readonly IDateTimeProvider _dateTimeProvider;
 
         public ConnectedIdContextStatisticsService(
             IConnectedIdContextRepository contextRepository,
@@ -44,7 +46,8 @@ namespace AuthHive.Auth.Services.Authentication
             IAuditService auditService,
             IOrganizationSettingsRepository orgSettingsRepository,
             IConnectedIdRepository connectedIdRepository,
-            IRoleService roleService)
+            IRoleService roleService,
+            IDateTimeProvider dateTimeProvider)
         {
             _contextRepository = contextRepository;
             _logger = logger;
@@ -53,23 +56,31 @@ namespace AuthHive.Auth.Services.Authentication
             _orgSettingsRepository = orgSettingsRepository;
             _connectedIdRepository = connectedIdRepository;
             _roleService = roleService;
+            _dateTimeProvider = dateTimeProvider;
         }
 
         #region IService Implementation
-        public Task<bool> IsHealthyAsync() => Task.FromResult(true);
-        public Task InitializeAsync()
+
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            _logger.LogInformation("ConnectedIdContextStatisticsService initialized.");
+            return Task.FromResult(true);
+        }
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            _logger.LogInformation("ConnectedIdContextStatisticsService initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
+
         #endregion
+
 
         #region Interface Implementation
 
         public Task<ServiceResult<ConnectedIdContextStatisticsDto>> GetOverallStatisticsAsync(string period = "Last24Hours")
         {
             _logger.LogWarning("Accessing GetOverallStatisticsAsync(string) without explicit ConnectedId. Using System ID.");
-            return GetOverallStatisticsAsync(Guid.Empty, period); 
+            return GetOverallStatisticsAsync(Guid.Empty, period);
         }
 
         /// <summary>
@@ -81,8 +92,8 @@ namespace AuthHive.Auth.Services.Authentication
         {
             // 1. 시스템 관리자 역할 권한 검사 및 접근 제어
             bool isSystemAdmin = await _roleService.IsConnectedIdInRoleAsync(
-                currentConnectedId, 
-                RoleConstants.SystemReservedKeys.SUPER_ADMIN); 
+                currentConnectedId,
+                RoleConstants.SystemReservedKeys.SUPER_ADMIN);
 
             if (!isSystemAdmin)
             {
@@ -94,12 +105,12 @@ namespace AuthHive.Auth.Services.Authentication
                     resourceId: null,
                     success: false,
                     metadata: $"Access Denied: User {currentConnectedId} is not a System Administrator for period {period}.");
-                
+
                 return ServiceResult<ConnectedIdContextStatisticsDto>.Failure(
-                    "Access Denied. Required role: System Administrator.", 
+                    "Access Denied. Required role: System Administrator.",
                     "Unauthorized");
             }
-            
+
             // 2. 통계 로직
             var cacheKey = $"stats:overall:{period}";
             var cachedResult = await _cacheService.GetAsync<ConnectedIdContextStatisticsDto>(cacheKey);
@@ -183,12 +194,12 @@ namespace AuthHive.Auth.Services.Authentication
             return statisticsResult;
         }
 
-        public async Task<ServiceResult<TimeSeriesData<long>>> GetContextCreationTrendsAsync(Guid currentConnectedId,DateTime startDate, DateTime endDate, string granularity = "Daily")
+        public async Task<ServiceResult<TimeSeriesData<long>>> GetContextCreationTrendsAsync(Guid currentConnectedId, DateTime startDate, DateTime endDate, string granularity = "Daily")
         {
-                    // 1. 시스템 관리자 역할 권한 검사 및 접근 제어
+            // 1. 시스템 관리자 역할 권한 검사 및 접근 제어
             bool isSystemAdmin = await _roleService.IsConnectedIdInRoleAsync(
-                currentConnectedId, 
-                RoleConstants.SystemReservedKeys.SUPER_ADMIN); 
+                currentConnectedId,
+                RoleConstants.SystemReservedKeys.SUPER_ADMIN);
 
             if (!isSystemAdmin)
             {
@@ -200,12 +211,12 @@ namespace AuthHive.Auth.Services.Authentication
                     resourceId: null,
                     success: false,
                     metadata: $"Access Denied: User {currentConnectedId} is not a System Administrator for range {startDate:d} to {endDate:d}.");
-                
+
                 return ServiceResult<TimeSeriesData<long>>.Failure(
-                    "Access Denied. Required role: System Administrator.", 
+                    "Access Denied. Required role: System Administrator.",
                     "Unauthorized");
             }
-            
+
             // 2. 캐시 키 및 로직
             var cacheKey = $"stats:trends:overall:{startDate:yyyyMMdd}-{endDate:yyyyMMdd}:{granularity}";
             var cachedResult = await _cacheService.GetAsync<TimeSeriesData<long>>(cacheKey);
@@ -257,8 +268,8 @@ namespace AuthHive.Auth.Services.Authentication
                 var contextsByTypeTask = query.GroupBy(c => c.ContextType)
                     .Select(g => new { Type = g.Key, Count = g.Count() })
                     .ToDictionaryAsync(x => x.Type.ToString(), x => (long)x.Count);
-                
-                var avgLifetimeTask = query.Where(c => c.ExpiresAt > c.CreatedAt) 
+
+                var avgLifetimeTask = query.Where(c => c.ExpiresAt > c.CreatedAt)
                     .Select(c => (double?)EF.Functions.DateDiffSecond(c.CreatedAt, c.ExpiresAt)).AverageAsync();
 
                 await Task.WhenAll(totalContextsTask, activeContextsTask, hotPathContextsTask, contextsByTypeTask, avgLifetimeTask);
@@ -287,8 +298,8 @@ namespace AuthHive.Auth.Services.Authentication
 
         private async Task<ServiceResult> CheckFeatureAvailabilityAsync(Guid organizationId, string featureName)
         {
-            var settings = await _orgSettingsRepository.GetSettingAsync(organizationId, "Pricing", "PlanKey"); 
-            
+            var settings = await _orgSettingsRepository.GetSettingAsync(organizationId, "Pricing", "PlanKey");
+
             var planKey = settings?.SettingValue ?? PricingConstants.DefaultPlanKey;
 
             if (planKey == PricingConstants.SubscriptionPlans.BASIC_KEY)
@@ -296,7 +307,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // ⭐️ PricingConstants에 정의된 에러 코드 사용 (BusinessErrors 대체)
                 return ServiceResult.Failure(
                     errorMessage: $"The '{featureName}' feature is not available on your current plan ('{planKey}'). Please upgrade your plan to access advanced statistics.",
-                    errorCode: PricingConstants.BusinessErrorCodes.UpgradeRequired 
+                    errorCode: PricingConstants.BusinessErrorCodes.UpgradeRequired
                 );
             }
             return ServiceResult.Success();
@@ -307,7 +318,7 @@ namespace AuthHive.Auth.Services.Authentication
             var connectedId = Guid.Empty; // Placeholder: 실제 요청자의 ConnectedId로 대체되어야 합니다.
 
             await _auditService.LogActionAsync(
-                actionType: AuditActionType.Read, 
+                actionType: AuditActionType.Read,
                 action: action,
                 connectedId: connectedId,
                 success: true,

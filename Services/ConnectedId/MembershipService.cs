@@ -30,19 +30,18 @@ namespace AuthHive.Auth.Services
         }
 
         #region IService Implementation
-
-        public Task<bool> IsHealthyAsync()
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            // 의존하는 Repository와 DbContext가 정상적인지 확인
-            return Task.FromResult(_repository != null && _context.Database.CanConnect());
+            // Repository와 DbContext가 정상적인지 확인
+            var isHealthy = _repository != null && _context.Database.CanConnect();
+            return Task.FromResult(isHealthy);
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("MembershipService initialized.");
             return Task.CompletedTask;
         }
-
         #endregion
 
         #region Membership Management
@@ -64,7 +63,7 @@ namespace AuthHive.Auth.Services
 
                 var oldType = connectedId.MembershipType;
                 connectedId.MembershipType = newType;
-                
+
                 await _repository.UpdateAsync(connectedId);
                 _logger.LogInformation("MembershipType of ConnectedId {Id} changed from {OldType} to {NewType}", id, oldType, newType);
 

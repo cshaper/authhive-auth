@@ -54,17 +54,19 @@ namespace AuthHive.Auth.Session.Handlers
 
         #region IService Implementation
         
-        public Task InitializeAsync()
-        {
-            _logger.LogInformation("SessionEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
-            return Task.CompletedTask;
-        }
+public Task InitializeAsync(CancellationToken cancellationToken = default)
+{
+    _logger.LogInformation("SessionEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
+    return Task.CompletedTask;
+}
 
-        public async Task<bool> IsHealthyAsync()
-        {
-            return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync();
-        }
-        
+public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+{
+    var cacheHealthy = await _cacheService.IsHealthyAsync(cancellationToken);
+    var auditHealthy = await _auditService.IsHealthyAsync(cancellationToken);
+    return cacheHealthy && auditHealthy;
+}
+
         #endregion
 
         #region Core Session Events (필수 기능만 유지)

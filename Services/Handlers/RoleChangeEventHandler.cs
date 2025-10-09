@@ -52,16 +52,24 @@ namespace AuthHive.Auth.Handlers
 
         #region IService Implementation
 
-        public Task InitializeAsync()
+        // RoleChangeEventHandler.cs
+
+        // ... (class body) ...
+
+        // 1. Return type changed from 'async Task' to 'Task'
+        public Task InitializeAsync(CancellationToken cancellationToken = default) 
         {
+            // The existing method body is already optimized.
             _logger.LogInformation("RoleChangeEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) 
         {
-            var isCacheHealthy = await _cacheService.IsHealthyAsync();
-            var isAuditHealthy = await _auditService.IsHealthyAsync();
+            // Pass the token to all dependent service calls.
+            var isCacheHealthy = await _cacheService.IsHealthyAsync(cancellationToken);
+            var isAuditHealthy = await _auditService.IsHealthyAsync(cancellationToken);
+
             return isCacheHealthy && isAuditHealthy;
         }
 
@@ -192,7 +200,7 @@ namespace AuthHive.Auth.Handlers
                     var invalidationTasks = affectedAccessEntries
                         .Select(access => InvalidateUserPermissionCacheAsync(access.ConnectedId))
                         .ToList();
-                    
+
                     await Task.WhenAll(invalidationTasks);
                     _logger.LogInformation("Invalidated caches for {Count} users affected by RoleId {RoleId} deletion.", invalidationTasks.Count, eventData.RoleId);
                 }

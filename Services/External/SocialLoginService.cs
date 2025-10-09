@@ -73,16 +73,17 @@ namespace AuthHive.Auth.Services.External
         }
 
         #region IService Implementation
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("Social Login Service initialized");
-            await Task.CompletedTask;
+            return Task.CompletedTask;
+        }
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            // Pass the token to the underlying service's health check.
+            return await _cacheService.IsHealthyAsync(cancellationToken);
         }
 
-        public async Task<bool> IsHealthyAsync()
-        {
-            return await _cacheService.IsHealthyAsync();
-        }
         #endregion
 
         #region Core Authentication - Dynamic Provider Handling

@@ -40,16 +40,16 @@ namespace AuthHive.Auth.Services.External
         public string ServiceName => "SAML";
         public string Provider => "SAML2.0";
         public string? ApiVersion => "2.0";
-        public RetryPolicy RetryPolicy { get; set; } = new() 
-        { 
-            MaxRetries = 2, 
+        public RetryPolicy RetryPolicy { get; set; } = new()
+        {
+            MaxRetries = 2,
             InitialDelayMs = 500,
             UseExponentialBackoff = false // SaaS에서는 빠른 실패가 더 효율적
         };
         public int TimeoutSeconds { get; set; } = 15; // 타임아웃 단축
         public bool EnableCircuitBreaker { get; set; } = true;
         public IExternalService? FallbackService { get; set; }
-        
+
         public event EventHandler<ExternalServiceCalledEventArgs>? ServiceCalled;
         public event EventHandler<ExternalServiceFailedEventArgs>? ServiceFailed;
         public event EventHandler<ExternalServiceRecoveredEventArgs>? ServiceRecovered;
@@ -70,16 +70,22 @@ namespace AuthHive.Auth.Services.External
         }
 
         #region IService Implementation
-        public async Task InitializeAsync()
+
+        // 1. CancellationToken 추가: 비동기 작업을 취소 가능하게 만듭니다.
+        // 2. Task.CompletedTask로 즉시 반환하여 불필요한 await를 방지합니다.
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("SAML Provider Service initialized");
-            await Task.CompletedTask;
+            return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        // 1. CancellationToken 추가: 인터페이스와 일치시키고 하위 계층에 토큰을 전달합니다.
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return await _cacheService.IsHealthyAsync();
+            // CancellationToken을 하위 서비스 (CacheService)에 전달합니다.
+            return await _cacheService.IsHealthyAsync(cancellationToken);
         }
+
         #endregion
 
         /// <summary>
@@ -101,10 +107,10 @@ namespace AuthHive.Auth.Services.External
                     try
                     {
                         // .NET 8+ 호환성을 위한 처리
-                        #pragma warning disable SYSLIB0057 // Type or member is obsolete
+#pragma warning disable SYSLIB0057 // Type or member is obsolete
                         var cert = new X509Certificate2(Convert.FromBase64String(config.Certificate));
-                        #pragma warning restore SYSLIB0057
-                        
+#pragma warning restore SYSLIB0057
+
                         if (cert.NotAfter < _dateTimeProvider.UtcNow)
                         {
                             _logger.LogWarning("Certificate expired for org {OrgId}", organizationId);
@@ -148,7 +154,7 @@ namespace AuthHive.Auth.Services.External
                 // 조직별 커스텀 메타데이터 템플릿 확인
                 var cacheKey = GetCacheKey("metadata_template", organizationId.ToString());
                 var template = await _cacheService.GetAsync<string>(cacheKey);
-                
+
                 if (!string.IsNullOrEmpty(template))
                 {
                     // 커스텀 템플릿 사용
@@ -241,7 +247,7 @@ namespace AuthHive.Auth.Services.External
 
                 // 동적 속성 추출
                 var attributes = ExtractDynamicAttributes(xmlDoc);
-                
+
                 var response = new AuthenticationResponse
                 {
                     Success = true,
@@ -316,12 +322,12 @@ namespace AuthHive.Auth.Services.External
 
                 using var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(TimeoutSeconds) };
                 var xml = await httpClient.GetStringAsync(metadataUrl);
-                
+
                 var metadata = ParseIdpMetadata(xml);
-                
+
                 // 캐시 저장
                 await _cacheService.SetAsync(cacheKey, metadata, TimeSpan.FromHours(24));
-                
+
                 return ServiceResult<SamlIdpMetadata>.Success(metadata);
             }
             catch (Exception ex)
@@ -341,10 +347,10 @@ namespace AuthHive.Auth.Services.External
                 // 동적 매핑 저장 - 어떤 매핑이든 허용
                 var cacheKey = GetCacheKey("mappings", organizationId.ToString());
                 await _cacheService.SetAsync(cacheKey, mappings, TimeSpan.FromHours(CONFIG_CACHE_HOURS));
-                
-                _logger.LogInformation("Attribute mappings updated for {OrgId}, count: {Count}", 
+
+                _logger.LogInformation("Attribute mappings updated for {OrgId}, count: {Count}",
                     organizationId, mappings.Count);
-                
+
                 return ServiceResult.Success();
             }
             catch (Exception ex)
@@ -381,7 +387,7 @@ namespace AuthHive.Auth.Services.External
         {
             var ns = new XmlNamespaceManager(xmlDoc.NameTable);
             ns.AddNamespace("samlp", "urn:oasis:names:tc:SAML:2.0:protocol");
-            
+
             var statusNode = xmlDoc.SelectSingleNode("//samlp:StatusCode", ns);
             return statusNode?.Attributes?["Value"]?.Value?.EndsWith("Success") == true;
         }
@@ -391,12 +397,12 @@ namespace AuthHive.Auth.Services.External
             var attributes = new Dictionary<string, object>();
             var ns = new XmlNamespaceManager(xmlDoc.NameTable);
             ns.AddNamespace("saml", "urn:oasis:names:tc:SAML:2.0:assertion");
-            
+
             // NameID 추출
             var nameIdNode = xmlDoc.SelectSingleNode("//saml:NameID", ns);
             if (nameIdNode != null)
                 attributes["nameId"] = nameIdNode.InnerText;
-            
+
             // 모든 속성 동적으로 추출
             var attributeNodes = xmlDoc.SelectNodes("//saml:Attribute", ns);
             if (attributeNodes != null)
@@ -405,7 +411,7 @@ namespace AuthHive.Auth.Services.External
                 {
                     var name = node.Attributes?["Name"]?.Value;
                     var value = node.SelectSingleNode(".//saml:AttributeValue", ns)?.InnerText;
-                    
+
                     if (!string.IsNullOrEmpty(name) && value != null)
                     {
                         // 동적 키 정규화 (소문자, 언더스코어)
@@ -414,7 +420,7 @@ namespace AuthHive.Auth.Services.External
                     }
                 }
             }
-            
+
             return attributes;
         }
 
@@ -422,11 +428,11 @@ namespace AuthHive.Auth.Services.External
         {
             var xmlDoc = new XmlDocument();
             xmlDoc.LoadXml(xml);
-            
+
             var ns = new XmlNamespaceManager(xmlDoc.NameTable);
             ns.AddNamespace("md", "urn:oasis:names:tc:SAML:2.0:metadata");
             ns.AddNamespace("ds", "http://www.w3.org/2000/09/xmldsig#");
-            
+
             return new SamlIdpMetadata
             {
                 EntityId = xmlDoc.SelectSingleNode("//@entityID")?.Value ?? "",
@@ -454,8 +460,8 @@ namespace AuthHive.Auth.Services.External
 
         public async Task<ServiceResult> TestConnectionAsync()
         {
-            return await _cacheService.IsHealthyAsync() 
-                ? ServiceResult.Success() 
+            return await _cacheService.IsHealthyAsync()
+                ? ServiceResult.Success()
                 : ServiceResult.Failure("Cache unavailable");
         }
 

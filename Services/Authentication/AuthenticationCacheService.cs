@@ -49,12 +49,21 @@ namespace AuthHive.Auth.Services
 
         #region IService Implementation
 
-        public Task<bool> IsHealthyAsync() => _cacheService.IsHealthyAsync();
-        public Task InitializeAsync()
+        #region ICacheService Implementation with CancellationToken
+
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            _logger.LogInformation("AuthenticationCacheService initialized");
+            return _cacheService.IsHealthyAsync(cancellationToken);
+        }
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            _logger.LogInformation("AuthenticationCacheService initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
+
+        #endregion
+
 
         #endregion
 
@@ -98,7 +107,7 @@ namespace AuthHive.Auth.Services
             await ClearAuthenticationCacheAsync(userId);
         }
 
-       public async Task<ServiceResult> ClearUserAndSessionCacheAsync(Guid? userId, Guid? connectedId, Guid sessionId)
+        public async Task<ServiceResult> ClearUserAndSessionCacheAsync(Guid? userId, Guid? connectedId, Guid sessionId)
         {
             try
             {

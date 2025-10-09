@@ -65,17 +65,17 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
         #region IService Implementation
-
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                var cacheHealthy = await _cacheService.IsHealthyAsync();
+                var cacheHealthy = await _cacheService.IsHealthyAsync(cancellationToken);
                 if (!cacheHealthy)
                 {
                     _logger.LogWarning("Cache service is unhealthy, checking repository directly");
                 }
-                await _permissionRepository.AnyAsync(p => true);
+
+                await _permissionRepository.AnyAsync(p => true, cancellationToken);
                 return true;
             }
             catch (Exception ex)
@@ -85,12 +85,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task InitializeAsync()
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("PermissionService initializing...");
             try
             {
-                await _cacheService.InitializeAsync();
+                await _cacheService.InitializeAsync(cancellationToken);
                 _logger.LogInformation("PermissionService initialized successfully");
             }
             catch (Exception ex)
@@ -100,11 +100,13 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
+
+
         #endregion
 
         #region Standard CRUD (from IService<T>)
 
-        public async Task<ServiceResult<PermissionDto>> CreateAsync(CreatePermissionRequest request)
+        public async Task<ServiceResult<PermissionDto>> CreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
@@ -199,11 +201,29 @@ namespace AuthHive.Auth.Services.Authentication
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<bool>> ValidateCreateAsync(CreatePermissionRequest request)
+
+        public async Task<ServiceResult<bool>> ValidateCreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
         {
-            // 인터페이스 멤버를 구현하는 기본 메서드입니다.
-            return await ValidateCreateAsync(request, null);
+            var exists = await _permissionRepository.AnyAsync(p => p.Name == request.Name, cancellationToken);
+            if (exists)
+            {
+               return ServiceResult.Conflict<bool>("Permission name already exists.");
+            }
+
+            return ServiceResult<bool>.Success(true);
         }
+
+        public async Task<ServiceResult<bool>> ValidateCreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
+        {
+            var exists = await _permissionRepository.AnyAsync(p => p.Name == request.Name, cancellationToken);
+            if (exists)
+            {
+                return ServiceResult<bool>.Conflict("A permission with the same name already exists.");
+            }
+
+            return ServiceResult<bool>.Success(true);
+        }
+
 
         public async Task<ServiceResult<PermissionDto>> GetByScopeAsync(string scope)
         {
@@ -362,12 +382,12 @@ namespace AuthHive.Auth.Services.Authentication
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<PermissionDto>> GetByIdAsync(Guid id)
+        public async Task<ServiceResult<PermissionDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
         {
             // 캐시 서비스가 캐시 확인, DB 조회를 모두 알아서 처리해줍니다.
             return await _cacheService.GetByIdAsync(id);
         }
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetAllAsync()
+        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetAllAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -390,7 +410,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<PermissionDto>> UpdateAsync(Guid id, UpdatePermissionRequest request)
+        public async Task<ServiceResult<PermissionDto>> UpdateAsync(Guid id, UpdatePermissionRequest request, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
@@ -479,7 +499,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult> DeleteAsync(Guid id)
+        public async Task<ServiceResult> DeleteAsync(Guid id, CancellationToken cancellationToken = default)
         {
             return await DeleteAsync(id, null, null);
         }
@@ -558,7 +578,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<PagedResult<PermissionDto>>> GetPagedAsync(PaginationRequest request)
+        public async Task<ServiceResult<PagedResult<PermissionDto>>> GetPagedAsync(PaginationRequest request, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
@@ -590,7 +610,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region Bulk Operations
 
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> CreateBulkAsync(IEnumerable<CreatePermissionRequest> requests)
+        public async Task<ServiceResult<IEnumerable<PermissionDto>>> CreateBulkAsync(IEnumerable<CreatePermissionRequest> requests, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (requests == null)
@@ -775,7 +795,7 @@ namespace AuthHive.Auth.Services.Authentication
                     resourceType, resourceId);
             }
         }
-        public async Task<ServiceResult<bool>> ExistsAsync(Guid id)
+        public async Task<ServiceResult<bool>> ExistsAsync(Guid id, CancellationToken cancellationToken = default)
         {
             if (id == Guid.Empty)
             {
@@ -807,7 +827,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
         public async Task<ServiceResult<IEnumerable<PermissionDto>>> UpdateBulkAsync(
-    IEnumerable<(Guid Id, UpdatePermissionRequest Request)> updates)
+    IEnumerable<(Guid Id, UpdatePermissionRequest Request)> updates, CancellationToken cancellationToken = default)
         {
             // 인터페이스 멤버를 구현하는 기본 메서드입니다.
             // 내부적으로는 connectedId와 organizationId를 null로 하여 확장 메서드를 호출합니다.
@@ -914,7 +934,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult> DeleteBulkAsync(IEnumerable<Guid> ids)
+        public async Task<ServiceResult> DeleteBulkAsync(IEnumerable<Guid> ids, CancellationToken cancellationToken = default)
         {
             // 인터페이스 멤버를 구현하는 기본 메서드입니다.
             return await DeleteBulkAsync(ids, null, null);
@@ -1018,7 +1038,7 @@ namespace AuthHive.Auth.Services.Authentication
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<int>> CountAsync()
+        public async Task<ServiceResult<int>> CountAsync(CancellationToken cancellationToken = default)
         {
             try
             {

@@ -4,45 +4,49 @@ using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Auth.ConnectedId.Cache;
 using AuthHive.Core.Models.Common;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
+using AuthHive.Core.Interfaces.Infra;
 
 namespace AuthHive.Auth.Services
 {
     /// <summary>
     /// ConnectedId 관련 캐시 관리 로직을 구현합니다.
+    /// HybridCacheService를 통해 IMemoryCache + IDistributedCache 전략을 캡슐화합니다.
     /// </summary>
     public class ConnectedIdCacheService : IConnectedIdCacheService
     {
-        private readonly IMemoryCache _cache;
+        private readonly ICacheService _cacheService;
         private readonly ILogger<ConnectedIdCacheService> _logger;
+        private readonly IDateTimeProvider _dateTimeProvider;
 
-        // 캐시 키를 관리하기 위한 내부 상수
         private const string CACHE_PREFIX = "connected_id:";
         private const string ORG_CACHE_TOKEN_PREFIX = "org_cache_token:";
 
         public ConnectedIdCacheService(
-            IMemoryCache cache,
-            ILogger<ConnectedIdCacheService> logger)
+            ICacheService cacheService,
+            ILogger<ConnectedIdCacheService> logger,
+            IDateTimeProvider dateTimeProvider)
         {
-            _cache = cache;
+            _cacheService = cacheService;
             _logger = logger;
+            _dateTimeProvider = dateTimeProvider;
         }
 
         #region IService Implementation
 
-        public Task<bool> IsHealthyAsync()
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            // IMemoryCache는 일반적으로 실패하지 않으므로, 의존성이 주입되었는지 여부만 확인
-            return Task.FromResult(_cache != null);
+            return _cacheService.IsHealthyAsync(cancellationToken);
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
-            _logger.LogInformation("ConnectedIdCacheService initialized.");
+            _logger.LogInformation("ConnectedIdCacheService initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
 
@@ -50,70 +54,65 @@ namespace AuthHive.Auth.Services
 
         #region Cache Management
 
-        public Task<ServiceResult> ClearConnectedIdCacheAsync(Guid connectedId)
+        public async Task<ServiceResult> ClearConnectedIdCacheAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"{CACHE_PREFIX}{connectedId}";
-                _cache.Remove(cacheKey);
+                await _cacheService.RemoveAsync(cacheKey, cancellationToken);
                 _logger.LogDebug("Cache cleared for ConnectedId {ConnectedId}", connectedId);
-                return Task.FromResult(ServiceResult.Success("Cache cleared successfully."));
+                return ServiceResult.Success("Cache cleared successfully.");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to clear cache for ConnectedId {ConnectedId}", connectedId);
-                return Task.FromResult(ServiceResult.Failure("Failed to clear cache."));
+                return ServiceResult.Failure("Failed to clear cache.");
             }
         }
 
-        public Task<ServiceResult<int>> ClearOrganizationConnectedIdCacheAsync(Guid organizationId)
+        public async Task<ServiceResult<int>> ClearOrganizationConnectedIdCacheAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
-                // CancellationTokenSource를 사용하여 조직에 속한 모든 캐시를 한 번에 무효화합니다.
                 var tokenKey = $"{ORG_CACHE_TOKEN_PREFIX}{organizationId}";
-                if (_cache.TryGetValue(tokenKey, out CancellationTokenSource? cts) && cts != null)
-                {
-                    cts.Cancel(); // 이 토큰과 연결된 모든 캐시 항목이 만료됩니다.
-                    cts.Dispose();
-                    _cache.Remove(tokenKey); // 토큰 자체도 제거
-                    _logger.LogInformation("Cache invalidated for organization {OrganizationId}", organizationId);
-                }
-                
-                // 정확한 카운트는 어려우므로 성공 여부만 반환
-                return Task.FromResult(ServiceResult<int>.Success(1)); 
+                await _cacheService.RemoveAsync(tokenKey, cancellationToken);
+                _logger.LogInformation("Cache invalidated for organization {OrganizationId}", organizationId);
+                return ServiceResult<int>.Success(1);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to invalidate cache for organization {OrganizationId}", organizationId);
-                return Task.FromResult(ServiceResult<int>.Failure("Failed to invalidate organization cache."));
+                return ServiceResult<int>.Failure("Failed to invalidate organization cache.");
             }
         }
 
-        public Task<ServiceResult<ConnectedIdCacheStatistics>> GetCacheStatisticsAsync()
+        public async Task<ServiceResult<ConnectedIdCacheStatistics>> GetCacheStatisticsAsync(CancellationToken cancellationToken = default)
         {
-            var stats = _cache.GetCurrentStatistics();
-            if (stats == null)
+            try
             {
-                return Task.FromResult(ServiceResult<ConnectedIdCacheStatistics>.Failure("Cache statistics are not available."));
+                var stats = await _cacheService.GetStatisticsAsync(cancellationToken);
+                var totalRequests = stats.TotalHits + stats.TotalMisses;
+
+                var response = new ConnectedIdCacheStatistics
+                {
+                    TotalCachedItems = stats.CurrentEntryCount,
+                    HitRate = totalRequests > 0 ? (double)stats.TotalHits / totalRequests : 0.0,
+                    MissRate = totalRequests > 0 ? (double)stats.TotalMisses / totalRequests : 0.0,
+                    GeneratedAt = _dateTimeProvider.UtcNow,
+                    EntriesByOrganization = new Dictionary<Guid, long>(),
+                    EntriesByMembershipType = new Dictionary<MembershipType, long>(),
+                    EntriesByStatus = new Dictionary<ConnectedIdStatus, long>(),
+                    MostAccessed = new List<FrequentlyAccessedConnectedId>(),
+                    AverageConnectedIdCacheTtl = 0
+                };
+
+                return ServiceResult<ConnectedIdCacheStatistics>.Success(response);
             }
-
-            var totalRequests = stats.TotalHits + stats.TotalMisses;
-
-            var response = new ConnectedIdCacheStatistics
+            catch (Exception ex)
             {
-                TotalCachedItems = stats.CurrentEntryCount,
-                HitRate = totalRequests > 0 ? (double)stats.TotalHits / totalRequests : 0.0,
-                MissRate = totalRequests > 0 ? (double)stats.TotalMisses / totalRequests : 0.0,
-                GeneratedAt = DateTime.UtcNow,
-                EntriesByOrganization = new Dictionary<Guid, long>(),
-                EntriesByMembershipType = new Dictionary<MembershipType, long>(),
-                EntriesByStatus = new Dictionary<ConnectedIdStatus, long>(),
-                MostAccessed = new List<FrequentlyAccessedConnectedId>(),
-                AverageConnectedIdCacheTtl = 0
-            };
-            
-            return Task.FromResult(ServiceResult<ConnectedIdCacheStatistics>.Success(response));
+                _logger.LogError(ex, "Failed to retrieve cache statistics.");
+                return ServiceResult<ConnectedIdCacheStatistics>.Failure("Cache statistics are not available.");
+            }
         }
 
         #endregion

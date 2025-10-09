@@ -25,14 +25,13 @@ namespace AuthHive.Auth.Services
             _logger = logger;
         }
 
-        #region IService Implementation
-
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // Repository가 정상적으로 동작하는지 간단히 확인
-                return await _repository.CountAsync() >= 0;
+                // 🚨 수정된 코드: 첫 번째 인수에 null을 명시적으로 전달하여 predicate를 생략하고,
+                // cancellationToken을 두 번째 인수로 전달합니다.
+                return await _repository.CountAsync(null, cancellationToken) >= 0;
             }
             catch (Exception ex)
             {
@@ -40,14 +39,12 @@ namespace AuthHive.Auth.Services
                 return false;
             }
         }
-
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("ConnectedIdStatisticsService initialized.");
             return Task.CompletedTask;
         }
 
-        #endregion
 
         #region IStatisticsService Implementation
 
@@ -57,9 +54,9 @@ namespace AuthHive.Auth.Services
             {
                 // TODO: 현재 요청을 보낸 사용자가 해당 조직(query.OrganizationId)의
                 // 통계를 볼 권한이 있는지 확인하는 권한 검증 로직이 필요합니다.
-                
+
                 var stats = await _repository.GetStatisticsAsync(query);
-                
+
                 if (stats == null)
                 {
                     _logger.LogWarning("Statistics could not be generated for organization {OrgId}", query.OrganizationId);

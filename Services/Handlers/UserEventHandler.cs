@@ -51,18 +51,23 @@ namespace AuthHive.Auth.Handlers.User
         }
 
         #region IService Implementation
-        public async Task InitializeAsync()
+        // UserEventHandler.cs
+
+        public async Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
-            await WarmUpCacheAsync();
+            // Pass the token to the cache warm-up method.
+            await WarmUpCacheAsync(cancellationToken);
+
             _logger.LogInformation("UserEventHandler initialized");
         }
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
-            return IsEnabled && await _cacheService.IsHealthyAsync();
+            // Pass the token to the dependency's health check.
+            return IsEnabled && await _cacheService.IsHealthyAsync(cancellationToken);
         }
 
-        private async Task WarmUpCacheAsync()
+        private async Task WarmUpCacheAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -107,7 +112,7 @@ namespace AuthHive.Auth.Handlers.User
 
                 await _unitOfWork.CommitTransactionAsync(cancellationToken);
                 await InvalidateUserCacheAsync(@event.UserId);
-                
+
                 _logger.LogInformation("User created successfully - UserId: {UserId}", @event.UserId);
             }
             catch (Exception ex)
@@ -146,8 +151,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ChangedByConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: changeMetadata);
-                    
-                _logger.LogInformation("User status changed - UserId: {UserId}, From: {OldStatus} To: {NewStatus}", 
+
+                _logger.LogInformation("User status changed - UserId: {UserId}, From: {OldStatus} To: {NewStatus}",
                     @event.UserId, @event.OldStatus, @event.NewStatus);
             }
             catch (Exception ex)
@@ -161,10 +166,10 @@ namespace AuthHive.Auth.Handlers.User
             try
             {
                 var statsKey = $"{CACHE_KEY_PREFIX}:login_stats:{@event.UserId:N}:{_dateTimeProvider.UtcNow:yyyy-MM-dd}";
-                
+
                 // Increment login count
                 var newCount = await _cacheService.IncrementAsync(statsKey);
-                
+
                 // Store the count as a dictionary to comply with SetAsync<T> reference type requirement
                 var statsData = new Dictionary<string, object> { ["count"] = newCount };
                 var endOfDay = _dateTimeProvider.UtcNow.Date.AddDays(1);
@@ -201,8 +206,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: loginMetadata);
-                    
-                _logger.LogInformation("User logged in - UserId: {UserId}, Method: {Method}, FirstLogin: {FirstLogin}", 
+
+                _logger.LogInformation("User logged in - UserId: {UserId}, Method: {Method}, FirstLogin: {FirstLogin}",
                     @event.UserId, @event.AuthenticationMethod, @event.IsFirstLogin);
             }
             catch (Exception ex)
@@ -242,8 +247,8 @@ namespace AuthHive.Auth.Handlers.User
                     metadata: deleteMetadata);
 
                 await _unitOfWork.CommitTransactionAsync(cancellationToken);
-                
-                _logger.LogWarning("User deleted - UserId: {UserId}, SoftDelete: {SoftDelete}, Reason: {Reason}", 
+
+                _logger.LogWarning("User deleted - UserId: {UserId}, SoftDelete: {SoftDelete}, Reason: {Reason}",
                     @event.UserId, @event.IsSoftDelete, @event.Reason);
             }
             catch (Exception ex)
@@ -273,8 +278,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: verificationMetadata);
-                    
-                _logger.LogInformation("Email verified - UserId: {UserId}, Email: {Email}", 
+
+                _logger.LogInformation("Email verified - UserId: {UserId}, Email: {Email}",
                     @event.UserId, @event.Email);
             }
             catch (Exception ex)
@@ -291,7 +296,7 @@ namespace AuthHive.Auth.Handlers.User
                 await _cacheService.RemoveAsync(securityKey);
 
                 var activityType = @event.Enabled ? UserActivityType.TwoFactorEnabled : UserActivityType.TwoFactorDisabled;
-                
+
                 var twoFactorMetadata = new Dictionary<string, object>
                 {
                     ["enabled"] = @event.Enabled,
@@ -306,8 +311,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ChangedByConnectedId ?? @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: twoFactorMetadata);
-                    
-                _logger.LogInformation("2FA setting changed - UserId: {UserId}, Enabled: {Enabled}, Type: {Type}", 
+
+                _logger.LogInformation("2FA setting changed - UserId: {UserId}, Enabled: {Enabled}, Type: {Type}",
                     @event.UserId, @event.Enabled, @event.TwoFactorType);
             }
             catch (Exception ex)
@@ -319,7 +324,7 @@ namespace AuthHive.Auth.Handlers.User
         #endregion
 
         #region IDomainEventHandler Implementation
-        
+
         public async Task HandleAsync(object domainEvent, CancellationToken cancellationToken = default)
         {
             switch (domainEvent)
@@ -436,7 +441,7 @@ namespace AuthHive.Auth.Handlers.User
         #endregion
 
         #region Private Classes
-        
+
         private class TenantSettings
         {
             public bool SendWelcomeEmail { get; set; }
@@ -445,7 +450,7 @@ namespace AuthHive.Auth.Handlers.User
             public bool RequireEmailVerification { get; set; } = true;
             public bool AllowMultipleSessions { get; set; } = true;
         }
-        
+
         #endregion
     }
 }

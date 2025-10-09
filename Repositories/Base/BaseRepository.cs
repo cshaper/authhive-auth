@@ -96,7 +96,7 @@ namespace AuthHive.Auth.Repositories.Base
         /// <summary>
         /// ID로 조회 - 캐시 자동 적용 (ICacheService 사용)
         /// </summary>
-        public virtual async Task<TEntity?> GetByIdAsync(Guid id)
+        public virtual async Task<TEntity?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
         {
             if (_cacheService == null)
             {
@@ -126,22 +126,22 @@ namespace AuthHive.Auth.Repositories.Base
             return entity;
         }
 
-        public virtual async Task<IEnumerable<TEntity>> GetAllAsync()
+        public virtual async Task<IEnumerable<TEntity>> GetAllAsync(CancellationToken cancellationToken = default)
         {
             return await Query().AsNoTracking().ToListAsync();
         }
 
-        public virtual async Task<IEnumerable<TEntity>> FindAsync(Expression<Func<TEntity, bool>> predicate)
+        public virtual async Task<IEnumerable<TEntity>> FindAsync(Expression<Func<TEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
             return await Query().Where(predicate).AsNoTracking().ToListAsync();
         }
 
-        public virtual async Task<TEntity?> FirstOrDefaultAsync(Expression<Func<TEntity, bool>> predicate)
+        public virtual async Task<TEntity?> FirstOrDefaultAsync(Expression<Func<TEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
             return await Query().AsNoTracking().FirstOrDefaultAsync(predicate);
         }
 
-        public virtual async Task<int> CountAsync(Expression<Func<TEntity, bool>>? predicate = null)
+        public virtual async Task<int> CountAsync(Expression<Func<TEntity, bool>>? predicate = null, CancellationToken cancellationToken = default)
         {
             var query = Query();
             if (predicate != null)
@@ -151,7 +151,7 @@ namespace AuthHive.Auth.Repositories.Base
             return await query.CountAsync();
         }
 
-        public virtual async Task<bool> AnyAsync(Expression<Func<TEntity, bool>> predicate)
+        public virtual async Task<bool> AnyAsync(Expression<Func<TEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
             return await Query().AnyAsync(predicate);
         }
@@ -165,7 +165,7 @@ namespace AuthHive.Auth.Repositories.Base
         /// ID로 엔티티의 존재 여부를 확인합니다. - 캐시 자동 적용 (ICacheService 사용)
         /// Note: GetByIdAsync를 호출하여 캐시 로직을 재활용합니다.
         /// </summary>
-        public virtual async Task<bool> ExistsAsync(Guid id)
+        public virtual async Task<bool> ExistsAsync(Guid id, CancellationToken cancellationToken = default)
         {
             // 1. GetByIdAsync를 호출하여 캐시/DB에서 엔티티를 조회합니다.
             //    (GetByIdAsync 내부에서 이미 ICacheService의 GetOrSet 로직이 처리됨)
@@ -187,7 +187,8 @@ namespace AuthHive.Auth.Repositories.Base
             int pageSize,
             Expression<Func<TEntity, bool>>? predicate = null,
             Expression<Func<TEntity, object>>? orderBy = null,
-            bool isDescending = false)
+            bool isDescending = false,
+            CancellationToken cancellationToken = default)
         {
             if (pageNumber < 1) pageNumber = 1;
             if (pageSize < 1) pageSize = 10;
@@ -226,14 +227,14 @@ namespace AuthHive.Auth.Repositories.Base
 
         #region CUD 작업 (캐시 무효화 자동 처리)
 
-        public virtual async Task<TEntity> AddAsync(TEntity entity)
+        public virtual async Task<TEntity> AddAsync(TEntity entity, CancellationToken cancellationToken = default)
         {
             await InvalidateCacheAsync(entity.Id);
             await _dbSet.AddAsync(entity);
             return entity;
         }
 
-        public virtual async Task AddRangeAsync(IEnumerable<TEntity> entities)
+        public virtual async Task AddRangeAsync(IEnumerable<TEntity> entities, CancellationToken cancellationToken = default)
         {
             var entityList = entities.ToList();
             foreach (var entity in entityList)
@@ -245,7 +246,7 @@ namespace AuthHive.Auth.Repositories.Base
 
         // BaseRepository.cs 내 UpdateAsync 메서드 수정
 
-        public virtual async Task UpdateAsync(TEntity entity)
+        public virtual async Task UpdateAsync(TEntity entity, CancellationToken cancellationToken = default)
         {
             // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
             await InvalidateCacheAsync(entity.Id);
@@ -257,7 +258,7 @@ namespace AuthHive.Auth.Repositories.Base
             await Task.CompletedTask;
         }
 
-        public virtual async Task UpdateRangeAsync(IEnumerable<TEntity> entities)
+        public virtual async Task UpdateRangeAsync(IEnumerable<TEntity> entities, CancellationToken cancellationToken = default)
         {
             // CUD 작업은 캐시 무효화를 위해 비동기로 처리되어야 합니다.
             foreach (var entity in entities)
@@ -272,7 +273,7 @@ namespace AuthHive.Auth.Repositories.Base
             await Task.CompletedTask;
         }
 
-        public virtual async Task DeleteAsync(TEntity entity)
+        public virtual async Task DeleteAsync(TEntity entity, CancellationToken cancellationToken = default)
         {
             // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
             await InvalidateCacheAsync(entity.Id);
@@ -292,7 +293,7 @@ namespace AuthHive.Auth.Repositories.Base
         /// </summary>
         // BaseRepository.cs 내 SoftDeleteAsync 메서드
 
-        public virtual async Task SoftDeleteAsync(Guid id)
+        public virtual async Task SoftDeleteAsync(Guid id, CancellationToken cancellationToken = default)
         {
             // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
             await InvalidateCacheAsync(id);
@@ -308,7 +309,7 @@ namespace AuthHive.Auth.Repositories.Base
                 // Note: SaveChangesAsync는 상위 레이어(UnitOfWork)에서 호출됨
             }
         }
-        public virtual async Task DeleteRangeAsync(IEnumerable<TEntity> entities)
+        public virtual async Task DeleteRangeAsync(IEnumerable<TEntity> entities, CancellationToken cancellationToken = default)
         {
             var timestamp = DateTime.UtcNow;
 

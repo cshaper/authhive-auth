@@ -38,7 +38,7 @@ namespace AuthHive.Auth.Organization.Handlers
         private const string POLICY_LIST_CACHE_PREFIX = "org:policies";
         private const string EFFECTIVE_POLICY_CACHE_PREFIX = "org:effective-policy";
         private const string POLICY_CONFLICT_CACHE_PREFIX = "org:policy-conflicts";
-        
+
         // 감사 액션 상수
         private const string POLICY_CREATED = "ORGANIZATION_POLICY_CREATED";
         private const string POLICY_UPDATED = "ORGANIZATION_POLICY_UPDATED";
@@ -69,19 +69,31 @@ namespace AuthHive.Auth.Organization.Handlers
             _eventBus = eventBus;
         }
 
+
         #region IService Implementation
-        
-        public Task InitializeAsync()
+
+        // Add CancellationToken to comply with async service interface standards.
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("OrganizationPolicyEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
+            // The method is already optimized by returning Task.CompletedTask directly.
             return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        // Add CancellationToken and run health checks concurrently for performance.
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync();
+            // Start both health checks concurrently to reduce latency.
+            var cacheTask = _cacheService.IsHealthyAsync(cancellationToken);
+            var auditTask = _auditService.IsHealthyAsync(cancellationToken);
+
+            // Wait for both to complete. Task.WhenAll also respects the CancellationToken.
+            await Task.WhenAll(cacheTask, auditTask);
+
+            // Combine the results.
+            return cacheTask.Result && auditTask.Result;
         }
-        
+
         #endregion
 
         #region Policy CRUD Events
@@ -652,15 +664,15 @@ namespace AuthHive.Auth.Organization.Handlers
         private bool RequiresImmediateApplication(OrganizationPolicyType policyType)
         {
             // 즉시 적용이 필요한 정책 타입들
-            return policyType is OrganizationPolicyType.Security or 
-                   OrganizationPolicyType.Authentication or 
+            return policyType is OrganizationPolicyType.Security or
+                   OrganizationPolicyType.Authentication or
                    OrganizationPolicyType.AccessControl;
         }
 
         private bool IsSecurityPolicy(OrganizationPolicyType policyType)
         {
-            return policyType is OrganizationPolicyType.Security or 
-                   OrganizationPolicyType.Authentication or 
+            return policyType is OrganizationPolicyType.Security or
+                   OrganizationPolicyType.Authentication or
                    OrganizationPolicyType.Compliance;
         }
 
@@ -723,7 +735,7 @@ namespace AuthHive.Auth.Organization.Handlers
         {
             _logger.LogWarning("SECURITY ALERT: Security policy disabled - Organization={OrganizationId}, PolicyId={PolicyId}, Type={PolicyType}",
                 organizationId, policyId, policyType);
-            
+
             await _eventBus.PublishAsync(new SecurityPolicyDisabledWarning(organizationId)
             {
                 OrganizationId = organizationId,

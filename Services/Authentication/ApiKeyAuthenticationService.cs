@@ -42,9 +42,20 @@ namespace AuthHive.Auth.Services.Authentication
             _eventBus = eventBus;
             _logger = logger;
         }
+        #region IService Implementation with CancellationToken
 
-        public Task<bool> IsHealthyAsync() => Task.FromResult(true);
-        public Task InitializeAsync() => Task.CompletedTask;
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(true);
+        }
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
+        #endregion
+
 
         public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithApiKeyAsync(string apiKey, string? apiSecret = null)
         {
@@ -71,19 +82,19 @@ namespace AuthHive.Auth.Services.Authentication
                     _logger.LogError(error);
                     return ServiceResult<AuthenticationResponse>.Failure(error);
                 }
-                
+
                 // FIX 1: Use .Value to pass the non-nullable Guid.
                 var serviceAccountResult = await _connectedIdService.GetOrCreateServiceAccountForApplicationAsync(validationData.ApplicationId.Value);
-                
-                if(!serviceAccountResult.IsSuccess)
+
+                if (!serviceAccountResult.IsSuccess)
                 {
                     var errorMessage = $"Failed to resolve service account for Application ID: {validationData.ApplicationId.Value}";
                     _logger.LogWarning(errorMessage);
                     return ServiceResult<AuthenticationResponse>.Failure(errorMessage);
                 }
-                
+
                 var serviceAccountConnectedId = serviceAccountResult.Data;
-                
+
                 if (validationData.OrganizationId.HasValue && validationData.Scopes.Contains("core.admin"))
                 {
                     // FIX 2: Use .Value for ApplicationId as well.
@@ -99,7 +110,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var response = new AuthenticationResponse
                 {
                     Success = true,
-                    UserId = null, 
+                    UserId = null,
                     ConnectedId = serviceAccountConnectedId,
                     OrganizationId = validationData.OrganizationId,
                     ApplicationId = validationData.ApplicationId,
@@ -121,8 +132,8 @@ namespace AuthHive.Auth.Services.Authentication
     // This should be in its own file under AuthHive.Core/Models/Auth/Events/
     public class HighPrivilegeApiKeyUsedEvent : BaseEvent
     {
-        
-        public HighPrivilegeApiKeyUsedEvent(Guid organizationId, Guid applicationId, Guid connectedId) 
+
+        public HighPrivilegeApiKeyUsedEvent(Guid organizationId, Guid applicationId, Guid connectedId)
             : base(organizationId)
         {
             ApplicationId = applicationId;

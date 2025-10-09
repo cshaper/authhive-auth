@@ -73,11 +73,15 @@ namespace AuthHive.Business.Services.Organization
 
         #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        // OrganizationHierarchyService.cs
+
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                await _repository.CountAsync();
+                // Pass the token to the repository call. We use 'null' to skip the predicate argument 
+                // and ensure the token is passed to the correct position.
+                await _repository.CountAsync(null, cancellationToken);
                 return true;
             }
             catch (Exception ex)
@@ -87,8 +91,9 @@ namespace AuthHive.Business.Services.Organization
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
+            // The method body is already optimized for a completed task.
             _logger.LogInformation("OrganizationHierarchyService initialized.");
             return Task.CompletedTask;
         }

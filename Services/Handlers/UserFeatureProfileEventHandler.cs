@@ -48,15 +48,18 @@ namespace AuthHive.Auth.Handlers.User
         }
 
         #region IService Implementation
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("UserFeatureProfileEventHandler initialized");
-            await Task.CompletedTask;
+            return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        // 1. CancellationToken added to the signature.
+        // 2. CancellationToken passed to the dependency's health check.
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return IsEnabled && await _cacheService.IsHealthyAsync();
+            // Pass the token to the underlying service call.
+            return IsEnabled && await _cacheService.IsHealthyAsync(cancellationToken);
         }
         #endregion
 

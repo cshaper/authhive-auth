@@ -78,67 +78,77 @@ namespace AuthHive.Auth.Services.Security
         #endregion
 
         #region IService Implementation
-
         /// <summary>
         /// 서비스 초기화
         /// </summary>
-        /// <summary>
-        /// 서비스 초기화
-        /// </summary>
-        public async Task InitializeAsync()  // Task<ServiceResult> 제거, Task만 반환
+        public async Task InitializeAsync(CancellationToken cancellationToken = default) 
         {
             try
             {
                 _logger.LogInformation("Initializing RiskAssessmentService");
 
+                // Note: MemoryCache operations are synchronous and don't take a CancellationToken,
+                // but the method is kept async due to the awaited LoadRiskPolicyAsync.
                 _memoryCache.Remove("risk_policy:default");
 
-                var defaultPolicy = await LoadRiskPolicyAsync(null);
+                // Pass the token to the LoadRiskPolicyAsync call.
+                var defaultPolicy = await LoadRiskPolicyAsync(null, cancellationToken);
+
                 if (defaultPolicy != null)
                 {
+                    // MemoryCache is synchronous.
                     _memoryCache.Set("risk_policy:default", defaultPolicy, TimeSpan.FromHours(1));
                 }
 
                 _logger.LogInformation("RiskAssessmentService initialized successfully");
-                // return 문 제거 - Task는 아무것도 반환하지 않음
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to initialize RiskAssessmentService");
-                throw; // 예외 전파
+                throw;
             }
         }
+
         /// <summary>
         /// 서비스 상태 확인
         /// </summary>
-        public async Task<bool> IsHealthyAsync()  // ServiceResult<bool> 대신 bool 반환
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                var checks = new List<bool>();
+                // 1. Repository Check (DB Dependency)
+                var repoCheckTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        // Pass the token to the repository call.
+                        await _userRepository.GetByIdAsync(Guid.NewGuid(), cancellationToken);
+                        return true;
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                });
 
+                // 2. MemoryCache Check (Synchronous/In-memory Dependency)
+                var cacheCheck = true;
                 try
                 {
-                    var testUser = await _userRepository.GetByIdAsync(Guid.NewGuid());
-                    checks.Add(true);
-                }
-                catch
-                {
-                    checks.Add(false);
-                }
-
-                try
-                {
+                    // MemoryCache operations are synchronous and fast.
                     _memoryCache.Set("health_check", true, TimeSpan.FromSeconds(1));
-                    var cacheTest = _memoryCache.Get<bool>("health_check");
-                    checks.Add(cacheTest);
+                    cacheCheck = _memoryCache.Get<bool>("health_check");
                 }
                 catch
                 {
-                    checks.Add(false);
+                    cacheCheck = false;
                 }
 
-                return checks.All(c => c);
+                // Wait for the repository check to complete.
+                var isRepoHealthy = await repoCheckTask;
+
+                // Combine results.
+                return isRepoHealthy && cacheCheck;
             }
             catch (Exception ex)
             {
@@ -146,7 +156,6 @@ namespace AuthHive.Auth.Services.Security
                 return false;
             }
         }
-
 
         #endregion
 
@@ -1609,7 +1618,7 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<RiskPolicy> LoadRiskPolicyAsync(Guid? organizationId)
+        private async Task<RiskPolicy> LoadRiskPolicyAsync(Guid? organizationId, CancellationToken cancellationToken = default)
         {
             try
             {

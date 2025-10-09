@@ -64,18 +64,31 @@ namespace AuthHive.Auth.Organization.Handlers
             _eventBus = eventBus;
         }
 
-        #region IService Implementation
-        public Task InitializeAsync()
-        {
-            _logger.LogInformation("OrganizationSettingsEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
-            return Task.CompletedTask;
-        }
+#region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
-        {
-            return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync();
-        }
-        #endregion
+// Add CancellationToken to comply with async service interface standards.
+public Task InitializeAsync(CancellationToken cancellationToken = default) 
+{
+    _logger.LogInformation("OrganizationSettingsEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
+    // The method is already optimized by returning Task.CompletedTask directly.
+    return Task.CompletedTask;
+}
+
+// Add CancellationToken and run health checks concurrently for performance.
+public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+{
+    // Start both health checks concurrently to reduce latency.
+    var cacheTask = _cacheService.IsHealthyAsync(cancellationToken);
+    var auditTask = _auditService.IsHealthyAsync(cancellationToken);
+
+    // Wait for both to complete. Task.WhenAll also respects the CancellationToken.
+    await Task.WhenAll(cacheTask, auditTask);
+
+    // Combine the results.
+    return cacheTask.Result && auditTask.Result;
+}
+
+#endregion
 
         #region IOrganizationSettingsEventHandler Implementation
 

@@ -62,12 +62,14 @@ namespace AuthHive.Auth.Services.Organization
         }
 
         #region IService Implementation
+        // OrganizationValidationService.cs
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                var testQuery = await _organizationRepository.ExistsAsync(Guid.Empty);
+                // Pass the token to the repository call.
+                var testQuery = await _organizationRepository.ExistsAsync(Guid.Empty, cancellationToken);
                 return true;
             }
             catch (Exception ex)
@@ -77,13 +79,15 @@ namespace AuthHive.Auth.Services.Organization
             }
         }
 
-        public async Task InitializeAsync()
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("Initializing OrganizationValidationService");
-            await GetReservedKeysAsync();
+
+            // Pass the token to the long-running initialization/warmup call.
+            await GetReservedKeysAsync(cancellationToken);
+
             _logger.LogInformation("OrganizationValidationService initialized successfully");
         }
-
         #endregion
 
         #region IOrganizationValidationService Implementation
@@ -96,7 +100,7 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     return ServiceResult<bool>.Failure("Organization key cannot be empty", "VALIDATION_ERROR");
                 }
-                
+
                 var cacheKey = string.Format(CACHE_KEY_ORG_KEY_AVAILABLE, organizationKey.ToLower());
                 if (_cache.TryGetValue<bool>(cacheKey, out var cachedResult))
                 {
@@ -141,7 +145,7 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     return ServiceResult<bool>.Success(false, "Invalid organization ID");
                 }
-                
+
                 var cacheKey = string.Format(CACHE_KEY_ORG_EXISTS, organizationId);
                 if (_cache.TryGetValue<bool>(cacheKey, out var cachedExists))
                 {
@@ -175,7 +179,7 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     return ServiceResult<bool>.Success(false, "Organization not found");
                 }
-                
+
                 var isActive = organization.Status == OrganizationStatus.Active && !organization.IsDeleted;
                 return ServiceResult<bool>.Success(isActive, isActive ? "Organization is active" : "Organization is not active");
             }
@@ -186,7 +190,7 @@ namespace AuthHive.Auth.Services.Organization
             }
         }
 
-        public async Task<ServiceResult<OrganizationCreationEligibility>> CheckCreationEligibilityAsync(Guid creatorUserId)
+        public async Task<ServiceResult<OrganizationCreationEligibility>> CheckCreationEligibilityAsync(Guid creatorUserId, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -203,7 +207,7 @@ namespace AuthHive.Auth.Services.Organization
                     eligibility.Restrictions.Add("User not found");
                     return ServiceResult<OrganizationCreationEligibility>.Success(eligibility);
                 }
-                
+
                 eligibility.AccountStatus = "Active"; // 임시 값
                 eligibility.IsAccountVerified = true;
                 eligibility.IsEmailVerified = true; // TODO: User 엔티티에서 확인
@@ -211,13 +215,13 @@ namespace AuthHive.Auth.Services.Organization
                 var userOwnedOrgs = await GetUserOwnedOrganizationsAsync(creatorUserId);
                 var highestPlan = await GetUserHighestPlanAsync(userOwnedOrgs);
                 eligibility.CurrentPlan = highestPlan ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
-                
+
                 var maxOrganizations = PricingConstants.SubscriptionPlans.OrganizationLimits.GetValueOrDefault(eligibility.CurrentPlan, 1);
                 eligibility.MaxOrganizationsAllowed = maxOrganizations;
-                
-                var currentOrgCount = await GetUserOrganizationCountAsync(creatorUserId);
+
+                var currentOrgCount = await GetUserOrganizationCountAsync(creatorUserId, cancellationToken);
                 eligibility.CurrentOrganizationCount = currentOrgCount;
-                
+
                 if (maxOrganizations == -1) // 무제한
                 {
                     eligibility.CanCreate = true;
@@ -233,7 +237,7 @@ namespace AuthHive.Auth.Services.Organization
                 {
                     eligibility.CanCreate = true;
                 }
-                
+
                 if (userOwnedOrgs.Any())
                 {
                     var hasAnyOutstandingBalance = await _organizationRepository.AnyAsync(o => userOwnedOrgs.Contains(o.Id) && o.HasOutstandingBalance);
@@ -280,7 +284,7 @@ namespace AuthHive.Auth.Services.Organization
                 }
 
                 eligibility.OrganizationName = organization.Name;
-                
+
                 var childCount = await _organizationRepository.CountAsync(o => o.ParentOrganizationId == organizationId && !o.IsDeleted);
                 if (childCount > 0)
                 {
@@ -311,7 +315,7 @@ namespace AuthHive.Auth.Services.Organization
                     eligibility.ActiveApplicationCount = applicationCount;
                     eligibility.BlockingReasons.Add($"Has {applicationCount} active application(s)");
                 }
-                
+
                 eligibility.ImpactLevel = EvaluateDeletionImpact(eligibility);
                 eligibility.RecommendedActions = GenerateRecommendedActions(eligibility);
                 eligibility.CanDelete = eligibility.BlockingReasons.Count == 0;
@@ -329,7 +333,7 @@ namespace AuthHive.Auth.Services.Organization
 
         #region Private Helper Methods
 
-        private async Task<HashSet<string>> GetReservedKeysAsync()
+        private async Task<HashSet<string>> GetReservedKeysAsync(CancellationToken cancellationToken = default)
         {
             return await _cache.GetOrCreateAsync(CACHE_KEY_RESERVED_KEYS, async entry =>
             {
@@ -344,34 +348,41 @@ namespace AuthHive.Auth.Services.Organization
             }) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
+
         private async Task<List<Guid>> GetUserOwnedOrganizationsAsync(Guid userId)
         {
             // ✨ 1. [오류 수정] CS0019: '==' 연산자를 'OrganizationMemberRole' 및 'string'에 적용할 수 없음
             // "Owner" 문자열 대신 OrganizationMemberRole.Owner Enum을 사용하여 비교합니다.
+            // ✨ 2. [경고 수정] CS8602: Dereference of a possibly null reference. (널 참조 해제 가능성)
+            // m.Member와 m.Member.User가 null이 아님을 명시적으로 검사합니다.
             var memberships = await _membershipRepository.FindAsync(
-                m => m.Member.User.Id == userId &&
-                m.MemberRole == OrganizationMemberRole.Owner &&
-                m.Status == OrganizationMembershipStatus.Active);
+                m => m.Member != null &&
+                     m.Member.User != null &&
+                     m.Member.User.Id == userId &&
+                     m.MemberRole == OrganizationMemberRole.Owner &&
+                     m.Status == OrganizationMembershipStatus.Active);
 
+            // 반환 시에도 'memberships' 컬렉션이 널일 가능성은 없지만, 
+            // 혹시 모를 널 참조 경고를 방지하기 위해 ToList() 앞에 !를 사용할 수 있습니다.
+            // 하지만 FindAsync가 IEnumerable<T>를 반환하는 경우 보통 널이 아니므로 그대로 둡니다.
             return memberships.Select(m => m.OrganizationId).ToList();
         }
-
-        private async Task<int> GetUserOrganizationCountAsync(Guid userId)
+        /// <summary>
+        /// 특정 사용자(User)가 현재 활성 상태로 속한 조직의 개수를 비동기적으로 조회합니다.
+        /// </summary>
+        private async Task<int> GetUserOrganizationCountAsync(Guid userId, CancellationToken cancellationToken = default)
         {
-            var cacheKey = string.Format(CACHE_KEY_USER_ORG_COUNT, userId);
-            return await _cache.GetOrCreateAsync(cacheKey, async entry =>
-            {
-                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10);
-                // ✨ 2. [오류 수정] CS0019: '==' 연산자를 'OrganizationMemberRole' 및 'string'에 적용할 수 없음
-                // "Owner" 문자열 대신 OrganizationMemberRole.Owner Enum을 사용하여 비교합니다.
-                var count = await _membershipRepository.CountAsync(
-                    m => m.Member.User.Id == userId &&
-                    m.MemberRole == OrganizationMemberRole.Owner &&
-                    m.Status == OrganizationMembershipStatus.Active);
-                return count;
-            });
-        }
+            // m.Member != null 및 m.Member.User != null 검사는 CS8602 경고를 방지하기 위해 추가됩니다.
+            // 이는 m.Member.User.Id가 널 허용 속성일 수 있기 때문입니다.
+            var count = await _membershipRepository.CountAsync(
+                m => m.Member != null &&
+                     m.Member.User != null &&
+                     m.Member.User.Id == userId &&
+                     m.Status == OrganizationMembershipStatus.Active,
+                cancellationToken);
 
+            return count;
+        }
         private async Task<string?> GetUserHighestPlanAsync(List<Guid> organizationIds)
         {
             if (!organizationIds.Any())

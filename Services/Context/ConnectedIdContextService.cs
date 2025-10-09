@@ -47,17 +47,18 @@ namespace AuthHive.Auth.Services.Context
             _logger = logger;
         }
 
-        public Task<bool> IsHealthyAsync()
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             // 필수 리포지토리와 캐시 서비스가 존재하는지 확인하여 서비스 상태를 반환합니다.
             return Task.FromResult(_connectedIdRepository != null && _cacheService != null);
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("ConnectedIdContextService initialized.");
             return Task.CompletedTask;
         }
+
 
         /// <summary>
         /// ConnectedId의 현재 컨텍스트를 가져옵니다.
@@ -121,17 +122,25 @@ namespace AuthHive.Auth.Services.Context
         /// </summary>
         public async Task<ServiceResult<SwitchContextResult>> SwitchOrganizationContextAsync(Guid currentConnectedId, Guid targetOrganizationId)
         {
+            // CancellationToken은 일반적으로 서비스 메서드에 포함되어야 하지만, 
+            // 현재 시그니처에 없으므로 일단 제외하고 로직만 수정합니다.
+
             if (currentConnectedId == Guid.Empty || targetOrganizationId == Guid.Empty)
                 return ServiceResult<SwitchContextResult>.Failure("CurrentConnectedId and TargetOrganizationId cannot be empty.");
 
             try
             {
                 // 1. 현재 사용자의 정보를 조회합니다.
+                // GetByIdAsync는 ConnectedId? 를 반환할 수 있습니다.
                 var currentConnection = await _connectedIdRepository.GetByIdAsync(currentConnectedId);
                 if (currentConnection == null)
                     return ServiceResult<SwitchContextResult>.Failure("Current ConnectedId not found.");
 
-                // 2. 사용자가 전환하려는 조직의 멤버인지 확인합니다. (같은 UserID를 가졌는지 체크)
+                // 🚨 UserId는 Guid? 타입일 가능성이 높으므로 null 체크를 먼저 수행합니다.
+                if (currentConnection.UserId == null)
+                    return ServiceResult<SwitchContextResult>.Failure("Current ConnectedId has no associated UserId.");
+
+                // 2. 사용자가 전환하려는 조직의 멤버인지 확인합니다.
                 var newConnection = await _connectedIdRepository.FirstOrDefaultAsync(
                     c => c.UserId == currentConnection.UserId && c.OrganizationId == targetOrganizationId);
 
@@ -145,20 +154,32 @@ namespace AuthHive.Auth.Services.Context
 
                 // 4. 새로운 컨텍스트 정보(ConnectedId, OrgId 등)를 담은 새 액세스 토큰을 발급합니다.
                 var claims = new List<Claim>
-                {
-                    new Claim(ClaimTypes.NameIdentifier, newConnection.UserId.ToString()),
-                    new Claim("connected_id", newConnection.Id.ToString()),
-                    new Claim("org_id", newConnection.OrganizationId.ToString()),
-                };
+        {
+            // CS8604 해결: UserId는 이미 null 체크를 했으므로 .Value를 사용하거나 null-forgiving (!) 사용 가능
+            // 하지만 currentConnection.UserId의 null 체크를 통해 이미 안전합니다.
+            new Claim(ClaimTypes.NameIdentifier, newConnection.UserId.ToString()!), // <--- 라인 150 추정 위치: Guid?의 ToString() 호출 시 !를 사용해 안전성 명시
+            new Claim("connected_id", newConnection.Id.ToString()),
+            new Claim("org_id", newConnection.OrganizationId.ToString()),
+            
+            // 만약 다른 널 허용 문자열 속성이 있다면 다음과 같이 처리해야 CS8604가 발생하지 않습니다.
+            // new Claim(ClaimTypes.Role, newConnection.Role ?? string.Empty), 
+        };
 
+                // CS8629 해결: newConnection.UserId는 Guid? 타입입니다.
+                // 1. GetValueOrDefault()를 사용하여 안전하게 Guid를 추출합니다.
+                // 2. 157 라인 이전(예: 31 라인)에 currentConnection.UserId에 대한 null 체크를 했으므로, 
+                // newConnection.UserId가 null일 가능성은 없지만, 타입 시스템을 위해 .Value를 사용합니다.
+                // (currentConnection.UserId가 null이 아니므로 newConnection.UserId도 null이 아니어야 함)
+                var userId = newConnection.UserId!.Value; // 널이 아님을 확신하고 .Value를 사용하거나 GetValueOrDefault(Guid.Empty) 사용
 
                 var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
-                    newConnection.UserId.Value,
+                    userId, // CS8629 해결: Guid?에서 Guid로 변환하여 전달
                     newConnection.Id,
                     claims);
 
                 if (!tokenResult.IsSuccess || tokenResult.Data == null)
                     return ServiceResult<SwitchContextResult>.Failure("Failed to generate new access token.");
+
                 // 5. 최종 결과를 DTO에 담아 반환합니다.
                 var result = new SwitchContextResult
                 {
@@ -206,10 +227,10 @@ namespace AuthHive.Auth.Services.Context
         /// <summary>
         /// 데이터베이스에서 역할과 권한 정보를 조회하여 컨텍스트를 만들고 캐시에 저장하는 핵심 내부 메서드입니다.
         /// </summary>
-        private async Task<ServiceResult<ConnectedIdContextDto>> BuildAndCachePermissionContextAsync(Guid connectedId)
+        private async Task<ServiceResult<ConnectedIdContextDto>> BuildAndCachePermissionContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             // 1. 필요한 모든 정보를 DB에서 한 번에 조회합니다.
-            var connection = await _connectedIdRepository.GetWithDetailsAsync(connectedId);
+            var connection = await _connectedIdRepository.GetWithDetailsAsync(connectedId, cancellationToken);
             if (connection?.User == null || connection.Organization == null)
                 return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId details (User, Organization) not found.");
 

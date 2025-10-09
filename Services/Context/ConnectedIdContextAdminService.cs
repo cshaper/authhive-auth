@@ -25,16 +25,18 @@ namespace AuthHive.Auth.Services.Context
             _logger = logger;
         }
 
-        public Task<bool> IsHealthyAsync()
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
+            // Repository가 null이 아닌지만 확인하는 간단한 헬스 체크
             return Task.FromResult(_contextRepository != null);
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("ConnectedIdContextAdminService initialized.");
             return Task.CompletedTask;
         }
+
 
         #region 데이터 정리 (Cleanup)
 
@@ -173,7 +175,7 @@ namespace AuthHive.Auth.Services.Context
 
         public async Task<ServiceResult<string>> ExportContextsAsync(Guid connectedId)
         {
-             if (connectedId == Guid.Empty)
+            if (connectedId == Guid.Empty)
                 return ServiceResult<string>.Failure("ConnectedId cannot be empty.");
 
             _logger.LogInformation("Exporting contexts for ConnectedId: {ConnectedId}", connectedId);

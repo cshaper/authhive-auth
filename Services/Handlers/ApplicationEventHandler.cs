@@ -61,50 +61,35 @@ namespace AuthHive.Auth.Handlers
             _unitOfWork = unitOfWork;
         }
 
+
         #region IService Implementation
 
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("ApplicationEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
-
-            // 자주 사용되는 애플리케이션 설정 미리 캐싱
-            await WarmUpCacheAsync();
+            return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
-        {
-            return await _cacheService.IsHealthyAsync() &&
-                   await _auditService.IsHealthyAsync();
-        }
-
-        private async Task WarmUpCacheAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                _logger.LogDebug("Warming up application cache...");
-
-                // 활성 애플리케이션 목록 캐싱 - GetQueryable 사용
-                var activeApps = await _applicationRepository
-                    .GetQueryable()
-                    .Where(a => a.Status == ApplicationStatus.Active)
-                    .Take(100)
-                    .ToListAsync();
-
-                foreach (var app in activeApps)
-                {
-                    var cacheKey = GetApplicationCacheKey(app.OrganizationId, app.Id);
-                    await _cacheService.SetAsync(cacheKey, app, ApplicationCacheTTL);
-                }
-
-                _logger.LogInformation("Application cache warmed up for {Count} applications", activeApps.Count);
+                return await _cacheService.IsHealthyAsync(cancellationToken) &&
+                       await _auditService.IsHealthyAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to warm up application cache");
+                _logger.LogWarning(ex, "ApplicationEventHandler health check failed");
+                return false;
             }
         }
 
         #endregion
+
 
         #region Core Application Events (필수 기능만 구현)
 
@@ -944,7 +929,7 @@ namespace AuthHive.Auth.Handlers
     internal class UsageResetNotification : IDomainEvent
     {
         public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; } 
+        public Guid AggregateId { get; private set; }
         public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
         public Guid ApplicationId { get; set; }
         public string ResetType { get; set; } = string.Empty;

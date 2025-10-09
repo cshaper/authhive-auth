@@ -69,7 +69,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// Product 엔티티를 수정할 때, 기본 ID 캐시 외에 ProductKey 캐시도 함께 무효화합니다.
         /// </summary>
-        public override async Task UpdateAsync(Product entity)
+        public override async Task UpdateAsync(Product entity, CancellationToken cancellationToken = default)
         {
             // 1. BaseRepository의 기본 Update 로직을 호출하여 ID 기반 캐시를 무효화합니다.
             await base.UpdateAsync(entity);

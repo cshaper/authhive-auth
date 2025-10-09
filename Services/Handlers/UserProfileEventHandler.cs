@@ -24,10 +24,10 @@ namespace AuthHive.Auth.Handlers.User
         private readonly ICacheService _cacheService;
         private readonly IDateTimeProvider _dateTimeProvider;
         private readonly IUnitOfWork _unitOfWork;
-        
+
         private const string CACHE_KEY_PREFIX = "profile";
         private const int PROFILE_CACHE_MINUTES = 30;
-        
+
         public int Priority => 3;
         public bool IsEnabled { get; private set; } = true;
 
@@ -46,15 +46,18 @@ namespace AuthHive.Auth.Handlers.User
         }
 
         #region IService Implementation
-        public async Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("UserProfileEventHandler initialized");
-            await Task.CompletedTask;
+            return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        // 1. CancellationToken added to the signature.
+        // 2. CancellationToken passed to the dependency's health check.
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return IsEnabled && await _cacheService.IsHealthyAsync();
+            // Pass the token to the underlying service call.
+            return IsEnabled && await _cacheService.IsHealthyAsync(cancellationToken);
         }
         #endregion
 
@@ -71,7 +74,7 @@ namespace AuthHive.Auth.Handlers.User
                     ["created_at"] = _dateTimeProvider.UtcNow,
                     ["user_id"] = @event.UserId
                 };
-                
+
                 // 선택적 필드들 - SaaS 고객이 정의한 필드도 수용
                 if (!string.IsNullOrEmpty(@event.PhoneNumber))
                     profileData["phone"] = MaskSensitiveData(@event.PhoneNumber, "phone");
@@ -79,18 +82,18 @@ namespace AuthHive.Auth.Handlers.User
                     profileData["timezone"] = @event.TimeZone;
                 if (!string.IsNullOrEmpty(@event.PreferredLanguage))
                     profileData["language"] = @event.PreferredLanguage;
-                    
+
                 // 프로필 캐시 설정 (짧은 TTL)
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 await _cacheService.SetAsync(cacheKey, profileData, TimeSpan.FromMinutes(PROFILE_CACHE_MINUTES));
-                
+
                 // 감사 로그 (최소화)
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Create,
                     "PROFILE_CREATED",
                     @event.CreatedByConnectedId ?? @event.UserId,
                     resourceId: @event.ProfileId.ToString());
-                    
+
                 _logger.LogInformation("Profile created for UserId: {UserId}", @event.UserId);
             }
             catch (Exception ex)
@@ -126,7 +129,7 @@ namespace AuthHive.Auth.Handlers.User
                         metadata: viewData);
                 }
 
-                _logger.LogDebug("Profile viewed - ProfileId: {ProfileId}, Viewer: {ViewerId}", 
+                _logger.LogDebug("Profile viewed - ProfileId: {ProfileId}, Viewer: {ViewerId}",
                     @event.ProfileId, @event.ViewerConnectedId);
             }
             catch (Exception ex)
@@ -142,13 +145,13 @@ namespace AuthHive.Auth.Handlers.User
                 // 캐시 무효화
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 await _cacheService.RemoveAsync(cacheKey);
-                
+
                 // 변경 사항 처리
                 var changes = @event.Changes ?? new Dictionary<string, object>();
                 changes["updated_at"] = @event.UpdatedAt;
                 changes["updated_by"] = @event.UpdatedByConnectedId;
                 changes["new_completion"] = @event.NewCompletionPercentage;
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Update,
@@ -156,8 +159,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.UpdatedByConnectedId,
                     resourceId: @event.ProfileId.ToString(),
                     metadata: changes);
-                    
-                _logger.LogInformation("Profile updated - ProfileId: {ProfileId}, CompletionPercentage: {Percentage}%", 
+
+                _logger.LogInformation("Profile updated - ProfileId: {ProfileId}, CompletionPercentage: {Percentage}%",
                     @event.ProfileId, @event.NewCompletionPercentage);
             }
             catch (Exception ex)
@@ -173,15 +176,15 @@ namespace AuthHive.Auth.Handlers.User
                 // 캐시 삭제
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 await _cacheService.RemoveAsync(cacheKey);
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Delete,
                     "PROFILE_DELETED",
                     @event.DeletedByConnectedId,
                     resourceId: @event.ProfileId.ToString());
-                    
-                _logger.LogWarning("Profile deleted - ProfileId: {ProfileId}, DeletedBy: {DeletedBy}", 
+
+                _logger.LogWarning("Profile deleted - ProfileId: {ProfileId}, DeletedBy: {DeletedBy}",
                     @event.ProfileId, @event.DeletedByConnectedId);
             }
             catch (Exception ex)
@@ -195,9 +198,9 @@ namespace AuthHive.Auth.Handlers.User
             try
             {
                 // 에러 로깅
-                _logger.LogError("Profile error occurred - UserId: {UserId}, ErrorType: {ErrorType}, Message: {Message}", 
+                _logger.LogError("Profile error occurred - UserId: {UserId}, ErrorType: {ErrorType}, Message: {Message}",
                     @event.UserId, @event.ErrorType, @event.ErrorMessage);
-                    
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Configuration,
@@ -229,9 +232,9 @@ namespace AuthHive.Auth.Handlers.User
                     ["content_type"] = @event.ContentType,
                     ["uploaded_at"] = @event.UploadedAt
                 };
-                
+
                 await _cacheService.SetAsync(cacheKey, imageData, TimeSpan.FromDays(7));
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Update,
@@ -239,8 +242,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.UploadedByConnectedId,
                     resourceId: @event.UserId.ToString(),
                     metadata: imageData);
-                    
-                _logger.LogInformation("Profile image uploaded - UserId: {UserId}, Size: {Size} bytes", 
+
+                _logger.LogInformation("Profile image uploaded - UserId: {UserId}, Size: {Size} bytes",
                     @event.UserId, @event.ImageSize);
             }
             catch (Exception ex)
@@ -256,14 +259,14 @@ namespace AuthHive.Auth.Handlers.User
                 // 이미지 캐시 삭제
                 var cacheKey = $"{CACHE_KEY_PREFIX}:image:{@event.UserId:N}";
                 await _cacheService.RemoveAsync(cacheKey);
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Delete,
                     "PROFILE_IMAGE_DELETED",
                     @event.DeletedByConnectedId,
                     resourceId: @event.UserId.ToString());
-                    
+
                 _logger.LogInformation("Profile image deleted - UserId: {UserId}", @event.UserId);
             }
             catch (Exception ex)
@@ -284,11 +287,11 @@ namespace AuthHive.Auth.Handlers.User
                     ["changed_at"] = @event.ChangedAt,
                     ["changed_by"] = @event.ChangedByConnectedId
                 };
-                
+
                 // 캐시 무효화 (모드 변경은 중요한 변경)
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 await _cacheService.RemoveAsync(cacheKey);
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Update,
@@ -296,8 +299,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ChangedByConnectedId,
                     resourceId: @event.UserId.ToString(),
                     metadata: changeData);
-                    
-                _logger.LogWarning("Metadata mode changed - UserId: {UserId}, From: {OldMode} To: {NewMode}", 
+
+                _logger.LogWarning("Metadata mode changed - UserId: {UserId}, From: {OldMode} To: {NewMode}",
                     @event.UserId, @event.OldMode, @event.NewMode);
             }
             catch (Exception ex)
@@ -319,14 +322,14 @@ namespace AuthHive.Auth.Handlers.User
                     ["cleaned_at"] = @event.CleanedAt,
                     ["user_count"] = @event.CleanedUserIds.Count
                 };
-                
+
                 // 영향받은 사용자들의 캐시 무효화
                 foreach (var userId in @event.CleanedUserIds)
                 {
                     var cacheKey = $"{CACHE_KEY_PREFIX}:{userId:N}";
                     await _cacheService.RemoveAsync(cacheKey);
                 }
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Delete,
@@ -334,8 +337,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.UserId,
                     resourceId: "BULK_OPERATION",
                     metadata: cleanupData);
-                    
-                _logger.LogWarning("Bulk metadata cleaned - Mode: {Mode}, Count: {Count}, Users: {UserCount}", 
+
+                _logger.LogWarning("Bulk metadata cleaned - Mode: {Mode}, Count: {Count}, Users: {UserCount}",
                     @event.Mode, @event.CleanedCount, @event.CleanedUserIds.Count);
             }
             catch (Exception ex)
@@ -355,7 +358,7 @@ namespace AuthHive.Auth.Handlers.User
                     ["exported_at"] = @event.ExportedAt,
                     ["data_size"] = @event.DataSize
                 };
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Export,
@@ -363,8 +366,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.UserId,
                     resourceId: @event.UserId.ToString(),
                     metadata: exportData);
-                    
-                _logger.LogInformation("Data exported - UserId: {UserId}, Format: {Format}, Size: {Size} bytes", 
+
+                _logger.LogInformation("Data exported - UserId: {UserId}, Format: {Format}, Size: {Size} bytes",
                     @event.UserId, @event.Format, @event.DataSize);
             }
             catch (Exception ex)
@@ -385,7 +388,7 @@ namespace AuthHive.Auth.Handlers.User
                     ["changed_at"] = @event.ChangedAt,
                     ["changed_by"] = @event.ChangedByConnectedId
                 };
-                
+
                 // 캐시 업데이트
                 var cacheKey = $"{CACHE_KEY_PREFIX}:{@event.UserId:N}";
                 var profileData = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey);
@@ -394,7 +397,7 @@ namespace AuthHive.Auth.Handlers.User
                     profileData["timezone"] = @event.NewTimeZone;
                     await _cacheService.SetAsync(cacheKey, profileData, TimeSpan.FromMinutes(PROFILE_CACHE_MINUTES));
                 }
-                
+
                 // 감사 로그
                 await _auditService.LogActionAsync(
                     Core.Enums.Core.AuditActionType.Update,
@@ -402,8 +405,8 @@ namespace AuthHive.Auth.Handlers.User
                     @event.ChangedByConnectedId,
                     resourceId: @event.UserId.ToString(),
                     metadata: changeData);
-                    
-                _logger.LogInformation("TimeZone changed - UserId: {UserId}, From: {OldTZ} To: {NewTZ}", 
+
+                _logger.LogInformation("TimeZone changed - UserId: {UserId}, From: {OldTZ} To: {NewTZ}",
                     @event.UserId, @event.OldTimeZone, @event.NewTimeZone);
             }
             catch (Exception ex)
@@ -415,11 +418,11 @@ namespace AuthHive.Auth.Handlers.User
         #endregion
 
         #region Helper Methods
-        
+
         private string MaskSensitiveData(string data, string type)
         {
             if (string.IsNullOrEmpty(data)) return "****";
-            
+
             return type switch
             {
                 "phone" => data.Length > 4 ? $"***{data.Substring(data.Length - 4)}" : "****",
@@ -427,11 +430,11 @@ namespace AuthHive.Auth.Handlers.User
                 _ => "****"
             };
         }
-        
+
         private void MergeDynamicMetadata(Dictionary<string, object> target, string? metadata)
         {
             if (string.IsNullOrEmpty(metadata)) return;
-            
+
             try
             {
                 var dynamicData = JsonSerializer.Deserialize<Dictionary<string, object>>(metadata);
@@ -449,15 +452,15 @@ namespace AuthHive.Auth.Handlers.User
                 target["custom_metadata"] = metadata;
             }
         }
-        
+
         private bool ContainsCriticalFields(string[] fields)
         {
             // 테넌트별로 다를 수 있는 중요 필드
             var criticalFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { 
+            {
                 "email", "phone", "legal_name", "tax_id", "ssn"
             };
-            
+
             foreach (var field in fields)
             {
                 if (criticalFields.Contains(field))
@@ -465,7 +468,7 @@ namespace AuthHive.Auth.Handlers.User
             }
             return false;
         }
-        
+
         #endregion
     }
 }

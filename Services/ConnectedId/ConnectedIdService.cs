@@ -69,12 +69,14 @@ namespace AuthHive.Auth.Services
             _cacheService = cacheService;
             _context = context;
         }
-
         #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            try { return await _context.Database.CanConnectAsync(); }
+            try
+            {
+                return await _context.Database.CanConnectAsync(cancellationToken);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "ConnectedIdService health check failed");
@@ -82,7 +84,7 @@ namespace AuthHive.Auth.Services
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("ConnectedIdService initialized.");
             return Task.CompletedTask;
@@ -90,55 +92,71 @@ namespace AuthHive.Auth.Services
 
         #endregion
 
+
         #region CRUD Operations
 
-        public async Task<ServiceResult<ConnectedIdResponse>> CreateAsync(CreateConnectedIdRequest request)
+        public async Task<ServiceResult<ConnectedIdResponse>> CreateAsync(CreateConnectedIdRequest request, CancellationToken cancellationToken = default)
         {
             var createdByConnectedId = Guid.NewGuid();
 
-            await _unitOfWork.BeginTransactionAsync();
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                var validationResult = await ValidateMemberLimitAsync(request.OrganizationId, createdByConnectedId);
+                var validationResult = await ValidateMemberLimitAsync(request.OrganizationId, createdByConnectedId, cancellationToken);
                 if (!validationResult.IsSuccess)
                 {
-                    return ServiceResult<ConnectedIdResponse>.Failure(validationResult.ErrorMessage ?? "Validation failed with an unknown error.", validationResult.ErrorCode);
+                    return ServiceResult<ConnectedIdResponse>.Failure(
+                        validationResult.ErrorMessage ?? "Validation failed with an unknown error.",
+                        validationResult.ErrorCode
+                    );
                 }
 
-                var existing = await _connectedIdRepository.GetByUserAndOrganizationAsync(request.UserId, request.OrganizationId);
+                var existing = await _connectedIdRepository.GetByUserAndOrganizationAsync(
+                    request.UserId,
+                    request.OrganizationId,
+                    cancellationToken
+                );
+
                 if (existing != null && !existing.IsDeleted)
                 {
-                    return ServiceResult<ConnectedIdResponse>.Failure("User is already an active member of this organization.", "ALREADY_MEMBER");
+                    return ServiceResult<ConnectedIdResponse>.Failure(
+                        "User is already an active member of this organization.",
+                        "ALREADY_MEMBER"
+                    );
                 }
 
                 var newEntity = _mapper.Map<ConnectedId>(request);
                 newEntity.Status = ConnectedIdStatus.Active;
                 newEntity.JoinedAt = _dateTimeProvider.UtcNow;
 
-                await _connectedIdRepository.AddAsync(newEntity);
-                await _eventBus.PublishAsync(new MemberAddedToOrganizationEvent(newEntity.Id, newEntity.UserId, newEntity.OrganizationId, createdByConnectedId));
+                await _connectedIdRepository.AddAsync(newEntity, cancellationToken);
+                await _eventBus.PublishAsync(
+                    new MemberAddedToOrganizationEvent(newEntity.Id, newEntity.UserId, newEntity.OrganizationId, createdByConnectedId),
+                    cancellationToken
+                );
                 await _auditService.LogActionAsync(
                     performedByConnectedId: createdByConnectedId,
                     action: "Create ConnectedId",
                     actionType: AuditActionType.Create,
                     resourceType: nameof(ConnectedId),
-                    resourceId: newEntity.Id.ToString()
+                    resourceId: newEntity.Id.ToString(),
+                    cancellationToken: cancellationToken
                 );
-                await InvalidateOrganizationCache(request.OrganizationId);
-                await _unitOfWork.CommitTransactionAsync();
+                await InvalidateOrganizationCache(request.OrganizationId, cancellationToken);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
                 var response = _mapper.Map<ConnectedIdResponse>(newEntity);
                 return ServiceResult<ConnectedIdResponse>.Success(response);
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 _logger.LogError(ex, "Error creating ConnectedId for User {UserId} in Organization {OrganizationId}", request.UserId, request.OrganizationId);
                 return ServiceResult<ConnectedIdResponse>.Failure($"Failed to create ConnectedId: {ex.Message}", "CREATE_ERROR");
             }
         }
 
-        public async Task<ServiceResult<ConnectedIdResponse>> UpdateAsync(Guid id, UpdateConnectedIdRequest request)
+        public async Task<ServiceResult<ConnectedIdResponse>> UpdateAsync(Guid id, UpdateConnectedIdRequest request, CancellationToken cancellationToken = default)
         {
             var updatedByConnectedId = Guid.NewGuid();
 
@@ -169,7 +187,6 @@ namespace AuthHive.Auth.Services
                     resourceId: entity.Id.ToString()
                 );
 
-                await InvalidateSingleConnectedIdCache(id, entity.OrganizationId, entity.UserId);
                 await _unitOfWork.CommitTransactionAsync();
 
                 var response = _mapper.Map<ConnectedIdResponse>(entity);
@@ -183,11 +200,11 @@ namespace AuthHive.Auth.Services
             }
         }
 
-        public async Task<ServiceResult> DeleteAsync(Guid id)
+        public async Task<ServiceResult> DeleteAsync(Guid id, CancellationToken cancellationToken = default)
         {
             var deletedByConnectedId = Guid.NewGuid();
 
-            await _unitOfWork.BeginTransactionAsync();
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
                 var entity = await _connectedIdRepository.GetByIdAsync(id);
@@ -196,56 +213,67 @@ namespace AuthHive.Auth.Services
                     return ServiceResult.NotFound("ConnectedId not found.");
                 }
 
+                // 👈 필수 로직 추가: 소프트 삭제 플래그 및 시간 설정
                 entity.IsDeleted = true;
                 entity.DeletedAt = _dateTimeProvider.UtcNow;
                 entity.Status = ConnectedIdStatus.Inactive;
 
-                await _connectedIdRepository.UpdateAsync(entity);
+                // DB에 변경 사항 반영
+                await _connectedIdRepository.UpdateAsync(entity!, cancellationToken);
+
                 await _eventBus.PublishAsync(new MemberRemovedFromOrganizationEvent(entity.Id, entity.UserId, entity.OrganizationId, deletedByConnectedId));
                 await _auditService.LogActionAsync(
-               performedByConnectedId: deletedByConnectedId,
-               action: "Delete ConnectedId (Soft)",
-               actionType: AuditActionType.Delete,
-               resourceType: nameof(ConnectedId),
-               resourceId: entity.Id.ToString()
-           );
-                await InvalidateSingleConnectedIdCache(id, entity.OrganizationId, entity.UserId);
-                await _unitOfWork.CommitTransactionAsync();
+                   performedByConnectedId: deletedByConnectedId,
+                   action: "Delete ConnectedId (Soft)",
+                   actionType: AuditActionType.Delete,
+                   resourceType: nameof(ConnectedId),
+                   resourceId: entity.Id.ToString(),
+                   cancellationToken: cancellationToken
+               );
+
+                await InvalidateSingleConnectedIdCache(id, entity.OrganizationId, entity.UserId, cancellationToken);
+
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
                 return ServiceResult.Success("ConnectedId deleted successfully.");
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 _logger.LogError(ex, "Error deleting ConnectedId: {Id}", id);
                 return ServiceResult.Failure($"Failed to delete ConnectedId: {ex.Message}", "DELETE_ERROR");
             }
         }
-
-        public async Task<ServiceResult<ConnectedId>> GetOrCreateAsync(Guid userId, Guid organizationId)
+        public async Task<ServiceResult<ConnectedId>> GetOrCreateAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var existingEntity = await _connectedIdRepository.GetByUserAndOrganizationAsync(userId, organizationId);
+            var existingEntity = await _connectedIdRepository.GetByUserAndOrganizationAsync(userId, organizationId, cancellationToken);
             if (existingEntity != null)
             {
                 return ServiceResult<ConnectedId>.Success(existingEntity);
             }
 
             var createRequest = new CreateConnectedIdRequest { UserId = userId, OrganizationId = organizationId };
-            var creationResult = await CreateAsync(createRequest);
+            var creationResult = await CreateAsync(createRequest, cancellationToken);
 
             if (!creationResult.IsSuccess)
             {
-                return ServiceResult<ConnectedId>.Failure(creationResult.ErrorMessage ?? "Failed to create ConnectedId for an unknown reason.", creationResult.ErrorCode);
+                return ServiceResult<ConnectedId>.Failure(
+                    creationResult.ErrorMessage ?? "Failed to create ConnectedId for an unknown reason.",
+                    creationResult.ErrorCode
+                );
             }
+
             if (creationResult.Data == null)
             {
                 return ServiceResult<ConnectedId>.Failure("Creation succeeded but returned no data.", "DATA_INCONSISTENCY");
             }
-            var newEntity = await _connectedIdRepository.GetByIdAsync(creationResult.Data.Id);
+
+            var newEntity = await _connectedIdRepository.GetByIdAsync(creationResult.Data.Id, cancellationToken);
             if (newEntity == null)
             {
                 return ServiceResult<ConnectedId>.Failure("Failed to retrieve the newly created ConnectedId.", "RETRIEVAL_ERROR");
             }
+
             return ServiceResult<ConnectedId>.Success(newEntity);
         }
 
@@ -253,16 +281,18 @@ namespace AuthHive.Auth.Services
 
         #region Query Operations
 
-        public async Task<ServiceResult<ConnectedIdDetailResponse>> GetByIdAsync(Guid id)
+        public async Task<ServiceResult<ConnectedIdDetailResponse>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
         {
             var cacheKey = $"cache:connectedid:{id}";
             var cachedResponse = await _cacheService.GetAsync<ConnectedIdDetailResponse>(cacheKey);
-            if (cachedResponse != null) return ServiceResult<ConnectedIdDetailResponse>.Success(cachedResponse);
+            if (cachedResponse != null)
+                return ServiceResult<ConnectedIdDetailResponse>.Success(cachedResponse);
 
             try
             {
-                var entity = await _connectedIdRepository.GetWithRelatedDataAsync(id, includeUser: true, includeOrganization: true);
-                if (entity == null) return ServiceResult<ConnectedIdDetailResponse>.NotFound("ConnectedId not found.");
+                var entity = await _connectedIdRepository.GetWithDetailsAsync(id, cancellationToken);
+                if (entity == null)
+                    return ServiceResult<ConnectedIdDetailResponse>.NotFound("ConnectedId not found.");
 
                 var response = _mapper.Map<ConnectedIdDetailResponse>(entity);
                 await _cacheService.SetAsync(cacheKey, response, TimeSpan.FromHours(1));
@@ -274,6 +304,7 @@ namespace AuthHive.Auth.Services
                 return ServiceResult<ConnectedIdDetailResponse>.Failure($"Failed to get ConnectedId: {ex.Message}", "GET_ERROR");
             }
         }
+
 
         public async Task<ServiceResult<ConnectedIdListResponse>> GetByOrganizationAsync(Guid organizationId, SearchConnectedIdsRequest request)
         {
@@ -301,7 +332,7 @@ namespace AuthHive.Auth.Services
             }
         }
 
-        public async Task<ServiceResult<IEnumerable<ConnectedIdResponse>>> GetByUserAsync(Guid userId)
+        public async Task<ServiceResult<IEnumerable<ConnectedIdResponse>>> GetByUserAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             var cacheKey = $"cache:user:{userId}:connections";
             var cachedConnections = await _cacheService.GetAsync<IEnumerable<ConnectedIdResponse>>(cacheKey);
@@ -309,7 +340,7 @@ namespace AuthHive.Auth.Services
 
             try
             {
-                var entities = await _connectedIdRepository.GetByUserIdAsync(userId);
+                var entities = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                 var response = _mapper.Map<IEnumerable<ConnectedIdResponse>>(entities);
                 await _cacheService.SetAsync(cacheKey, response, TimeSpan.FromMinutes(10));
                 return ServiceResult<IEnumerable<ConnectedIdResponse>>.Success(response);
@@ -321,11 +352,11 @@ namespace AuthHive.Auth.Services
             }
         }
 
-        public async Task<ServiceResult<Guid>> GetActiveConnectedIdByUserIdAsync(Guid userId)
+        public async Task<ServiceResult<Guid>> GetActiveConnectedIdByUserIdAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var allConnections = await _connectedIdRepository.GetByUserIdAsync(userId);
+                var allConnections = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                 var activeConnection = allConnections
                     .Where(c => c.Status == ConnectedIdStatus.Active && !c.IsDeleted)
                     .OrderByDescending(c => c.LastActiveAt)
@@ -348,7 +379,7 @@ namespace AuthHive.Auth.Services
 
         #region Activity & Validation
 
-        public async Task<ServiceResult> UpdateLastActivityAsync(Guid id)
+        public async Task<ServiceResult> UpdateLastActivityAsync(Guid id, CancellationToken cancellationToken = default)
         {
             await _unitOfWork.BeginTransactionAsync();
             try
@@ -361,7 +392,8 @@ namespace AuthHive.Auth.Services
 
                 entity.LastActiveAt = _dateTimeProvider.UtcNow;
                 await _connectedIdRepository.UpdateAsync(entity);
-                await InvalidateSingleConnectedIdCache(id, entity.OrganizationId, entity.UserId);
+                await InvalidateSingleConnectedIdCache(id, entity.OrganizationId, entity.UserId, cancellationToken);
+
                 await _unitOfWork.CommitTransactionAsync();
 
                 return ServiceResult.Success("Last activity updated.");
@@ -396,12 +428,11 @@ namespace AuthHive.Auth.Services
                 return ServiceResult<bool>.Failure($"Failed to validate: {ex.Message}", "VALIDATION_ERROR");
             }
         }
-
-        public async Task<ServiceResult<bool>> IsMemberOfOrganizationAsync(Guid userId, Guid organizationId)
+        public async Task<ServiceResult<bool>> IsMemberOfOrganizationAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var isMember = await _connectedIdRepository.IsMemberOfOrganizationAsync(userId, organizationId);
+                var isMember = await _connectedIdRepository.IsMemberOfOrganizationAsync(userId, organizationId, cancellationToken);
                 return ServiceResult<bool>.Success(isMember);
             }
             catch (Exception ex)
@@ -411,13 +442,14 @@ namespace AuthHive.Auth.Services
             }
         }
 
+
         #endregion
 
         #region Private Helpers
 
-        private async Task<ServiceResult> ValidateMemberLimitAsync(Guid organizationId, Guid? triggeredBy)
+        private async Task<ServiceResult> ValidateMemberLimitAsync(Guid organizationId, Guid? triggeredBy, CancellationToken cancellationToken)
         {
-            var plan = await _organizationPlanRepository.GetActivePlanByOrganizationIdAsync(organizationId);
+            var plan = await _organizationPlanRepository.GetActivePlanByOrganizationIdAsync(organizationId, cancellationToken);
             var planKey = plan?.PlanKey ?? PricingConstants.DefaultPlanKey;
 
             if (!PricingConstants.SubscriptionPlans.MemberLimits.TryGetValue(planKey, out var memberLimit))
@@ -426,35 +458,46 @@ namespace AuthHive.Auth.Services
                 memberLimit = PricingConstants.SubscriptionPlans.MemberLimits[PricingConstants.DefaultPlanKey];
             }
 
-            if (memberLimit == -1) return ServiceResult.Success();
+            if (memberLimit == -1)
+                return ServiceResult.Success();
 
-            var activeMembers = await _connectedIdRepository.GetByOrganizationAndStatusAsync(organizationId, ConnectedIdStatus.Active);
+            var activeMembers = await _connectedIdRepository.GetByOrganizationAndStatusAsync(
+                organizationId,
+                ConnectedIdStatus.Active,
+                cancellationToken
+            );
+
             var currentMemberCount = activeMembers.Count();
 
             if (currentMemberCount >= memberLimit)
             {
                 var errorMessage = $"Organization member limit of {memberLimit} for the '{planKey}' plan has been exceeded.";
-                var limitEvent = new PlanLimitReachedEvent(organizationId, planKey, PlanLimitType.OrganizationMemberCount, currentMemberCount, memberLimit, triggeredBy);
-                await _eventBus.PublishAsync(limitEvent);
+                var limitEvent = new PlanLimitReachedEvent(
+                    organizationId,
+                    planKey,
+                    PlanLimitType.OrganizationMemberCount,
+                    currentMemberCount,
+                    memberLimit,
+                    triggeredBy
+                );
+
+                await _eventBus.PublishAsync(limitEvent, cancellationToken);
                 return ServiceResult.Failure(errorMessage, "PLAN_LIMIT_EXCEEDED");
             }
 
             return ServiceResult.Success();
         }
 
-        private async Task InvalidateOrganizationCache(Guid organizationId)
+        private async Task InvalidateOrganizationCache(Guid organizationId, CancellationToken cancellationToken)
         {
-            await _cacheService.RemoveAsync($"cache:org:{organizationId}:members:page:1:size:10");
+            await _cacheService.RemoveAsync($"cache:org:{organizationId}:members:page:1:size:10", cancellationToken);
+        }
+        private async Task InvalidateSingleConnectedIdCache(Guid connectedId, Guid organizationId, Guid? userId, CancellationToken cancellationToken)
+        {
+            var cacheKey = $"cache:connectedId:{connectedId}:org:{organizationId}:user:{userId}";
+            await _cacheService.RemoveAsync(cacheKey, cancellationToken);
         }
 
-        private async Task InvalidateSingleConnectedIdCache(Guid id, Guid organizationId, Guid? userId)
-        {
-            await _cacheService.RemoveAsync($"cache:connectedid:{id}");
-            await _cacheService.RemoveAsync($"cache:user:{userId}:connections");
-            await _cacheService.RemoveAsync($"cache:user:{userId}:active-connectedid");
-            await _cacheService.RemoveAsync($"cache:org:{organizationId}:ismember:{userId}");
-            await InvalidateOrganizationCache(organizationId);
-        }
 
         // Path: AuthHive.Auth/Services/ConnectedId/ConnectedIdService.cs
 

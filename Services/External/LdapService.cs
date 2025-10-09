@@ -59,16 +59,17 @@ namespace AuthHive.Auth.Services.External
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("LdapService initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
-            return await _cacheService.IsHealthyAsync();
+            return await _cacheService.IsHealthyAsync(cancellationToken);
         }
+
 
         #region Connection Management
 
@@ -105,7 +106,7 @@ namespace AuthHive.Auth.Services.External
                 return ServiceResult<bool>.Failure($"Connection failed: {ex.Message}");
             }
         }
-        
+
         public async Task<ServiceHealthStatus> CheckHealthAsync()
         {
             var status = new ServiceHealthStatus { CheckedAt = _dateTimeProvider.UtcNow };
@@ -117,7 +118,7 @@ namespace AuthHive.Auth.Services.External
                 status.ErrorMessage = "Cache service is not responding.";
                 return status;
             }
-            
+
             status.IsHealthy = true;
             status.Status = "Healthy";
             return status;
@@ -160,7 +161,7 @@ namespace AuthHive.Auth.Services.External
             {
                 return ServiceResult<LdapAuthResultDto>.Failure("Password cannot be empty.", "INVALID_CREDENTIALS");
             }
-        
+
             var configResult = await GetConfigurationAsync(organizationId);
             if (!configResult.IsSuccess || configResult.Data == null)
             {
@@ -176,7 +177,7 @@ namespace AuthHive.Auth.Services.External
                 // Error CS1061 Fix: Replaced 'Search' with 'SearchAsync' and correctly handle the 'ILdapSearchResults' result.
                 serviceConnection = await CreateAndBindConnectionAsync(config);
                 var searchFilter = string.Format(config.UserSearchFilter, username);
-                
+
                 var searchResults = await serviceConnection.SearchAsync(
                     config.UserSearchBase,
                     LdapConnection.ScopeSub,
@@ -191,13 +192,13 @@ namespace AuthHive.Auth.Services.External
                     userEntry = entry;
                     break;
                 }
-                
+
                 if (userEntry == null)
                 {
                     await LogAuthenticationAttempt(organizationId, username, false, "User not found");
                     return ServiceResult<LdapAuthResultDto>.Failure("Invalid username or password.", "AUTH_FAILED");
                 }
-                
+
                 // Now, attempt to bind as the user
                 var userConnOptions = new LdapConnectionOptions();
                 if (config.UseSsl)
@@ -211,7 +212,7 @@ namespace AuthHive.Auth.Services.External
 
                 var ldapUser = MapEntryToUserDto(userEntry, config.AttributeMappings);
                 var groups = GetUserGroupNames(userEntry);
-                
+
                 await LogAuthenticationAttempt(organizationId, username, true, "Authentication successful");
 
                 return ServiceResult<LdapAuthResultDto>.Success(new LdapAuthResultDto
@@ -239,7 +240,7 @@ namespace AuthHive.Auth.Services.External
                 userConnection?.Disconnect();
             }
         }
-        
+
         public Task<ServiceResult<LdapAuthResultDto>> AuthenticateWithMfaAsync(string username, string password, string mfaCode, Guid organizationId)
         {
             throw new NotImplementedException("MFA is handled by a separate service after successful LDAP authentication.");
@@ -283,7 +284,7 @@ namespace AuthHive.Auth.Services.External
             var connection = new LdapConnection(options);
             await connection.ConnectAsync(config.Server, config.Port);
             await connection.BindAsync(config.BindDn, config.BindPassword);
-            
+
             return connection;
         }
 
@@ -298,11 +299,11 @@ namespace AuthHive.Auth.Services.External
             {
                 attributes[attr.Name] = attr.StringValue;
             }
-            
+
             userDto.Attributes = attributes;
 
             // Error CS1061 Fix: Use 'Get' instead of 'GetAttribute'.
-            if(entry.Get("userAccountControl") is { } uacAttr)
+            if (entry.Get("userAccountControl") is { } uacAttr)
             {
                 var uacValue = int.Parse(uacAttr.StringValue);
                 userDto.IsActive = (uacValue & 2) == 0;
@@ -317,7 +318,7 @@ namespace AuthHive.Auth.Services.External
             var memberOfAttr = userEntry.Get("memberOf");
             return memberOfAttr?.StringValueArray.ToList() ?? new List<string>();
         }
-        
+
         private async Task LogAuthenticationAttempt(Guid organizationId, string username, bool success, string details)
         {
             await _auditService.LogAsync(new AuditLog
@@ -332,10 +333,10 @@ namespace AuthHive.Auth.Services.External
                 Metadata = $"Attempted login for user '{username}'. Result: {details}"
             });
         }
-        
+
         private static string GetOrgConfigCacheKey(Guid organizationId) => $"ldap:config:{organizationId}";
         private static string GetUserCacheKey(Guid organizationId, string username) => $"ldap:user:{organizationId}:{username}";
-        
+
         #endregion
 
         #region Placeholder Implementations (to satisfy interfaces)
@@ -353,13 +354,13 @@ namespace AuthHive.Auth.Services.External
         public Task<ServiceResult<PagedResult<LdapUserDto>>> GetUsersPagedAsync(string searchBase, int pageNumber, int pageSize, string? filter = null, Guid? organizationId = null) => throw new NotImplementedException();
         public Task<ServiceResult<List<LdapChangeDto>>> DetectChangesAsync(Guid organizationId, byte[]? previousCookie = null) => throw new NotImplementedException();
         public Task<ServiceResult<LdapSchemaDto>> GetSchemaAsync(Guid organizationId) => throw new NotImplementedException();
-        
+
         // Stubs for remaining IExternalService methods
         public Task<ServiceResult> TestConnectionAsync() => throw new NotImplementedException(); // From IExternalService
         public Task<ServiceResult> ValidateConfigurationAsync() => throw new NotImplementedException();
         public Task<ServiceResult<ExternalServiceUsage>> GetUsageAsync(DateTime startDate, DateTime endDate, Guid? organizationId = null) => throw new NotImplementedException();
         public Task RecordMetricsAsync(ExternalServiceMetrics metrics) => throw new NotImplementedException();
-        
+
         #endregion
     }
 }

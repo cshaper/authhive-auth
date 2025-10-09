@@ -61,12 +61,17 @@ namespace AuthHive.Auth.Services.Organization
 
         #region IService 기본 구현
 
-        public async Task<bool> IsHealthyAsync()
+        // OrganizationDomainService.cs
+
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                // Repository 접근 가능 여부 확인
-                await _domainRepository.CountAsync();
+                // 🚨 CancellationToken을 CountAsync에 전달:
+                // 대부분의 Repository CountAsync는 (predicate, token) 시그니처를 가집니다.
+                // predicate 없이 토큰만 전달하려면 첫 번째 인수로 null을 명시해야 합니다.
+                await _domainRepository.CountAsync(null, cancellationToken);
+
                 return true;
             }
             catch (Exception ex)
@@ -76,8 +81,9 @@ namespace AuthHive.Auth.Services.Organization
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
+            // Method body is already optimized for a completed task.
             _logger.LogInformation("OrganizationDomainService initialized");
             return Task.CompletedTask;
         }

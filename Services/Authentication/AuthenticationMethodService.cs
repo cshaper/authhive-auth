@@ -80,19 +80,22 @@ namespace AuthHive.Auth.Services.Authentication
             _httpContextAccessor = httpContextAccessor;
         }
 
-        #region IService (변경 없음)
-        public Task<bool> IsHealthyAsync()
+        #region IService Implementation with CancellationToken
+
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("AuthenticationMethodService is healthy.");
             return Task.FromResult(true);
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("AuthenticationMethodService initialized.");
             return Task.CompletedTask;
         }
+
         #endregion
+
 
         #region 인증 방식 조회 (오류 없음, 기존 로직 유지)
         public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetAvailableMethodsAsync(Guid? organizationId = null, Guid? applicationId = null) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodDto>>()); }
@@ -219,11 +222,11 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 사용자별 설정
 
-        public async Task<ServiceResult> SetPreferredMethodAsync(Guid userId, AuthenticationMethod method)
+        public async Task<ServiceResult> SetPreferredMethodAsync(Guid userId, AuthenticationMethod method, CancellationToken cancellationToken = default)
         {
             try
             {
-                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId);
+                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
                 if (!connectedIdResult.IsSuccess)
                     return ServiceResult.Failure($"Failed to find active ConnectedId for user {userId}");
 
@@ -257,7 +260,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<AuthenticationMethod?>> GetPreferredMethodAsync(Guid userId)
+        public async Task<ServiceResult<AuthenticationMethod?>> GetPreferredMethodAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -266,7 +269,7 @@ namespace AuthHive.Auth.Services.Authentication
                 if (!string.IsNullOrEmpty(cachedString) && Enum.TryParse<AuthenticationMethod>(cachedString, out var cachedMethod))
                     return ServiceResult<AuthenticationMethod?>.Success(cachedMethod);
 
-                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId);
+                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
                 if (!connectedIdResult.IsSuccess)
                     return ServiceResult<AuthenticationMethod?>.Failure($"Failed to find active ConnectedId for user {userId}");
 
@@ -289,7 +292,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetUserAvailableMethodsAsync(Guid userId, Guid? organizationId = null)
+        public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetUserAvailableMethodsAsync(Guid userId, Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -300,7 +303,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
                 else
                 {
-                    var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId);
+                    var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
                     if (!connectedIdResult.IsSuccess)
                         return ServiceResult<IEnumerable<AuthenticationMethodDto>>.Failure($"Active organization for user {userId} not found.");
 
@@ -320,11 +323,11 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<UserAuthenticationMethods>> GetUserMethodsAsync(Guid userId)
+        public async Task<ServiceResult<UserAuthenticationMethods>> GetUserMethodsAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId);
+                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
                 if (!connectedIdResult.IsSuccess)
                     return ServiceResult<UserAuthenticationMethods>.Failure($"Active ConnectedId for user {userId} not found.");
 
@@ -378,14 +381,14 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region Private Helper Methods
 
-        private async Task<Guid?> GetCurrentConnectedIdAsync()
+        private async Task<Guid?> GetCurrentConnectedIdAsync(CancellationToken cancellationToken = default)
         {
             try
             {
                 var userIdClaim = _httpContextAccessor.HttpContext?.User?.FindFirst("UserId")?.Value;
                 if (Guid.TryParse(userIdClaim, out var currentUserId))
                 {
-                    var result = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(currentUserId);
+                    var result = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(currentUserId, cancellationToken);
                     return result.IsSuccess ? result.Data : null;
                 }
             }
@@ -420,7 +423,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
             }
 
-            return null; 
+            return null;
         }
 
         private async Task InvalidateMethodCacheAsync(Guid organizationId)
@@ -443,14 +446,14 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 조직의 현재 플랜 키 조회
         /// </summary>
-        private async Task<string> GetOrganizationPlanKeyAsync(Guid? organizationId)
+        private async Task<string> GetOrganizationPlanKeyAsync(Guid? organizationId,  CancellationToken cancellationToken = default)
         {
             if (!organizationId.HasValue)
             {
                 return PricingConstants.DefaultPlanKey;
             }
 
-            var plan = await _planRepository.GetActivePlanByOrganizationIdAsync(organizationId.Value);
+            var plan = await _planRepository.GetActivePlanByOrganizationIdAsync(organizationId.Value, cancellationToken);
 
             return plan?.PlanKey ?? PricingConstants.DefaultPlanKey;
 

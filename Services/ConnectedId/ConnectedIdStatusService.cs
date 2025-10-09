@@ -29,11 +29,13 @@ namespace AuthHive.Auth.Services
 
         #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                return await _repository.CountAsync() >= 0;
+                // 🚨 수정: 첫 번째 인수로 null을 전달하여 predicate를 생략하고,
+                // CancellationToken을 두 번째 인수로 올바르게 전달합니다.
+                return await _repository.CountAsync(null, cancellationToken) >= 0;
             }
             catch (Exception ex)
             {
@@ -41,14 +43,14 @@ namespace AuthHive.Auth.Services
                 return false;
             }
         }
-
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             _logger.LogInformation("ConnectedIdStatusService initialized.");
             return Task.CompletedTask;
         }
 
         #endregion
+
 
         #region Status Management
 
@@ -137,11 +139,11 @@ namespace AuthHive.Auth.Services
                 : ServiceResult.Failure(result.ErrorMessage ?? "Failed to suspend ConnectedId.");
         }
 
-        public async Task<ServiceResult<int>> CleanupInactiveAsync(Guid organizationId, DateTime inactiveSince)
+        public async Task<ServiceResult<int>> CleanupInactiveAsync(Guid organizationId, DateTime inactiveSince, CancellationToken cancellationToken = default)
         {
             try
             {
-                var inactiveList = await _repository.GetInactiveConnectedIdsAsync(organizationId, inactiveSince);
+                var inactiveList = await _repository.GetInactiveConnectedIdsAsync(organizationId, inactiveSince, cancellationToken);
                 int count = 0;
                 // TODO: 일괄 업데이트(Bulk Update)로 성능 최적화 필요
                 foreach (var connectedId in inactiveList)
@@ -155,7 +157,7 @@ namespace AuthHive.Auth.Services
                 {
                     _logger.LogInformation("Cleaned up {Count} inactive ConnectedIds for organization {OrganizationId}", count, organizationId);
                 }
-                
+
                 return ServiceResult<int>.Success(count);
             }
             catch (Exception ex)

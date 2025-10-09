@@ -158,7 +158,8 @@ namespace AuthHive.Auth.Services.Providers
         public async Task<ServiceResult<SocialAuthResult>> HandleCallbackAsync(
             string provider,
             string code,
-            string? state = null)
+            string? state = null,
+            CancellationToken cancellationToken=default)
         {
             try
             {
@@ -229,7 +230,7 @@ namespace AuthHive.Auth.Services.Providers
                     userId = newUser.Id;
 
                     // ConnectedId 조회 (User의 ConnectedIds 컬렉션에서 첫 번째)
-                    var userConnectedIds = await _connectedIdRepository.GetByUserIdAsync(userId);
+                    var userConnectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                     connectedId = userConnectedIds.FirstOrDefault()?.Id ?? Guid.Empty;
                     
                     var fullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
@@ -274,7 +275,7 @@ namespace AuthHive.Auth.Services.Providers
                     userId = user.Id;
 
                     // ConnectedId 조회
-                    var userConnectedIds = await _connectedIdRepository.GetByUserIdAsync(userId);
+                    var userConnectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                     connectedId = userConnectedIds.FirstOrDefault()?.Id ?? Guid.Empty;
 
                     // 토큰 업데이트

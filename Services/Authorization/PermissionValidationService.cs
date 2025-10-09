@@ -128,7 +128,8 @@ namespace AuthHive.Auth.Services.Authorization
         }
 
         public async Task<ServiceResult<PermissionValidationResponse>> ValidatePermissionsAsync(
-            PermissionValidationRequest request)
+            PermissionValidationRequest request,
+            CancellationToken cancellationToken = default)
         {
             var stopwatch = Stopwatch.StartNew();
             var response = new PermissionValidationResponse
@@ -242,9 +243,10 @@ namespace AuthHive.Auth.Services.Authorization
 
                     var dynamicPermissions = ExtractDynamicPermissionsFromContext(request.RequestContext);
 
-                    var planRestrictions = await GetPlanRestrictionsAsync(
+                    var planRestrictions = await _planRestrictionService.GetRestrictionsAsync(
                         organization.PricingTier,
-                        request.OrganizationId);
+                        request.OrganizationId,
+                        cancellationToken);
 
                     foreach (var scope in request.Scopes)
                     {
@@ -558,51 +560,6 @@ namespace AuthHive.Auth.Services.Authorization
             return false;
         }
 
-        private async Task<HashSet<string>> GetPlanRestrictionsAsync(string pricingTier, Guid organizationId)
-        {
-            var cacheKey = $"plan_restrictions:{pricingTier}:{organizationId}";
-            var cached = await _cacheService.GetAsync<HashSet<string>>(cacheKey);
-
-            if (cached != null)
-            {
-                return cached;
-            }
-
-            var restrictions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            switch (pricingTier?.ToLower())
-            {
-                case "free":
-                    restrictions.Add("bulk:*");
-                    restrictions.Add("export:*");
-                    restrictions.Add("api:unlimited");
-                    restrictions.Add("analytics:advanced");
-                    restrictions.Add("integration:premium");
-                    break;
-
-                case "standard":
-                    restrictions.Add("api:unlimited");
-                    restrictions.Add("analytics:advanced");
-                    restrictions.Add("integration:premium");
-                    break;
-
-                case "business":
-                    restrictions.Add("integration:premium");
-                    break;
-
-                case "enterprise":
-                    break;
-
-                default:
-                    restrictions.Add("bulk:*");
-                    restrictions.Add("export:*");
-                    restrictions.Add("api:*");
-                    break;
-            }
-
-            await _cacheService.SetAsync(cacheKey, restrictions, TimeSpan.FromHours(1));
-            return restrictions;
-        }
 
         private bool IsScopeRestrictedByPlan(string scope, HashSet<string> planRestrictions)
         {

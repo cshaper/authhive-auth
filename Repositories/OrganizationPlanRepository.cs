@@ -52,7 +52,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 특정 조직의 현재 활성화된 플랜 정보를 조회합니다. (Cache-Aside 패턴 적용)
         /// </summary>
-        public async Task<OrganizationPlan?> GetActivePlanByOrganizationIdAsync(Guid organizationId)
+        public async Task<OrganizationPlan?> GetActivePlanByOrganizationIdAsync(Guid organizationId, CancellationToken cancellationToken = default) 
         {
             // 캐시 서비스가 주입되지 않은 경우, DB로 직접 조회합니다.
             if (_cacheService == null)

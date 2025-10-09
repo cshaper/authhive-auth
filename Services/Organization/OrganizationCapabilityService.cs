@@ -63,11 +63,14 @@ namespace AuthHive.Auth.Services.Organization
 
         #region IService Implementation
 
-        public async Task<bool> IsHealthyAsync()
+        // OrganizationCapabilityService.cs
+
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
             try
             {
-                return await _context.Database.CanConnectAsync();
+                // Pass the token to the awaited database call for cancellation support.
+                return await _context.Database.CanConnectAsync(cancellationToken);
             }
             catch (Exception ex)
             {
@@ -76,12 +79,12 @@ namespace AuthHive.Auth.Services.Organization
             }
         }
 
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
         {
+            // Method body is already optimized for a completed task.
             _logger.LogInformation("OrganizationCapabilityService initialized");
             return Task.CompletedTask;
         }
-
         #endregion
 
         #region Capability 조회

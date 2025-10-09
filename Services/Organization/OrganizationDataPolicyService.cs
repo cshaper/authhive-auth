@@ -59,19 +59,17 @@ namespace AuthHive.Auth.Services.Organization
 
         #region IService Implementation
 
-        /// <summary>
-        /// 서비스 상태 확인
-        /// </summary>
-        public async Task<bool> IsHealthyAsync()
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
         {
             try
             {
-                // DB 연결 확인
-                await _context.Database.CanConnectAsync();
-                return true;
+                // 토큰을 DB 연결 확인 메서드에 전달합니다.
+                return await _context.Database.CanConnectAsync(cancellationToken);
             }
-            catch
+            catch (Exception ex)
             {
+                // 로깅을 유지하여 예외 발생 시 디버깅을 돕습니다.
+                _logger.LogError(ex, "OrganizationDataPolicyService health check failed");
                 return false;
             }
         }
@@ -79,13 +77,15 @@ namespace AuthHive.Auth.Services.Organization
         /// <summary>
         /// 서비스 초기화
         /// </summary>
-        public async Task InitializeAsync()
+        // 1. 반환 타입을 'async Task'에서 'Task'로 변경합니다.
+        // 2. CancellationToken을 추가합니다.
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
         {
             try
             {
                 _logger.LogInformation("Initializing OrganizationDataPolicyService");
-                // 필요한 초기화 작업 수행
-                await Task.CompletedTask;
+                // 불필요한 'await Task.CompletedTask' 대신 Task를 직접 반환하여 오버헤드를 제거합니다.
+                return Task.CompletedTask;
             }
             catch (Exception ex)
             {

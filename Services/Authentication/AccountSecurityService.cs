@@ -406,7 +406,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 보안 설정 (Security Settings)
 
-        public async Task<ServiceResult<AccountSecuritySettingsDto>> GetSecuritySettingsAsync(Guid connectedId)
+        public async Task<ServiceResult<AccountSecuritySettingsDto>> GetSecuritySettingsAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -499,13 +499,13 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<IEnumerable<SecurityEventDto>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null)
+        public async Task<ServiceResult<IEnumerable<SecurityEventDto>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null, CancellationToken cancellationToken = default)
         {
             try
             {
                 // [Refactored] IAuditService의 GetAuditLogsAsync 메서드 시그니처에 맞게
                 // SearchAuditLogsRequest 객체를 생성하여 호출합니다.
-                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId);
+                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
                 if (!connectedIdResult.IsSuccess || connectedIdResult.Data == Guid.Empty)
                 {
                     return ServiceResult<IEnumerable<SecurityEventDto>>.Failure("Active ConnectedId not found for the user.", "ACTIVE_CID_NOT_FOUND");

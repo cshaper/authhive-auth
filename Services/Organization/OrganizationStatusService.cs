@@ -52,34 +52,35 @@ namespace AuthHive.Auth.Services.Organization
         }
 
         #region IService Implementation
-
-        /// <summary>
-        /// 서비스 헬스 체크
-        /// </summary>
-        public async Task<bool> IsHealthyAsync()
-        {
-            try
-            {
-                // Repository가 정상적으로 동작하는지 간단한 쿼리로 확인
-                _ = await _organizationRepository.CountAsync();
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "OrganizationStatusService health check failed");
-                return false;
-            }
-        }
+/// <summary>
+/// 서비스 헬스 체크
+/// </summary>
+public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
+{
+    try
+    {
+        // Repository가 정상적으로 동작하는지 간단한 쿼리로 확인
+        // CancellationToken을 CountAsync에 전달합니다. (일반적으로 CountAsync(predicate, token) 시그니처를 가정하고 null을 명시)
+        _ = await _organizationRepository.CountAsync(null, cancellationToken); 
+        return true;
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "OrganizationStatusService health check failed");
+        return false;
+    }
+}
 
         /// <summary>
         /// 서비스 초기화
         /// </summary>
-        public Task InitializeAsync()
+        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
         {
+            // 메서드 본문은 이미 최적화되어 Task.CompletedTask를 반환합니다.
             _logger.LogInformation("OrganizationStatusService initialized");
             return Task.CompletedTask;
         }
-
+ 
         #endregion
 
         #region IOrganizationStatusService Implementation

@@ -70,19 +70,39 @@ namespace AuthHive.Auth.Organization.Handlers
         #endregion
 
         #region IService Implementation
-        public Task InitializeAsync() { /*...*/ return Task.CompletedTask; }
-        public async Task<bool> IsHealthyAsync() { return await _cacheService.IsHealthyAsync() && await _auditService.IsHealthyAsync(); }
+
+        // InitializeAsync: Add CancellationToken. The body is already optimized.
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            // ... (any initial logging or sync setup) ...
+            return Task.CompletedTask;
+        }
+
+        // IsHealthyAsync: Add CancellationToken and run health checks in parallel.
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            // Run both health checks concurrently to reduce latency.
+            // The CancellationToken is passed to both dependency calls.
+            var cacheTask = _cacheService.IsHealthyAsync(cancellationToken);
+            var auditTask = _auditService.IsHealthyAsync(cancellationToken);
+
+            // Wait for both tasks to complete and combine the results.
+            await Task.WhenAll(cacheTask, auditTask);
+
+            return cacheTask.Result && auditTask.Result;
+        }
+
         #endregion
 
         #region Event Handlers
-        
+
         public async Task HandleSslCertificateExpiringAsync(SslCertificateExpiringEvent @event, CancellationToken cancellationToken = default)
         {
             try
             {
                 var severity = @event.DaysRemaining <= SSL_CRITICAL_DAYS ? AuditEventSeverity.Critical : AuditEventSeverity.Warning;
                 _logger.LogWarning("Processing SSL certificate expiring: Domain={Domain}, DaysRemaining={Days}", @event.Domain, @event.DaysRemaining);
-                
+
                 var domainEntity = await _domainRepository.GetByDomainAsync(@event.Domain);
                 var domainId = domainEntity?.Id;
 
@@ -94,7 +114,7 @@ namespace AuthHive.Auth.Organization.Handlers
                 }
 
                 await NotifySslExpiringWarningAsync(@event.OrganizationId, @event.Domain, @event.DaysRemaining);
-                
+
                 // ✅ FIXED: Check for null before using .Value
                 if (@event.DaysRemaining <= SSL_CRITICAL_DAYS && @event.ExpiresAt.HasValue)
                 {
@@ -150,7 +170,7 @@ namespace AuthHive.Auth.Organization.Handlers
             var notification = new SslExpiringWarningNotification(organizationId.Value, domain, daysUntilExpiry);
             await _eventBus.PublishAsync(notification);
         }
-        
+
         // ... (Other helper methods are also corrected to accept Guid? and check for nulls) ...
         #region Other Helpers
         private async Task InvalidateDomainCacheAsync(Guid? organizationId, Guid? domainId) { if (!organizationId.HasValue || !domainId.HasValue) return; await _cacheService.RemoveAsync($"org:domain:{organizationId.Value}:{domainId.Value}"); }

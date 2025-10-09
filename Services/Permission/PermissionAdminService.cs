@@ -47,9 +47,19 @@ namespace AuthHive.Auth.Services.Permission
             _logger = logger;
         }
 
-        public Task<bool> IsHealthyAsync() => Task.FromResult(true);
-        public Task InitializeAsync() => Task.CompletedTask;
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            // CancellationToken is added to the signature.
+            // The implementation remains efficient by returning a completed task with the result.
+            return Task.FromResult(true);
+        }
 
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            // CancellationToken is added to the signature.
+            // The implementation remains optimized by returning Task.CompletedTask directly.
+            return Task.CompletedTask;
+        }
         #region 시스템 권한 관리
 
         public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetSystemPermissionsAsync()
@@ -100,7 +110,7 @@ namespace AuthHive.Auth.Services.Permission
                         result.SyncedPermissions.Add(new SyncedPermission { PermissionId = dbPerm.Id, Scope = dbPerm.Scope, Action = "Updated" });
                     }
                 }
-                
+
                 var toDeactivate = dbPermissions.Where(dp => !sourcePermissionMap.ContainsKey(dp.Scope) && dp.IsActive);
                 foreach (var perm in toDeactivate)
                 {
@@ -109,14 +119,14 @@ namespace AuthHive.Auth.Services.Permission
                     result.Deactivated++;
                     result.SyncedPermissions.Add(new SyncedPermission { PermissionId = perm.Id, Scope = perm.Scope, Action = "Deactivated" });
                 }
-                
+
                 await _unitOfWork.CommitTransactionAsync();
-                
-                if(result.Added > 0 || result.Updated > 0 || result.Deactivated > 0)
+
+                if (result.Added > 0 || result.Updated > 0 || result.Deactivated > 0)
                 {
                     await _permissionCacheService.RefreshAllAsync();
                 }
-                
+
                 result.CompletedAt = DateTime.UtcNow;
                 return ServiceResult<PermissionSyncResult>.Success(result);
             }
@@ -186,7 +196,7 @@ namespace AuthHive.Auth.Services.Permission
                     result.ErrorDetails.Add("Failed to deserialize import data.");
                     return ServiceResult<PermissionImportResult>.FailureWithData("Invalid import data content.", result);
                 }
-                
+
                 await _unitOfWork.BeginTransactionAsync();
                 foreach (var dto in importDtos)
                 {
@@ -232,7 +242,7 @@ namespace AuthHive.Auth.Services.Permission
 
                 await _unitOfWork.CommitTransactionAsync();
                 await _permissionCacheService.RefreshAllAsync();
-                
+
                 result.IsSuccess = true;
                 result.CompletedAt = DateTime.UtcNow;
                 return ServiceResult<PermissionImportResult>.Success(result);
@@ -242,7 +252,7 @@ namespace AuthHive.Auth.Services.Permission
                 await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "A critical error occurred during permission import. Transaction rolled back.");
                 result.IsSuccess = false;
-                result.Errors++; 
+                result.Errors++;
                 result.ErrorDetails.Add($"Critical error: {ex.Message}");
                 result.CompletedAt = DateTime.UtcNow;
                 return ServiceResult<PermissionImportResult>.FailureWithData("An error occurred during permission import.", result);
@@ -271,7 +281,7 @@ namespace AuthHive.Auth.Services.Permission
 
                         var newPermission = _mapper.Map<PermissionEntity>(request);
                         var createdEntity = await _permissionRepository.AddAsync(newPermission);
-                        
+
                         detail.PermissionId = createdEntity.Id;
                         detail.Success = true;
                         result.Succeeded++;
@@ -361,7 +371,7 @@ namespace AuthHive.Auth.Services.Permission
         {
             var stopwatch = Stopwatch.StartNew();
             var result = new BulkPermissionOperationResult { OperationType = "Delete", TotalRequested = ids.Count(), StartedAt = DateTime.UtcNow };
-            
+
             await _unitOfWork.BeginTransactionAsync();
             try
             {
@@ -376,7 +386,7 @@ namespace AuthHive.Auth.Services.Permission
 
                         var permission = await _permissionRepository.GetByIdAsync(id);
                         if (permission == null) throw new KeyNotFoundException("Permission not found.");
-                        
+
                         await _permissionRepository.DeleteAsync(permission);
                         detail.Success = true;
                         result.Succeeded++;
@@ -422,7 +432,7 @@ namespace AuthHive.Auth.Services.Permission
             await _unitOfWork.BeginTransactionAsync();
             try
             {
-                 foreach (var id in ids)
+                foreach (var id in ids)
                 {
                     var detail = new PermissionOperationDetail { PermissionId = id, Operation = $"SetActiveState:{isActive}" };
                     try
@@ -450,11 +460,11 @@ namespace AuthHive.Auth.Services.Permission
                     // [오류 수정] Nullable 경고 해결 (CS8629)
                     if (detail.PermissionId.HasValue)
                     {
-                       await _permissionCacheService.InvalidatePermissionAsync(detail.PermissionId.Value);
+                        await _permissionCacheService.InvalidatePermissionAsync(detail.PermissionId.Value);
                     }
                 }
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 await _unitOfWork.RollbackTransactionAsync();
                 _logger.LogError(ex, "Error during bulk set active state. Transaction rolled back.");
@@ -499,7 +509,7 @@ namespace AuthHive.Auth.Services.Permission
                 return ServiceResult.Failure("Failed to clear all permission cache.");
             }
         }
-        
+
         #endregion
     }
 }
