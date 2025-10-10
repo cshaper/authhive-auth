@@ -202,16 +202,6 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<bool>> ValidateCreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
-        {
-            var exists = await _permissionRepository.AnyAsync(p => p.Name == request.Name, cancellationToken);
-            if (exists)
-            {
-               return ServiceResult.Conflict<bool>("Permission name already exists.");
-            }
-
-            return ServiceResult<bool>.Success(true);
-        }
 
         public async Task<ServiceResult<bool>> ValidateCreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
         {
@@ -1054,7 +1044,7 @@ namespace AuthHive.Auth.Services.Authentication
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<bool>> ValidateUpdateAsync(Guid id, UpdatePermissionRequest request)
+        public async Task<ServiceResult<bool>> ValidateUpdateAsync(Guid id, UpdatePermissionRequest request, CancellationToken cancellationToken =default)
         {
             // 인터페이스 멤버를 구현하는 기본 메서드입니다.
             return await ValidateUpdateAsync(id, request, null);

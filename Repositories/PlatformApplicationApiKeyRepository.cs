@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
@@ -13,109 +13,114 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService 사용
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// 플랫폼 애플리케이션 API 키 저장소 구현 - AuthHive v15
-    /// BaseRepository를 상속받아 API 키 전용 기능만 구현
+    /// 플랫폼 애플리케이션 API 키 저장소 구현 - AuthHive v16 (최종)
     /// </summary>
-    public class PlatformApplicationApiKeyRepository : 
-        BaseRepository<PlatformApplicationApiKey>, 
+    public class PlatformApplicationApiKeyRepository :
+        BaseRepository<PlatformApplicationApiKey>,
         IPlatformApplicationApiKeyRepository
     {
         private readonly ILogger<PlatformApplicationApiKeyRepository> _logger;
+        // IMemoryCache는 BaseRepository가 ICacheService를 사용하므로 제거되었습니다.
 
         public PlatformApplicationApiKeyRepository(
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<PlatformApplicationApiKeyRepository> logger,
-            IMemoryCache? cache = null) 
-            : base(context, organizationContext, cache)
+            ICacheService cacheService) // ICacheService를 받도록 수정
+            : base(context, organizationContext, cacheService)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
         #region API Key 전용 조회 Operations
 
-        /// <summary>
-        /// ID로 API 키를 조회 (추적 없음, 대량 데이터 조회 시 성능 최적화용)
-        /// </summary>
-        public async Task<PlatformApplicationApiKey?> GetByIdNoTrackingAsync(Guid id)
+        public async Task<PlatformApplicationApiKey?> GetByIdNoTrackingAsync(
+            Guid id,
+            CancellationToken cancellationToken = default)
         {
             return await Query()
                 .AsNoTracking()
                 .Include(k => k.PlatformApplication)
-                .FirstOrDefaultAsync(k => k.Id == id);
+                .FirstOrDefaultAsync(k => k.Id == id, cancellationToken);
         }
 
-        /// <summary>
-        /// 키 값으로 API 키 조회 (클라이언트 인증 시 사용)
-        /// </summary>
-        public async Task<PlatformApplicationApiKey?> GetByKeyValueAsync(string keyValue)
+        public async Task<PlatformApplicationApiKey?> GetByKeyValueAsync(
+            string keyValue,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(keyValue))
                 throw new ArgumentException("Key value cannot be empty", nameof(keyValue));
 
             return await Query()
                 .Include(k => k.PlatformApplication)
-                .FirstOrDefaultAsync(k => k.ApiKey == keyValue && k.IsActive);
+                .FirstOrDefaultAsync(k => k.ApiKey == keyValue && k.IsActive, cancellationToken);
         }
 
-        /// <summary>
-        /// 해시값으로 API 키 조회 (보안 강화된 인증 시 사용)
-        /// </summary>
-        public async Task<PlatformApplicationApiKey?> GetByHashedKeyAsync(string hashedKey)
+        public async Task<PlatformApplicationApiKey?> GetByHashedKeyAsync(
+            string hashedKey,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(hashedKey))
                 throw new ArgumentException("Hashed key cannot be empty", nameof(hashedKey));
 
             return await Query()
                 .Include(k => k.PlatformApplication)
-                .FirstOrDefaultAsync(k => k.KeyHash == hashedKey && k.IsActive);
+                .FirstOrDefaultAsync(k => k.KeyHash == hashedKey && k.IsActive, cancellationToken);
         }
 
-        /// <summary>
-        /// 애플리케이션별 모든 API 키 조회 (관리 대시보드용)
-        /// </summary>
-        public async Task<IEnumerable<PlatformApplicationApiKey>> GetByApplicationIdAsync(Guid applicationId)
+        public async Task<IEnumerable<PlatformApplicationApiKey>> GetByApplicationIdAsync(
+            Guid applicationId,
+            CancellationToken cancellationToken = default)
         {
             return await Query()
                 .Where(k => k.ApplicationId == applicationId)
                 .OrderByDescending(k => k.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
+        }
+
+        // IPlatformApplicationApiKeyRepository에 추가된 멤버 구현
+        public async Task<IEnumerable<PlatformApplicationApiKey>> GetByOrganizationIdAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken = default)
+        {
+            // BaseRepository의 QueryForOrganization protected 메서드를 사용하여 구현
+            return await QueryForOrganization(organizationId)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         #endregion
 
-        #region Override BaseRepository Methods with Logging
+        #region Override BaseRepository Methods with Logging and Cancellation
 
-        /// <summary>
-        /// API 키 생성 - 로깅 추가
-        /// </summary>
-        public override async Task<PlatformApplicationApiKey> AddAsync(PlatformApplicationApiKey apiKey)
+        public override async Task<PlatformApplicationApiKey> AddAsync(
+            PlatformApplicationApiKey apiKey,
+            CancellationToken cancellationToken = default)
         {
-            var result = await base.AddAsync(apiKey);
-            _logger.LogInformation("Created API key {KeyId} for application {ApplicationId}", 
+            var result = await base.AddAsync(apiKey, cancellationToken); // CancellationToken 전달
+            _logger.LogInformation("Created API key {KeyId} for application {ApplicationId}",
                 apiKey.Id, apiKey.ApplicationId);
             return result;
         }
 
-        /// <summary>
-        /// API 키 수정 - 로깅 추가
-        /// </summary>
-        public override async Task UpdateAsync(PlatformApplicationApiKey entity)
+        public override async Task UpdateAsync(
+            PlatformApplicationApiKey entity,
+            CancellationToken cancellationToken = default)
         {
-            await base.UpdateAsync(entity);
+            await base.UpdateAsync(entity, cancellationToken); // CancellationToken 전달
             _logger.LogInformation("Updated API key {KeyId}", entity.Id);
         }
 
-        /// <summary>
-        /// API 키 삭제 - 로깅 추가
-        /// </summary>
-        public override async Task DeleteAsync(PlatformApplicationApiKey entity)
+        public override async Task DeleteAsync(
+            PlatformApplicationApiKey entity,
+            CancellationToken cancellationToken = default)
         {
-            await base.DeleteAsync(entity);
+            await base.DeleteAsync(entity, cancellationToken); // CancellationToken 전달
             _logger.LogWarning("Deleted API key {KeyId}", entity.Id);
         }
 
@@ -123,152 +128,166 @@ namespace AuthHive.Auth.Repositories
 
         #region Validation Operations
 
-        /// <summary>
-        /// 키 값 중복 확인
-        /// </summary>
-        public async Task<bool> ExistsByKeyValueAsync(string keyValue)
+        public async Task<bool> ExistsByKeyValueAsync(
+            string keyValue,
+            CancellationToken cancellationToken = default)
         {
-            return !string.IsNullOrWhiteSpace(keyValue) && 
-                   await Query().AnyAsync(k => k.ApiKey == keyValue);
+            return !string.IsNullOrWhiteSpace(keyValue) &&
+                   await Query().AnyAsync(k => k.ApiKey == keyValue, cancellationToken);
         }
 
-        /// <summary>
-        /// 키 이름 중복 확인 (같은 애플리케이션 내에서)
-        /// </summary>
-        public async Task<bool> IsDuplicateNameAsync(Guid applicationId, string name, Guid? excludeId = null)
+        public async Task<bool> IsDuplicateNameAsync(
+            Guid applicationId,
+            string name,
+            Guid? excludeId = null,
+            CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(name)) 
+            if (string.IsNullOrWhiteSpace(name))
                 return false;
 
             var query = Query().Where(k => k.ApplicationId == applicationId && k.KeyName == name);
-            
-            if (excludeId.HasValue) 
+
+            if (excludeId.HasValue)
                 query = query.Where(k => k.Id != excludeId.Value);
-            
-            return await query.AnyAsync();
+
+            return await query.AnyAsync(cancellationToken);
         }
 
         #endregion
 
         #region Usage & Statistics Operations
 
-        /// <summary>
-        /// API 키 사용량 기록 (매 요청마다 호출)
-        /// </summary>
-        public async Task<bool> RecordUsageAsync(Guid id, DateTime usedAt)
+        // TODO: [비용 최적화 필요 - 성능 크리티컬] RecordUsageAsync와 IncrementDailyUsageAsync는 
+        // 매 요청마다 DB I/O를 발생시키므로, ICacheService의 원자적 Increment/DecrementAsync를 활용하거나, 
+        // EF Core/Raw SQL의 배치 업데이트를 통해 DB 부하와 비용을 최적화해야 합니다.
+        // 현재는 기존 로직에 CancellationToken만 전달합니다.
+
+        public async Task<bool> RecordUsageAsync(
+            Guid id,
+            DateTime usedAt,
+            CancellationToken cancellationToken = default)
         {
-            var apiKey = await GetByIdAsync(id);
+            var apiKey = await GetByIdAsync(id, cancellationToken);
             if (apiKey == null) return false;
 
             apiKey.LastUsedAt = usedAt;
-            apiKey.TotalRequestCount++;
-            
-            await UpdateAsync(apiKey);
+            apiKey.UseCount++; // TotalRequestCount 대신 UseCount를 직접 사용 (엔티티 필드 기반)
+
+            await UpdateAsync(apiKey, cancellationToken);
             return true;
         }
 
-        /// <summary>
-        /// 일일 사용량 증가 (배치 처리용)
-        /// </summary>
-        public async Task<bool> IncrementDailyUsageAsync(Guid id, int count = 1)
+        public async Task<bool> IncrementDailyUsageAsync(
+            Guid id,
+            int count = 1,
+            CancellationToken cancellationToken = default)
         {
-            var apiKey = await GetByIdAsync(id);
+            var apiKey = await GetByIdAsync(id, cancellationToken);
             if (apiKey == null) return false;
 
-            apiKey.TotalRequestCount += count;
+            apiKey.UseCount += count;
             apiKey.LastUsedAt = DateTime.UtcNow;
-            
-            await UpdateAsync(apiKey);
+
+            await UpdateAsync(apiKey, cancellationToken);
             return true;
         }
 
         /// <summary>
-        /// 일일 사용량 리셋 (자정 배치용)
+        /// API 키의 일일 사용량을 리셋합니다 (자정 배치용)
         /// </summary>
-        public async Task<bool> ResetDailyUsageAsync(Guid id)
+        public async Task<bool> ResetDailyUsageAsync(
+            Guid id,
+            CancellationToken cancellationToken = default)
         {
-            var apiKey = await GetByIdAsync(id);
+            // CancellationToken은 BaseRepository의 GetByIdAsync에 전달됩니다.
+            var apiKey = await GetByIdAsync(id, cancellationToken);
             if (apiKey == null) return false;
-            
-            // 필요한 리셋 로직 추가
-            await UpdateAsync(apiKey);
+            if (apiKey.DailyUseCount > 0)
+            {
+                // 1. 일일 카운트를 0으로 초기화
+                apiKey.DailyUseCount = 0;
+
+                // 2. 리셋 일시 기록
+                apiKey.LastDailyResetAt = DateTime.UtcNow;
+
+                // 3. 변경 사항을 DB에 반영하도록 추적 상태 변경 (UpdateAsync 호출)
+                await UpdateAsync(apiKey, cancellationToken);
+            }
+
             return true;
         }
-
-        /// <summary>
-        /// 만료된 API 키 조회 (정리 작업용)
-        /// </summary>
-        public async Task<IEnumerable<PlatformApplicationApiKey>> GetExpiredKeysAsync()
+        public async Task<IEnumerable<PlatformApplicationApiKey>> GetExpiredKeysAsync(
+            CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
             return await Query()
                 .Where(k => k.ExpiresAt.HasValue && k.ExpiresAt < now && k.IsActive)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 애플리케이션의 활성 키 개수 조회
-        /// </summary>
-        public async Task<int> GetActiveCountByApplicationAsync(Guid applicationId)
+        public async Task<int> GetActiveCountByApplicationAsync(
+            Guid applicationId,
+            CancellationToken cancellationToken = default)
         {
             return await Query()
                 .Where(k => k.ApplicationId == applicationId && k.IsActive)
-                .CountAsync();
+                .CountAsync(cancellationToken);
         }
 
         #endregion
 
         #region Bulk Operations
 
-        /// <summary>
-        /// 여러 API 키 일괄 삭제
-        /// </summary>
-        public async Task<bool> DeleteRangeAsync(IEnumerable<Guid> ids)
+        // TODO: [비용 최적화 필요 - Bulk 삭제] 조회 후 삭제하는 방식은 비효율적입니다. 
+        // EF Core의 ExecuteDeleteAsync (Batch Delete)를 사용하도록 리팩토링하여 DB에서 한 번에 처리해야 합니다.
+
+        public async Task<bool> DeleteRangeByIdsAsync(
+            IEnumerable<Guid> ids,
+            CancellationToken cancellationToken = default)
         {
             var idList = ids.ToList();
             if (!idList.Any()) return false;
 
             var apiKeys = await Query()
                 .Where(k => idList.Contains(k.Id))
-                .ToListAsync();
-            
+                .ToListAsync(cancellationToken);
+
             if (!apiKeys.Any()) return false;
 
-            // BaseRepository의 DeleteRangeAsync 사용
-            await base.DeleteRangeAsync(apiKeys);
-            _logger.LogWarning("Bulk deleted {Count} API keys", apiKeys.Count);
+            // BaseRepository의 DeleteRangeAsync는 Soft Delete 로직을 포함합니다.
+            await base.DeleteRangeAsync(apiKeys, cancellationToken);
+            _logger.LogWarning("Bulk deleted {Count} API keys by IDs", apiKeys.Count);
             return true;
         }
 
-        /// <summary>
-        /// 애플리케이션의 모든 API 키 삭제
-        /// </summary>
-        public async Task<bool> DeleteByApplicationIdAsync(Guid applicationId)
+        public async Task<bool> DeleteByApplicationIdAsync(
+            Guid applicationId,
+            CancellationToken cancellationToken = default)
         {
             var apiKeys = await Query()
                 .Where(k => k.ApplicationId == applicationId)
-                .ToListAsync();
-            
+                .ToListAsync(cancellationToken);
+
             if (!apiKeys.Any()) return false;
 
-            await base.DeleteRangeAsync(apiKeys);
+            await base.DeleteRangeAsync(apiKeys, cancellationToken);
             _logger.LogWarning("Deleted all API keys for application {ApplicationId}", applicationId);
             return true;
         }
 
-        /// <summary>
-        /// API 키 소프트 삭제 (감사 정보 포함)
-        /// </summary>
-        public async Task<bool> SoftDeleteAsync(Guid id, Guid deletedByConnectedId)
+        public async Task<bool> SoftDeleteAsync(
+            Guid id,
+            Guid deletedByConnectedId,
+            CancellationToken cancellationToken = default)
         {
-            var apiKey = await GetByIdAsync(id);
+            var apiKey = await GetByIdAsync(id, cancellationToken);
             if (apiKey == null) return false;
 
-            // 감사 정보 추가
             apiKey.DeletedByConnectedId = deletedByConnectedId;
-            
-            await base.SoftDeleteAsync(id);
-            _logger.LogInformation("Soft deleted API key {KeyId} by connected ID {ConnectedId}", 
+
+            // BaseRepository의 SoftDeleteAsync를 호출합니다.
+            await base.SoftDeleteAsync(id, cancellationToken);
+            _logger.LogInformation("Soft deleted API key {KeyId} by connected ID {ConnectedId}",
                 id, deletedByConnectedId);
             return true;
         }
@@ -277,29 +296,20 @@ namespace AuthHive.Auth.Repositories
 
         #region Advanced Query Operations
 
-        /// <summary>
-        /// 페이징된 API 키 목록 조회 (관리자 페이지용)
-        /// </summary>
         public async Task<PaginationResponse<PlatformApplicationApiKey>> GetPagedAsync(
             Expression<Func<PlatformApplicationApiKey, bool>>? predicate,
             PaginationRequest pagination,
+            CancellationToken cancellationToken = default,
             params Expression<Func<PlatformApplicationApiKey, object>>[] includes)
         {
-            var query = Query();
-            
-            if (predicate != null) 
-                query = query.Where(predicate);
-            
-            foreach (var include in includes) 
-                query = query.Include(include);
-
-            var totalCount = await query.CountAsync();
-            
-            var items = await query
-                .OrderByDescending(k => k.CreatedAt)
-                .Skip((pagination.PageNumber - 1) * pagination.PageSize)
-                .Take(pagination.PageSize)
-                .ToListAsync();
+            // BaseRepository의 GetPagedAsync를 호출하여 로직 재활용
+            var (items, totalCount) = await base.GetPagedAsync(
+                pagination.PageNumber,
+                pagination.PageSize,
+                predicate,
+                orderBy: null, // BaseRepository에서 Id로 기본 정렬
+                isDescending: true,
+                cancellationToken: cancellationToken);
 
             return PaginationResponse<PlatformApplicationApiKey>.Create(
                 items, totalCount, pagination.PageNumber, pagination.PageSize);
@@ -307,16 +317,6 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region Unit of Work
-
-        /// <summary>
-        /// 변경사항 저장
-        /// </summary>
-        public async Task<int> SaveChangesAsync()
-        {
-            return await _context.SaveChangesAsync();
-        }
-
-        #endregion
+        // SaveChangesAsync는 BaseRepository에 있으므로 여기서는 구현하지 않습니다.
     }
 }

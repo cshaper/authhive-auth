@@ -42,7 +42,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 사용자 ID와 조직 ID로 ConnectedId 조회 - 캐시 최적화 (ICacheService 사용)
         /// </summary>
-        public async Task<ConnectedId?> GetByUserAndOrganizationAsync(Guid userId, Guid organizationId)
+        public async Task<ConnectedId?> GetByUserAndOrganizationAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             // 1. 캐시 키 생성
             string cacheKey = $"ConnectedId:UserOrg:{userId}:{organizationId}";
@@ -79,7 +79,7 @@ namespace AuthHive.Auth.Repositories
         /// ConnectedId를 User 및 Organization 정보와 함께 상세 조회
         /// BaseRepository의 Query() 사용하여 조직 필터링 자동 적용
         /// </summary>
-        public async Task<ConnectedId?> GetWithDetailsAsync(Guid connectedId)
+        public async Task<ConnectedId?> GetWithDetailsAsync(Guid connectedId,  CancellationToken cancellationToken = default)
         {
             // ⭐️ BaseRepository의 IQueryable Query()를 사용하여 RLS 필터링은 유지합니다.
             return await Query()
@@ -92,7 +92,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 특정 User ID에 속한 모든 ConnectedId 조회 - BaseRepository FindAsync 활용 우회
         /// </summary>
-        public async Task<IEnumerable<ConnectedId>> GetByUserIdAsync(Guid userId)
+        public async Task<IEnumerable<ConnectedId>> GetByUserIdAsync(Guid userId,  CancellationToken cancellationToken = default)
         {
             // BaseRepository의 조직 필터링(RLS)을 우회하여 사용자의 모든 ConnectedId를 조회합니다.
             return await _dbSet
@@ -120,7 +120,8 @@ namespace AuthHive.Auth.Repositories
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetByOrganizationAndStatusAsync(
             Guid organizationId, 
-            ConnectedIdStatus status)
+            ConnectedIdStatus status,
+            CancellationToken cancellationToken = default)
         {
             // BaseRepository의 QueryForOrganization 활용
             return await QueryForOrganization(organizationId)
@@ -135,7 +136,8 @@ namespace AuthHive.Auth.Repositories
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetByOrganizationAndMembershipTypeAsync(
             Guid organizationId, 
-            MembershipType membershipType)
+            MembershipType membershipType,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(c => c.MembershipType == membershipType && c.Status == ConnectedIdStatus.Active)
@@ -151,7 +153,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 특정 ConnectedId가 초대한 멤버 조회
         /// </summary>
-        public async Task<IEnumerable<ConnectedId>> GetInvitedMembersAsync(Guid connectedId)
+        public async Task<IEnumerable<ConnectedId>> GetInvitedMembersAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             // BaseRepository의 FindAsync 활용 (현재 컨텍스트의 조직 필터링)
             return await FindAsync(c => c.InvitedByConnectedId == connectedId);
@@ -160,7 +162,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 대기 중인 초대 조회
         /// </summary>
-        public async Task<IEnumerable<ConnectedId>> GetPendingInvitationsAsync(Guid organizationId)
+        public async Task<IEnumerable<ConnectedId>> GetPendingInvitationsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(c => c.Status == ConnectedIdStatus.Pending && c.InvitedAt != null)
@@ -178,7 +180,8 @@ namespace AuthHive.Auth.Repositories
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetInactiveConnectedIdsAsync(
             Guid organizationId, 
-            DateTime inactiveSince)
+            DateTime inactiveSince, 
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(c => c.Status == ConnectedIdStatus.Active
@@ -193,7 +196,8 @@ namespace AuthHive.Auth.Repositories
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetRecentlyActiveAsync(
             Guid organizationId, 
-            int topCount = 10)
+            int topCount = 10,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(c => c.Status == ConnectedIdStatus.Active && c.LastActiveAt != null)
@@ -210,7 +214,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 사용자가 이미 조직 멤버인지 확인
         /// </summary>
-        public async Task<bool> IsMemberOfOrganizationAsync(Guid userId, Guid organizationId)
+        public async Task<bool> IsMemberOfOrganizationAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             // BaseRepository의 RLS를 우회하고 직접 DBSet(_dbSet)을 사용하여 정확한 확인
             return await _dbSet.AnyAsync(c => 

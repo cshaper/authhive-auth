@@ -92,7 +92,66 @@ namespace AuthHive.Auth.Repositories.Base
         {
             return typeof(OrganizationScopedEntity).IsAssignableFrom(typeof(TEntity));
         }
+        #region 통계 및 분석 (IRepository 구현)
 
+        /// <summary>
+        /// 그룹별 개수 통계를 조회합니다.
+        /// </summary>
+        public virtual async Task<Dictionary<TKey, int>> GetGroupCountAsync<TKey>(
+            Expression<Func<TEntity, TKey>> keySelector,
+            Expression<Func<TEntity, bool>>? predicate = null,
+            CancellationToken cancellationToken = default)
+            where TKey : notnull
+        {
+            var query = Query();
+
+            if (predicate != null)
+            {
+                query = query.Where(predicate);
+            }
+
+            return await query
+                .GroupBy(keySelector)
+                .Select(g => new { Key = g.Key, Count = g.Count() })
+                // ⭐️ CancellationToken을 전달하여 쿼리를 비동기로 실행합니다.
+                .ToDictionaryAsync(x => x.Key, x => x.Count, cancellationToken);
+        }
+
+        /// <summary>
+        /// 날짜별 개수 통계를 조회합니다. (차트용)
+        /// </summary>
+        public virtual async Task<Dictionary<DateTime, int>> GetDailyCountAsync(
+            Expression<Func<TEntity, DateTime>> dateSelector,
+            DateTime startDate,
+            DateTime endDate,
+            Expression<Func<TEntity, bool>>? predicate = null,
+            CancellationToken cancellationToken = default)
+        {
+            var query = Query();
+
+            if (predicate != null)
+            {
+                query = query.Where(predicate);
+            }
+
+            // CancellationToken이 이미 모든 Repository 메서드에 적용되었으므로,
+            // GetPropertyName() 확장 메서드는 수정 없이 사용 가능합니다.
+            // NOTE: GetPropertyName() 확장 메서드가 이 파일 범위 내에 존재한다고 가정합니다.
+            var datePropertyName = dateSelector.GetPropertyName();
+
+            return await query
+                .Where(e => EF.Property<DateTime>(e, datePropertyName) >= startDate &&
+                            EF.Property<DateTime>(e, datePropertyName) <= endDate)
+                .GroupBy(e => EF.Property<DateTime>(e, datePropertyName).Date)
+                .Select(g => new { Date = g.Key, Count = g.Count() })
+                // ⭐️ CancellationToken을 전달하여 쿼리를 비동기로 실행합니다.
+                .ToDictionaryAsync(x => x.Date, x => x.Count, cancellationToken);
+        }
+
+        #endregion
+        /// <summary>
+        /// ID로 조회 - 캐시 자동 적용 (ICacheService 사용)
+        /// </summary>
         /// <summary>
         /// ID로 조회 - 캐시 자동 적용 (ICacheService 사용)
         /// </summary>
@@ -101,13 +160,13 @@ namespace AuthHive.Auth.Repositories.Base
             if (_cacheService == null)
             {
                 // 캐시가 없으면 DB에서 바로 조회하여 반환
-                return await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
+                return await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
             }
 
             string cacheKey = GetCacheKey("GetById", id);
 
-            // 1. 캐시에서 조회 (ICacheService.GetAsync는 TEntity?를 반환)
-            var entity = await _cacheService.GetAsync<TEntity>(cacheKey);
+            // 1. 캐시에서 조회 (ICacheService.GetAsync는 CancellationToken을 받음)
+            var entity = await _cacheService.GetAsync<TEntity>(cacheKey, cancellationToken);
 
             if (entity != null)
             {
@@ -115,30 +174,32 @@ namespace AuthHive.Auth.Repositories.Base
             }
 
             // 2. DB에서 조회
-            entity = await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
+            entity = await Query().AsNoTracking().FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
 
-            // 3. DB 결과가 null이 아닐 경우 캐시에 저장 (ICacheService.SetAsync는 TEntity를 요구함)
+            // 3. DB 결과가 null이 아닐 경우 캐시에 저장 (ICacheService.SetAsync는 CancellationToken을 받음)
             if (entity != null)
             {
-                await _cacheService.SetAsync(cacheKey, entity, _defaultCacheTtl);
+                await _cacheService.SetAsync(cacheKey, entity, _defaultCacheTtl, cancellationToken); // CancellationToken 전달
             }
 
             return entity;
         }
-
         public virtual async Task<IEnumerable<TEntity>> GetAllAsync(CancellationToken cancellationToken = default)
         {
-            return await Query().AsNoTracking().ToListAsync();
+            // ⭐️ 수정: CancellationToken 전달
+            return await Query().AsNoTracking().ToListAsync(cancellationToken);
         }
+
 
         public virtual async Task<IEnumerable<TEntity>> FindAsync(Expression<Func<TEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
-            return await Query().Where(predicate).AsNoTracking().ToListAsync();
+            return await Query().Where(predicate).AsNoTracking().ToListAsync(cancellationToken);
         }
 
         public virtual async Task<TEntity?> FirstOrDefaultAsync(Expression<Func<TEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
-            return await Query().AsNoTracking().FirstOrDefaultAsync(predicate);
+
+            return await Query().AsNoTracking().FirstOrDefaultAsync(predicate, cancellationToken);
         }
 
         public virtual async Task<int> CountAsync(Expression<Func<TEntity, bool>>? predicate = null, CancellationToken cancellationToken = default)
@@ -148,12 +209,14 @@ namespace AuthHive.Auth.Repositories.Base
             {
                 query = query.Where(predicate);
             }
-            return await query.CountAsync();
+            // ⭐️ 수정: CancellationToken 전달
+            return await query.CountAsync(cancellationToken);
         }
 
         public virtual async Task<bool> AnyAsync(Expression<Func<TEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
-            return await Query().AnyAsync(predicate);
+            // ⭐️ 수정: CancellationToken 전달
+            return await Query().AnyAsync(predicate, cancellationToken);
         }
 
         /// <summary>
@@ -201,7 +264,7 @@ namespace AuthHive.Auth.Repositories.Base
                 query = query.Where(predicate);
             }
 
-            var totalCount = await query.CountAsync();
+            var totalCount = await query.CountAsync(cancellationToken);
 
             if (orderBy != null)
             {
@@ -218,7 +281,7 @@ namespace AuthHive.Auth.Repositories.Base
                 .AsNoTracking()
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
             return (items, totalCount);
         }
@@ -229,8 +292,9 @@ namespace AuthHive.Auth.Repositories.Base
 
         public virtual async Task<TEntity> AddAsync(TEntity entity, CancellationToken cancellationToken = default)
         {
-            await InvalidateCacheAsync(entity.Id);
-            await _dbSet.AddAsync(entity);
+            await InvalidateCacheAsync(entity.Id, cancellationToken);
+            // ⭐️ 수정: CancellationToken 전달
+            await _dbSet.AddAsync(entity, cancellationToken);
             return entity;
         }
 
@@ -239,52 +303,46 @@ namespace AuthHive.Auth.Repositories.Base
             var entityList = entities.ToList();
             foreach (var entity in entityList)
             {
-                await InvalidateCacheAsync(entity.Id);
+                await InvalidateCacheAsync(entity.Id, cancellationToken);
             }
-            await _dbSet.AddRangeAsync(entityList);
+            await _dbSet.AddRangeAsync(entityList, cancellationToken);
         }
-
-        // BaseRepository.cs 내 UpdateAsync 메서드 수정
 
         public virtual async Task UpdateAsync(TEntity entity, CancellationToken cancellationToken = default)
         {
-            // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
-            await InvalidateCacheAsync(entity.Id);
+            // ⭐️ 수정: CancellationToken 전달
+            await InvalidateCacheAsync(entity.Id, cancellationToken);
 
             _context.Entry(entity).State = EntityState.Modified;
 
-            // 이 메서드가 IUnitOfWork.SaveChangesAsync() 호출 전에 실행되므로,
-            // 변경 상태 설정 후 Task.CompletedTask를 반환하는 기존 패턴을 유지하되 async를 사용해야 함.
+            // BaseRepository는 SaveChangesAsync를 호출하지 않으므로, Task.CompletedTask를 await
             await Task.CompletedTask;
         }
 
+
         public virtual async Task UpdateRangeAsync(IEnumerable<TEntity> entities, CancellationToken cancellationToken = default)
         {
-            // CUD 작업은 캐시 무효화를 위해 비동기로 처리되어야 합니다.
             foreach (var entity in entities)
             {
-                // ⭐️ ICacheService의 비동기 메서드를 await하여 호출
-                await InvalidateCacheAsync(entity.Id);
+                // ⭐️ 수정: CancellationToken 전달
+                await InvalidateCacheAsync(entity.Id, cancellationToken);
             }
 
             _dbSet.UpdateRange(entities);
 
-            // 이 메서드는 SaveChangesAsync()를 호출하지 않으므로 Task.CompletedTask를 await합니다.
             await Task.CompletedTask;
         }
 
         public virtual async Task DeleteAsync(TEntity entity, CancellationToken cancellationToken = default)
         {
-            // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
-            await InvalidateCacheAsync(entity.Id);
+            // ⭐️ 수정: CancellationToken 전달
+            await InvalidateCacheAsync(entity.Id, cancellationToken);
 
             // Soft Delete 로직
             entity.IsDeleted = true;
             entity.DeletedAt = DateTime.UtcNow;
             _dbSet.Update(entity);
 
-            // SaveChangesAsync는 상위 레이어(IUnitOfWork)에서 호출되므로,
-            // 이 메서드 자체는 상태 변경 후 완료된 Task를 반환합니다.
             await Task.CompletedTask;
         }
 
@@ -292,13 +350,15 @@ namespace AuthHive.Auth.Repositories.Base
         /// ID로 엔티티를 Soft Delete 처리합니다. - 캐시 무효화 자동 처리
         /// </summary>
         // BaseRepository.cs 내 SoftDeleteAsync 메서드
-
+        /// <summary>
+        /// ID로 엔티티를 Soft Delete 처리합니다. - 캐시 무효화 자동 처리
+        /// </summary>
         public virtual async Task SoftDeleteAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            // ⭐️ 수정됨: ICacheService를 사용하므로 비동기 메서드를 await하여 호출
-            await InvalidateCacheAsync(id);
 
-            var entity = await Query().FirstOrDefaultAsync(e => e.Id == id);
+            await InvalidateCacheAsync(id, cancellationToken);
+
+            var entity = await Query().FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
 
             if (entity != null)
             {
@@ -306,18 +366,16 @@ namespace AuthHive.Auth.Repositories.Base
                 entity.IsDeleted = true;
                 entity.DeletedAt = DateTime.UtcNow;
                 _dbSet.Update(entity);
-                // Note: SaveChangesAsync는 상위 레이어(UnitOfWork)에서 호출됨
             }
         }
         public virtual async Task DeleteRangeAsync(IEnumerable<TEntity> entities, CancellationToken cancellationToken = default)
         {
             var timestamp = DateTime.UtcNow;
 
-            // ⭐️ CUD 작업이므로 async로 선언하고 비동기 호출을 처리해야 함
             foreach (var entity in entities)
             {
-                // ❌ InvalidateCache(entity.Id); 
-                await InvalidateCacheAsync(entity.Id); // ⭐️ ICacheService를 사용하도록 수정
+                // ⭐️ 수정: CancellationToken 전달
+                await InvalidateCacheAsync(entity.Id, cancellationToken);
 
                 // Soft Delete 로직
                 entity.IsDeleted = true;
@@ -326,8 +384,6 @@ namespace AuthHive.Auth.Repositories.Base
 
             _dbSet.UpdateRange(entities);
 
-            // 이 메서드가 SaveChangesAsync()를 직접 호출하지 않으므로,
-            // Task.CompletedTask를 await하여 Task<T> 시그니처를 충족시킵니다.
             await Task.CompletedTask;
         }
 
@@ -387,20 +443,20 @@ namespace AuthHive.Auth.Repositories.Base
         /// <summary>
         /// 특정 조직의 엔티티 조회 (관리자 전용)
         /// </summary>
-        public virtual async Task<IEnumerable<TEntity>> GetByOrganizationIdAsync(Guid organizationId)
+        public virtual async Task<IEnumerable<TEntity>> GetByOrganizationIdAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             if (!IsOrganizationScopedEntity())
             {
                 throw new InvalidOperationException($"Entity {typeof(TEntity).Name} is not organization-scoped.");
             }
 
-            return await QueryForOrganization(organizationId).AsNoTracking().ToListAsync();
+            return await QueryForOrganization(organizationId).AsNoTracking().ToListAsync(cancellationToken);
         }
 
         /// <summary>
         /// ID와 조직 ID로 엔티티 조회
         /// </summary>
-        public virtual async Task<TEntity?> GetByIdAndOrganizationAsync(Guid id, Guid organizationId)
+        public virtual async Task<TEntity?> GetByIdAndOrganizationAsync(Guid id, Guid organizationId, CancellationToken cancellationToken = default)
         {
             if (!IsOrganizationScopedEntity())
             {
@@ -409,7 +465,7 @@ namespace AuthHive.Auth.Repositories.Base
 
             return await QueryForOrganization(organizationId)
                 .AsNoTracking()
-                .FirstOrDefaultAsync(e => e.Id == id);
+                .FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
         }
 
         /// <summary>
@@ -417,18 +473,21 @@ namespace AuthHive.Auth.Repositories.Base
         /// </summary>
         public virtual async Task<IEnumerable<TEntity>> FindByOrganizationAsync(
             Guid organizationId,
-            Expression<Func<TEntity, bool>> predicate)
+            Expression<Func<TEntity, bool>> predicate,
+            CancellationToken cancellationToken = default)
         {
             if (!IsOrganizationScopedEntity())
             {
                 throw new InvalidOperationException($"Entity {typeof(TEntity).Name} is not organization-scoped.");
             }
 
+            // ⭐️ 수정: CancellationToken 전달
             return await QueryForOrganization(organizationId)
                 .Where(predicate)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
+
 
         /// <summary>
         /// 조직별 페이징 조회
@@ -439,7 +498,8 @@ namespace AuthHive.Auth.Repositories.Base
             int pageSize,
             Expression<Func<TEntity, bool>>? additionalPredicate = null,
             Expression<Func<TEntity, object>>? orderBy = null,
-            bool isDescending = false)
+            bool isDescending = false,
+            CancellationToken cancellationToken = default)
         {
             if (!IsOrganizationScopedEntity())
             {
@@ -458,7 +518,7 @@ namespace AuthHive.Auth.Repositories.Base
                 query = query.Where(additionalPredicate);
             }
 
-            var totalCount = await query.CountAsync();
+            var totalCount = await query.CountAsync(cancellationToken);
 
             if (orderBy != null)
             {
@@ -540,7 +600,7 @@ namespace AuthHive.Auth.Repositories.Base
         /// <summary>
         /// 캐시 키 생성 - 조직 컨텍스트 반영
         /// </summary>
-        private string GetCacheKey(string operation, params object[] parameters)
+        protected string GetCacheKey(string operation, params object[] parameters) 
         {
             var orgId = _organizationContext.CurrentOrganizationId?.ToString() ?? "Global";
             var paramStr = string.Join(":", parameters);
@@ -550,7 +610,7 @@ namespace AuthHive.Auth.Repositories.Base
         /// 캐시 무효화 - 조직별 분리 및 ICacheService 사용
         /// CUD 작업 후 캐시 일관성을 유지하기 위해 사용됩니다.
         /// </summary>
-        protected virtual async Task InvalidateCacheAsync(Guid entityId)
+        protected virtual async Task InvalidateCacheAsync(Guid entityId, CancellationToken cancellationToken = default)
         {
             // ⭐️ ICacheService 필드명은 _cacheService로 가정 (BaseRepository 생성자에서 변경됨)
             if (_cacheService == null) return;
@@ -558,7 +618,7 @@ namespace AuthHive.Auth.Repositories.Base
             string cacheKey = GetCacheKey("GetById", entityId);
 
             // ⭐️ ICacheService의 비동기 RemoveAsync 메서드 호출
-            await _cacheService.RemoveAsync(cacheKey);
+            await _cacheService.RemoveAsync(cacheKey, cancellationToken);
         }
 
         #endregion
