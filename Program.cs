@@ -26,6 +26,12 @@ using AuthHive.Business.Services.Organization;
 using AuthHive.Auth.Services.Authorization;
 using AuthHive.Auth.Services.Infra.Cache;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Infra.UserExperience;
+using Amazon.SimpleEmail;
+using AuthHive.Infrastructure.Services.UserExperience;
+using AuthHive.Auth.Services.ConnectedId;
+
+
 
 Log.Logger = new LoggerConfiguration()
    .WriteTo.Console()
@@ -61,7 +67,12 @@ try
             true);
         return ConnectionMultiplexer.Connect(configuration);
     });
-
+    // Email 
+    var awsOptions = builder.Configuration.GetAWSOptions();
+    builder.Services.AddDefaultAWSOptions(awsOptions);
+    builder.Services.AddAWSService<IAmazonSimpleEmailService>();
+    builder.Services.AddScoped<IEmailService, EmailService>();
+    builder.Services.AddScoped<IInvitationService, InvitationService>();
     // Auth Repositories
     builder.Services.AddScoped<IUserRepository, UserRepository>();
     builder.Services.AddScoped<IConnectedIdRepository, ConnectedIdRepository>();

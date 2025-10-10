@@ -101,7 +101,9 @@ namespace AuthHive.Auth.Services.ConnectedId
                 var canInviteResult = await CanInviteAsync(request.OrganizationId, InvitationType.Organization, cancellationToken);
                 if (!canInviteResult.IsSuccess)
                 {
-                    return ServiceResult<InvitationResponse>.Failure(canInviteResult.ErrorMessage, canInviteResult.ErrorCode);
+                    return ServiceResult<InvitationResponse>.Failure(
+                        canInviteResult.ErrorMessage ?? "Failed to verify invitation limits.", 
+                        canInviteResult.ErrorCode);
                 }
 
                 // 1-3. 중복 초대 확인 (Anti-Spam)
@@ -163,8 +165,18 @@ namespace AuthHive.Auth.Services.ConnectedId
                 // --- 5단계: 후속 작업 (이메일 발송) ---
                 if (request.SendInvitationEmail)
                 {
-                    // TODO: 실제 이메일 발송 로직 구현
-                    // await _emailService.SendInvitationEmailAsync(invitation, request.RedirectUrl);
+                    if (string.IsNullOrEmpty(request.RedirectUrl))
+                    {
+                        // RedirectUrl이 없으면 초대 이메일을 보낼 수 없으므로, 경고를 남기고 작업을 중단합니다.
+                        // 초대 자체는 성공했으므로, 실패(Failure)가 아닌 성공(Success)으로 처리하되,
+                        // 이메일이 발송되지 않았다는 메시지를 명확히 전달합니다.
+                        _logger.LogWarning("Invitation {InvitationId} was created, but email could not be sent because RedirectUrl was not provided.", invitation.Id);
+                        var responseWithoutEmail = MapToInvitationResponse(invitation);
+                        // 이메일은 보내지 못했지만 초대 자체는 성공했다는 메시지를 전달합니다.
+                        return ServiceResult<InvitationResponse>.Success(responseWithoutEmail, "Invitation created, but email could not be sent (Redirect URL missing).");
+                    }
+
+                    await _emailService.SendInvitationEmailAsync(invitation, request.RedirectUrl);
                     _logger.LogInformation("Invitation email dispatch requested for {Email}", invitation.InviteeEmail);
                 }
 
@@ -286,7 +298,21 @@ namespace AuthHive.Auth.Services.ConnectedId
                 InviteCode = invitation.InviteCode
             };
         }
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            // 이 서비스는 자체적인 상태(예: DB 연결) 점검이 필요 없으므로 항상 true를 반환합니다.
+            return Task.FromResult(true);
+        }
 
+        /// <summary>
+        /// 서비스를 초기화합니다.
+        /// InvitationService는 별도의 초기화 로직이 필요하지 않습니다.
+        /// </summary>
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            // 이 서비스는 시작 시 수행해야 할 초기 작업이 없으므로, 즉시 완료된 Task를 반환합니다.
+            return Task.CompletedTask;
+        }
         #endregion
     }
 }
