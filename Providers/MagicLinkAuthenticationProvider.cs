@@ -230,7 +230,7 @@ namespace AuthHive.Auth.Providers.Authentication
         }
 
         private async Task<ServiceResult<AuthenticationOutcome>> VerifyMagicLinkAsync(
-            AuthenticationRequest request)
+            AuthenticationRequest request, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(request.MagicLinkToken))
             {
@@ -294,7 +294,7 @@ namespace AuthHive.Auth.Providers.Authentication
                 organizationId = tokenData.OrganizationId.Value;
                 
                 // 먼저 기존 ConnectedId 조회
-                var existingConnectedIds = await _connectedIdService.GetByUserAsync(user.Id);
+                var existingConnectedIds = await _connectedIdService.GetByUserAsync(user.Id, cancellationToken);
                 if (existingConnectedIds.IsSuccess && existingConnectedIds.Data != null)
                 {
                     var existingConnectedId = existingConnectedIds.Data
@@ -314,7 +314,7 @@ namespace AuthHive.Auth.Providers.Authentication
                             ApplicationId = tokenData.ApplicationId
                         };
                         
-                        var connectedIdResult = await _connectedIdService.CreateAsync(createRequest);
+                        var connectedIdResult = await _connectedIdService.CreateAsync(createRequest, cancellationToken);
                         if (connectedIdResult.IsSuccess && connectedIdResult.Data != null)
                         {
                             connectedIdValue = connectedIdResult.Data.Id;
@@ -335,7 +335,7 @@ namespace AuthHive.Auth.Providers.Authentication
                         ApplicationId = tokenData.ApplicationId
                     };
                     
-                    var connectedIdResult = await _connectedIdService.CreateAsync(createRequest);
+                    var connectedIdResult = await _connectedIdService.CreateAsync(createRequest, cancellationToken);
                     if (connectedIdResult.IsSuccess && connectedIdResult.Data != null)
                     {
                         connectedIdValue = connectedIdResult.Data.Id;
@@ -353,7 +353,7 @@ namespace AuthHive.Auth.Providers.Authentication
                     Guid.Parse("00000000-0000-0000-0000-000000000001"));
                 
                 // 글로벌 조직용 ConnectedId 생성 또는 조회
-                var existingConnectedIds = await _connectedIdService.GetByUserAsync(user.Id);
+                var existingConnectedIds = await _connectedIdService.GetByUserAsync(user.Id, cancellationToken);
                 if (existingConnectedIds.IsSuccess && existingConnectedIds.Data != null)
                 {
                     var existingConnectedId = existingConnectedIds.Data
@@ -371,7 +371,7 @@ namespace AuthHive.Auth.Providers.Authentication
                             OrganizationId = organizationId
                         };
                         
-                        var connectedIdResult = await _connectedIdService.CreateAsync(createRequest);
+                        var connectedIdResult = await _connectedIdService.CreateAsync(createRequest, cancellationToken);
                         if (connectedIdResult.IsSuccess && connectedIdResult.Data != null)
                         {
                             connectedIdValue = connectedIdResult.Data.Id;
@@ -390,7 +390,7 @@ namespace AuthHive.Auth.Providers.Authentication
                         OrganizationId = organizationId
                     };
                     
-                    var connectedIdResult = await _connectedIdService.CreateAsync(createRequest);
+                    var connectedIdResult = await _connectedIdService.CreateAsync(createRequest, cancellationToken);
                     if (connectedIdResult.IsSuccess && connectedIdResult.Data != null)
                     {
                         connectedIdValue = connectedIdResult.Data.Id;

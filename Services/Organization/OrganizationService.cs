@@ -1,43 +1,43 @@
-using System;
-using System.Linq;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Auth.Data.Context;
-using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Models.Base.Summaries;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Organization;
 using AuthHive.Core.Models.Organization.Requests;
 using AuthHive.Core.Models.Organization.Responses;
-using AuthHive.Core.Models.Base.Summaries;
+using Microsoft.EntityFrameworkCore;
 using AutoMapper;
+using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Models.Organization.Common;
+using AuthHive.Auth.Middleware;
+using System.Net;
 
 namespace AuthHive.Auth.Services.Organization
 {
     /// <summary>
-    /// 조직 기본 관리 서비스 - AuthHive v15
-    /// WHO: 조직 관리자, 시스템 관리자, API 클라이언트
-    /// WHEN: 조직 생성/조회/수정/삭제 비즈니스 로직 수행 시
-    /// WHERE: AuthHive.Auth 서비스 레이어
-    /// WHAT: 조직의 생성, 조회, 수정, 삭제 기본 작업만 담당
-    /// WHY: 조직 관리의 핵심 비즈니스 규칙 적용
-    /// HOW: Repository를 통한 데이터 접근 + 비즈니스 규칙 적용 + 캐싱
-    /// NOTE: 복잡한 기능은 다른 전문 서비스로 분리 (계층구조, 정책, SSO 등)
+    /// 조직 기본 관리 서비스 - AuthHive v16 (Finalized)
+    /// WHY: 조직 관리의 핵심 비즈니스 규칙을 적용하고, Repository와 책임을 분리합니다.
     /// </summary>
     public class OrganizationService : IOrganizationService
     {
+        // 1. 필드 선언 (IMemoryCache 제거, ICacheService 및 핵심 서비스 추가)
         private readonly IOrganizationRepository _repository;
         private readonly IOrganizationHierarchyRepository _hierarchyRepository;
         private readonly IOrganizationCapabilityRepository _capabilityRepository;
+        private readonly IAuthorizationService _authorizationService;
+        private readonly IConnectedIdService _connectedIdService;       // ✅ Owner ConnectedId 생성
+        private readonly IRoleService _roleService;                     // ✅ Owner 역할 생성
+        private readonly IPlanRestrictionService _planRestrictionService; // ✅ 조직 수 제한 검증
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly IEventBus _eventBus;
         private readonly AuthDbContext _context;
         private readonly IMapper _mapper;
-        private readonly IMemoryCache _cache;
+        private readonly ICacheService _cacheService;
         private readonly ILogger<OrganizationService> _logger;
 
         // 캐시 키 상수
@@ -49,24 +49,36 @@ namespace AuthHive.Auth.Services.Organization
             IOrganizationRepository repository,
             IOrganizationHierarchyRepository hierarchyRepository,
             IOrganizationCapabilityRepository capabilityRepository,
+            IAuthorizationService authorizationService,
+            IConnectedIdService connectedIdService,
+            IRoleService roleService,
+            IPlanRestrictionService planRestrictionService,
+            IUnitOfWork unitOfWork,
+            IEventBus eventBus,
             AuthDbContext context,
             IMapper mapper,
-            IMemoryCache cache,
+            ICacheService cacheService,
             ILogger<OrganizationService> logger)
         {
             _repository = repository;
             _hierarchyRepository = hierarchyRepository;
             _capabilityRepository = capabilityRepository;
+            _authorizationService = authorizationService;
+            _connectedIdService = connectedIdService;
+            _roleService = roleService;
+            _planRestrictionService = planRestrictionService;
+            _unitOfWork = unitOfWork;
+            _eventBus = eventBus;
             _context = context;
             _mapper = mapper;
-            _cache = cache;
+            _cacheService = cacheService;
             _logger = logger;
         }
 
         #region IService Implementation
         // OrganizationService.cs
 
-        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -80,7 +92,7 @@ namespace AuthHive.Auth.Services.Organization
             }
         }
 
-        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             // The method body is already optimized for returning a completed task.
             _logger.LogInformation("OrganizationService initialized");
@@ -102,34 +114,43 @@ namespace AuthHive.Auth.Services.Organization
         /// HOW: 캐시 확인 → Repository 조회 → DTO 매핑 → 캐싱
         /// </summary>
         public async Task<ServiceResult<OrganizationDto>> GetByIdAsync(
-            Guid organizationId,
-            bool includeInactive = false)
+                 Guid organizationId,
+                 Guid currentUserConnectedId,
+                 bool includeInactive = false,
+                 CancellationToken cancellationToken = default)
         {
+            var isAuthorized = await _authorizationService.CanAccessOrganizationAsync(
+            organizationId, cancellationToken: cancellationToken);
+    
+            if (!isAuthorized)
+            {
+                // 권한이 없으면 AuthHiveForbiddenException을 발생시켜 Middleware가 처리하도록 합니다.
+                throw new AuthHiveForbiddenException("You do not have permission to access this organization.");
+            }
             try
             {
                 // 캐시 확인
                 var cacheKey = $"{CACHE_KEY_PREFIX}{organizationId}";
-                if (_cache.TryGetValue<OrganizationDto>(cacheKey, out var cachedOrg) && cachedOrg != null)
+                var cachedOrg = await _cacheService.GetAsync<OrganizationDto>(cacheKey, cancellationToken);
+                if (cachedOrg != null)
                 {
-                    if (!includeInactive && cachedOrg.Status != OrganizationStatus.Active)
+                    if (!includeInactive && cachedOrg.Status.ToString() != OrganizationStatus.Active.ToString())
                     {
                         return ServiceResult<OrganizationDto>.Failure("Organization is not active");
                     }
                     return ServiceResult<OrganizationDto>.Success(cachedOrg);
                 }
 
-                // Repository를 통해 조회 (Include로 Capabilities도 로드)
-                var organization = await _context.Organizations
-                    .Include(o => o.Capabilities)
-                    .ThenInclude(c => c.Capability)
-                    .FirstOrDefaultAsync(o => o.Id == organizationId);
+                // 2. Repository를 통해 조회 (Repository 패턴 준수)
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
 
                 if (organization == null)
                 {
-                    return ServiceResult<OrganizationDto>.Failure($"Organization not found: {organizationId}");
+                    // Throw the specific exception for "Not Found"
+                    throw new AuthHiveNotFoundException($"Organization not found with ID: {organizationId}");
                 }
 
-                // 상태 확인
+                // 3. 상태 확인
                 if (!includeInactive && organization.Status != OrganizationStatus.Active)
                 {
                     return ServiceResult<OrganizationDto>.Failure("Organization is not active");
@@ -137,38 +158,67 @@ namespace AuthHive.Auth.Services.Organization
 
                 var dto = _mapper.Map<OrganizationDto>(organization);
 
-                // 추가 계산 필드 설정
-                dto.AdditionalCapabilitiesCount = organization.Capabilities?.Count ?? 0;
-                dto.ApplicationsCount = await CountApplicationsAsync(organizationId);
-                dto.ActiveMembersCount = await CountActiveMembersAsync(organizationId);
-
-                // 캐시 저장
-                var cacheOptions = new MemoryCacheEntryOptions
+                if (organization.Capabilities != null)
                 {
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CACHE_DURATION_MINUTES),
-                    Priority = CacheItemPriority.Normal
-                };
-                _cache.Set(cacheKey, dto, cacheOptions);
+                    // 4-1. 활성 상태인 Capability Assignment만 필터링합니다. (IsActive = true)
+                    dto.ActiveCapabilities = organization.Capabilities
+                        .Where(ca => ca.IsActive)
+                        // 4-2. OrganizationCapabilityAssignment 엔티티를 DTO (OrganizationCapabilityInfo)로 매핑합니다.
+                        .Select(ca =>
+                        {
+                            var info = _mapper.Map<OrganizationCapabilityInfo>(ca);
+                            // Capability Code 매핑 (예: "PROVIDER" -> OrganizationCapabilityEnum.Provider)
+                            info.Capability = MapToCapabilityEnum(ca.Capability?.Code);
+                            return info;
+                        })
+                        .ToList();
+                }
+                // 5. [수정된 로직] 애플리케이션 목록 조회 및 DTO에 할당
+
+                // 5-1. 목록 조회: 이름과 카테고리(Type)를 포함한 목록을 조회합니다.
+                var applicationList = await GetApplicationBasicInfoListAsync(organizationId, cancellationToken);
+                dto.ApplicationsList = applicationList;
+
+                // 5-2. 개수 설정: 목록의 Count를 ApplicationsCount에 할당하여 일관성을 유지합니다.
+                dto.ApplicationsCount = applicationList.Count;
+
+                // 활성 멤버 수 계산 (Strict Pricing Enforcement의 기반 데이터)
+                dto.ActiveMembersCount = await CountActiveMembersAsync(organizationId, cancellationToken);
+
+                // 5. 캐시 저장 (ICacheService 사용)
+                await _cacheService.SetAsync(
+                    cacheKey,
+                    dto,
+                    TimeSpan.FromMinutes(CACHE_DURATION_MINUTES),
+                    cancellationToken);
 
                 return ServiceResult<OrganizationDto>.Success(dto);
+
+            }
+            catch (AuthHiveException)
+            {
+                // Let our specific, known exceptions bubble up directly to the middleware.
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to get organization by ID: {OrganizationId}", organizationId);
-                return ServiceResult<OrganizationDto>.Failure("Failed to retrieve organization");
+                // Catch any other unexpected exception.
+                _logger.LogError(ex, "An unexpected error occurred while getting organization by ID: {OrganizationId}", organizationId);
+
+                // Rethrow to let the middleware handle it as a generic 500 Internal Server Error.
+                throw;
             }
         }
+
 
         /// <summary>
         /// 조직 키로 조회
         /// WHO: 외부 API 클라이언트, SSO 프로세스
-        /// WHEN: URL 기반 조직 식별, API 키 검증
-        /// WHERE: Public API, OAuth/SAML 플로우
-        /// WHAT: 조직 키(slug)로 조직 정보 반환
-        /// WHY: Human-readable URL 지원, 외부 시스템 연동
-        /// HOW: 캐시 확인 → Repository 조회 → DTO 매핑 → 캐싱
+        /// HOW: 캐시 확인(ICacheService) → Repository 조회 → DTO 매핑(목록 포함) → 캐싱
         /// </summary>
-        public async Task<ServiceResult<OrganizationDto>> GetByKeyAsync(string organizationKey)
+        public async Task<ServiceResult<OrganizationDto>> GetByKeyAsync(
+            string organizationKey,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -177,34 +227,55 @@ namespace AuthHive.Auth.Services.Organization
                     return ServiceResult<OrganizationDto>.Failure("Organization key is required");
                 }
 
-                // 캐시 확인
+                // 1. 캐시 확인 (ICacheService 사용)
                 var cacheKey = $"{CACHE_KEY_BY_KEY}{organizationKey}";
-                if (_cache.TryGetValue<OrganizationDto>(cacheKey, out var cachedOrg) && cachedOrg != null)
+                // [수정] _cache.TryGetValue 대신 await _cacheService.GetAsync 사용
+                var cachedOrg = await _cacheService.GetAsync<OrganizationDto>(cacheKey, cancellationToken);
+
+                if (cachedOrg != null)
                 {
                     return ServiceResult<OrganizationDto>.Success(cachedOrg);
                 }
 
-                // Repository를 통해 조회
-                var organization = await _repository.GetByOrganizationKeyAsync(organizationKey);
+                // 2. Repository를 통해 조회
+                var organization = await _repository.GetByOrganizationKeyAsync(organizationKey, cancellationToken); // ✅ Token 전달
                 if (organization == null)
                 {
                     return ServiceResult<OrganizationDto>.Failure($"Organization not found: {organizationKey}");
                 }
 
+                // 3. DTO 매핑 및 통계 계산 (GetByIdAsync와 동일 로직)
                 var dto = _mapper.Map<OrganizationDto>(organization);
 
-                // 추가 계산 필드 설정
-                dto.AdditionalCapabilitiesCount = organization.Capabilities?.Count ?? 0;
-                dto.ApplicationsCount = await CountApplicationsAsync(organization.Id);
-                dto.ActiveMembersCount = await CountActiveMembersAsync(organization.Id);
-
-                // 캐시 저장
-                var cacheOptions = new MemoryCacheEntryOptions
+                // 3-1. 활성 Capability 목록 설정 (Active Capabilities)
+                if (organization.Capabilities != null)
                 {
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CACHE_DURATION_MINUTES),
-                    Priority = CacheItemPriority.Normal
-                };
-                _cache.Set(cacheKey, dto, cacheOptions);
+                    dto.ActiveCapabilities = organization.Capabilities
+                        .Where(ca => ca.IsActive)
+                        .Select(ca =>
+                        {
+                            var info = _mapper.Map<OrganizationCapabilityInfo>(ca);
+                            info.Capability = MapToCapabilityEnum(ca.Capability?.Code);
+                            return info;
+                        })
+                        .ToList();
+                }
+
+                // 3-2. 애플리케이션 목록 설정 (이름과 카테고리 포함)
+                var applicationList = await GetApplicationBasicInfoListAsync(organization.Id, cancellationToken); // ✅ Token 전달
+                dto.ApplicationsList = applicationList;
+                dto.ApplicationsCount = applicationList.Count;
+
+                // 3-3. 활성 멤버 수 계산
+                dto.ActiveMembersCount = await CountActiveMembersAsync(organization.Id, cancellationToken); // ✅ Token 전달
+
+                // 4. 캐시 저장 (ICacheService 사용)
+                // [수정] MemoryCacheEntryOptions와 _cache.Set 대신 ICacheService.SetAsync 사용
+                await _cacheService.SetAsync(
+                    cacheKey,
+                    dto,
+                    TimeSpan.FromMinutes(CACHE_DURATION_MINUTES),
+                    cancellationToken);
 
                 return ServiceResult<OrganizationDto>.Success(dto);
             }
@@ -224,7 +295,7 @@ namespace AuthHive.Auth.Services.Organization
         /// WHY: 단일 API 호출로 전체 정보 제공 (N+1 방지)
         /// HOW: Include/Join을 통한 관련 데이터 일괄 조회 → 통계 계산 → Response 구성
         /// </summary>
-        public async Task<ServiceResult<OrganizationDetailResponse>> GetDetailAsync(Guid organizationId)
+        public async Task<ServiceResult<OrganizationDetailResponse>> GetDetailAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -245,7 +316,7 @@ namespace AuthHive.Auth.Services.Organization
                 response.ParentId = organization.ParentId;
                 response.Path = organization.Path ?? "/";
                 response.Level = organization.Level;
-                response.SortOrder = organization.SortOrder;
+                response.SortOrder = organization.SortOrder;//response.SortOrder는 조직의 계층 구조 내에서 같은 부모를 가진 형제 조직들(Siblings) 사이의 표시 순서를 결정하는 필드입니다
                 response.EstablishedDate = organization.EstablishedDate;
                 response.EmployeeRange = organization.EmployeeRange;
                 response.Industry = organization.Industry;
@@ -305,8 +376,8 @@ namespace AuthHive.Auth.Services.Organization
                     OrganizationId = organizationId,
                     OrganizationName = organization.Name,
                     PrimaryCapability = primaryCapabilityEnum,
-                    ApplicationCount = await CountApplicationsAsync(organizationId),
-                    ActiveApplicationCount = await CountActiveApplicationsAsync(organizationId),
+                    ApplicationCount = await CountApplicationsAsync(organizationId, cancellationToken),
+                    ActiveApplicationCount = await CountActiveApplicationsAsync(organizationId, cancellationToken),
                     MemberCount = await CountTotalMembersAsync(organizationId),
                     ActiveMemberCount = await CountActiveMembersAsync(organizationId),
                     ChildOrganizationCount = await CountChildOrganizationsAsync(organizationId),
@@ -338,7 +409,7 @@ namespace AuthHive.Auth.Services.Organization
         /// </summary>
         public async Task<ServiceResult<CreateOrganizationResponse>> CreateAsync(
            CreateOrganizationRequest request,
-           Guid createdByConnectedId)
+           Guid createdByConnectedId, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -410,7 +481,7 @@ namespace AuthHive.Auth.Services.Organization
                 };
 
                 // 캐시 무효화
-                InvalidateOrganizationCache(created.Id, created.OrganizationKey);
+                await InvalidateOrgSelfCacheAsync(created.Id, created.OrganizationKey);
 
                 _logger.LogInformation(
                     "Organization created successfully: {OrganizationKey} by ConnectedId: {ConnectedId}",
@@ -438,7 +509,8 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult<OrganizationDetailResponse>> UpdateAsync(
             Guid organizationId,
             UpdateOrganizationRequest request,
-            Guid updatedByConnectedId)
+            Guid updatedByConnectedId,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -489,7 +561,7 @@ namespace AuthHive.Auth.Services.Organization
                 await _repository.UpdateAsync(existing);
 
                 // 캐시 무효화
-                InvalidateOrganizationCache(organizationId, existing.OrganizationKey);
+                await InvalidateOrgSelfCacheAsync(organizationId, existing.OrganizationKey);
 
                 // 상세 정보 조회 후 반환
                 var detailResult = await GetDetailAsync(organizationId);
@@ -520,7 +592,8 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult> DeleteAsync(
             Guid organizationId,
             Guid deletedByConnectedId,
-            string? reason = null)
+            string? reason = null,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -528,8 +601,10 @@ namespace AuthHive.Auth.Services.Organization
                 var childrenCount = await CountChildOrganizationsAsync(organizationId);
                 if (childrenCount > 0)
                 {
-                    return ServiceResult.Failure(
-                        $"Cannot delete organization with {childrenCount} child organizations");
+                    throw new AuthHiveException(
+                         "HAS_CHILDREN",
+                         $"Cannot delete organization with {childrenCount} child organizations. Please remove children first.",
+                         HttpStatusCode.Conflict);
                 }
 
                 // 조직 조회
@@ -543,7 +618,7 @@ namespace AuthHive.Auth.Services.Organization
                 await _repository.DeleteAsync(organization);
 
                 // 캐시 무효화
-                InvalidateOrganizationCache(organizationId, organization.OrganizationKey);
+                await InvalidateOrgSelfCacheAsync(organizationId, organization.OrganizationKey);
 
                 _logger.LogInformation(
                     "Organization deleted: {OrganizationId} by ConnectedId: {ConnectedId}, Reason: {Reason}",
@@ -578,7 +653,11 @@ namespace AuthHive.Auth.Services.Organization
             // 조직 키 중복 확인
             if (await _repository.IsOrganizationKeyExistsAsync(request.OrganizationKey))
             {
-                return ServiceResult.Failure($"Organization key '{request.OrganizationKey}' already exists");
+                // A duplicate key is a "Conflict" (HTTP 409).
+                throw new AuthHiveException(
+                    "CONFLICT",
+                    $"Organization key '{request.OrganizationKey}' already exists",
+                    HttpStatusCode.Conflict);
             }
 
             // 조직명 중복 확인
@@ -593,7 +672,10 @@ namespace AuthHive.Auth.Services.Organization
                 var parent = await _repository.GetByIdAsync(request.ParentId.Value);
                 if (parent == null)
                 {
-                    return ServiceResult.Failure("Parent organization not found");
+                    throw new AuthHiveException(
+                        "PARENT_NOT_FOUND",
+                        "Parent organization not found",
+                        HttpStatusCode.BadRequest);
                 }
 
                 if (parent.Status != OrganizationStatus.Active)
@@ -608,16 +690,18 @@ namespace AuthHive.Auth.Services.Organization
         /// <summary>
         /// 애플리케이션 수 계산
         /// WHO: 통계 서비스
-        /// WHEN: 조직 상세 정보 조회 시
-        /// WHERE: GetDetailAsync, GetByIdAsync
-        /// WHAT: 조직에 속한 전체 애플리케이션 수
-        /// WHY: 조직 규모 파악
-        /// HOW: EF Core 쿼리로 개수 계산
+        /// WHY: 비동기 취소 가능성 및 리소스 해제를 보장
+        /// HOW: AuthDbContext의 CountAsync에 CancellationToken 전달
         /// </summary>
-        private async Task<int> CountApplicationsAsync(Guid organizationId)
+        private async Task<int> CountApplicationsAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken) // ✅ Token 추가
         {
+            // AuthDbContext에 CancellationToken 전달하여 장시간 쿼리 방지
             return await _context.PlatformApplications
-                .CountAsync(a => a.OrganizationId == organizationId && !a.IsDeleted);
+                .CountAsync(
+                    a => a.OrganizationId == organizationId && !a.IsDeleted,
+                    cancellationToken); // ✅ Token 전달
         }
 
         /// <summary>
@@ -629,12 +713,21 @@ namespace AuthHive.Auth.Services.Organization
         /// WHY: 실제 운영 중인 서비스 파악
         /// HOW: Status가 Active인 애플리케이션 개수 계산
         /// </summary>
-        private async Task<int> CountActiveApplicationsAsync(Guid organizationId)
+        /// <summary>
+        /// 활성 애플리케이션 수 계산
+        /// WHO: 통계 서비스, 빌링 서비스
+        /// WHY: 비동기 작업의 취소 가능성(Cancellability) 확보
+        /// HOW: AuthDbContext의 CountAsync에 CancellationToken 전달
+        /// </summary>
+        private async Task<int> CountActiveApplicationsAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken) // ✅ CancellationToken 추가
         {
             return await _context.PlatformApplications
                 .CountAsync(a => a.OrganizationId == organizationId &&
-                               a.Status == ApplicationStatus.Active &&
-                               !a.IsDeleted);
+                                    a.Status == ApplicationStatus.Active &&
+                                    !a.IsDeleted,
+                                    cancellationToken); // ✅ Token 전달
         }
 
         /// <summary>
@@ -684,21 +777,110 @@ namespace AuthHive.Auth.Services.Organization
             return children?.Count() ?? 0;
         }
 
+
         /// <summary>
-        /// 캐시 무효화
-        /// WHO: 데이터 변경 프로세스
-        /// WHEN: 조직 생성/수정/삭제 시
-        /// WHERE: CreateAsync, UpdateAsync, DeleteAsync
-        /// WHAT: 메모리 캐시에서 조직 정보 제거
-        /// WHY: 데이터 일관성 보장
-        /// HOW: ID 기반, Key 기반 캐시 모두 제거
+        /// 조직 엔티티와 관련된 모든 캐시 항목을 비동기적으로 무효화합니다.
+        /// WHO: 데이터 변경 프로세스 (Create, Update, Delete)
+        /// WHY: ICacheService의 비동기 분산 캐싱 기능을 사용하며, 데이터 일관성을 보장합니다.
+        /// HOW: ID 기반, Key 기반 캐시를 비동기로 제거하고 CancellationToken을 전달합니다.
         /// </summary>
-        private void InvalidateOrganizationCache(Guid organizationId, string organizationKey)
+        private async Task InvalidateOrgSelfCacheAsync(
+            Guid organizationId,
+            string organizationKey,
+            CancellationToken cancellationToken = default)
         {
-            _cache.Remove($"{CACHE_KEY_PREFIX}{organizationId}");
-            _cache.Remove($"{CACHE_KEY_BY_KEY}{organizationKey}");
+            // [수정] _cache 대신 _cacheService 사용
+            if (_cacheService == null) return;
+
+            // 1. ID 기반 캐시 무효화 (비동기)
+            // 예: GetByIdAsync에서 사용하는 "org:GUID" 키 무효화
+            await _cacheService.RemoveAsync(
+                $"{CACHE_KEY_PREFIX}{organizationId}",
+                cancellationToken);
+
+            // 2. Key 기반 캐시 무효화 (비동기)
+            // 예: GetByKeyAsync에서 사용하는 "org:key:slug" 키 무효화
+            await _cacheService.RemoveAsync(
+                $"{CACHE_KEY_BY_KEY}{organizationKey}",
+                cancellationToken);
         }
 
+        /// <summary>
+        /// 조직이 소유한 활성 애플리케이션의 기본 정보 목록을 조회합니다.
+        /// WHO: 조직 상세 정보 및 대시보드 조회
+        /// </summary>
+        /// <summary>
+        /// 조직이 소유한 활성 애플리케이션의 기본 정보 목록을 조회합니다.
+        /// DTO에 앱의 이름과 카테고리를 제공하여 비즈니스 가치를 높입니다.
+        /// </summary>
+        private async Task<List<ApplicationBasicInfo>> GetApplicationBasicInfoListAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken)
+        {
+            // AuthDbContext의 DbSet<PlatformApplication>을 사용한다고 가정
+            return await _context.PlatformApplications
+                .AsNoTracking()
+                .Where(a => a.OrganizationId == organizationId &&
+                            !a.IsDeleted &&
+                            a.Status == ApplicationStatus.Active)
+                .Select(a => new ApplicationBasicInfo // ApplicationBasicInfo DTO에 맞춤
+                {
+                    ApplicationId = a.Id, // ✅ ApplicationId 대신 Id 필드 사용 (DTO 통일)
+                    Name = a.Name,
+                    ApplicationKey = a.ApplicationKey,
+                    ApplicationType = a.ApplicationType.ToString(),
+                    IsActive = (a.Status == ApplicationStatus.Active),
+                    IconUrl = a.IconUrl, // ✅ 누락된 IconUrl 필드 추가
+                })
+                .ToListAsync(cancellationToken);
+        }
+        // AuthHive.Auth.Services.Organization/OrganizationService.cs - Private Helper Methods 섹션
+
+        /// <summary>
+        /// 조직이 소유한 애플리케이션의 상태 및 유형(Web/Api)별 통계를 조회합니다.
+        /// WHY: 조직의 운영 상태와 기술 부하를 동시에 파악하기 위함입니다.
+        /// </summary>
+        private async Task<ApplicationStatistics> GetApplicationStatisticsAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken)
+        {
+            // 1. 조직에 속한 삭제되지 않은 모든 앱을 조회합니다.
+            var applications = await _context.PlatformApplications
+                .AsNoTracking()
+                .Where(a => a.OrganizationId == organizationId && !a.IsDeleted)
+                .ToListAsync(cancellationToken);
+
+            // 2. 통계 DTO를 구성합니다.
+            var stats = new ApplicationStatistics
+            {
+                TotalCount = applications.Count,
+                ActiveCount = applications.Count(a => a.Status == ApplicationStatus.Active),
+                SuspendedCount = applications.Count(a => a.Status == ApplicationStatus.Suspended),
+
+                // 3. 기술적 분류 (Web/Api) 계산
+                // ApplicationType Enum (Web, Api 등)을 사용한다고 가정
+                WebCount = applications.Count(a => a.ApplicationType.ToString().Equals("WEB", StringComparison.OrdinalIgnoreCase)),
+                ApiCount = applications.Count(a => a.ApplicationType.ToString().Equals("API", StringComparison.OrdinalIgnoreCase)),
+
+                // DraftCount 등 다른 상태도 필요하다면 여기서 추가 계산
+            };
+
+            return stats;
+        }
+
+        /// <summary>
+        /// 활성 멤버 수 계산
+        /// WHO: 통계 서비스, 빌링 서비스
+        /// HOW: AuthDbContext에 CancellationToken 전달
+        /// </summary>
+        private async Task<int> CountActiveMembersAsync(Guid organizationId, CancellationToken cancellationToken)
+        {
+            // AuthDbContext에 CancellationToken 전달
+            return await _context.OrganizationMemberships
+                .CountAsync(m => m.OrganizationId == organizationId &&
+                                    m.Status == OrganizationMembershipStatus.Active &&
+                                    !m.IsDeleted, cancellationToken); // ✅ Token 전달
+        }
         /// <summary>
         /// Capability 코드를 Enum으로 매핑
         /// WHO: DTO 매핑 프로세스
@@ -708,7 +890,7 @@ namespace AuthHive.Auth.Services.Organization
         /// WHY: 타입 안전성 및 일관성
         /// HOW: Switch 표현식으로 매핑
         /// </summary>
-        private OrganizationCapabilityEnum MapToCapabilityEnum(string code)
+        private OrganizationCapabilityEnum MapToCapabilityEnum(string? code)
         {
             return code?.ToUpper() switch
             {

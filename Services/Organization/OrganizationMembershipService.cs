@@ -197,7 +197,7 @@ namespace AuthHive.Auth.Services.Organization
 
                 var dto = _mapper.Map<OrganizationMembershipDto>(created);
                 _logger.LogInformation(
-                    "Member invited to organization: {OrganizationId}, Email: {Email}, Role: {Role}",
+                    "Member invited to org: {OrganizationId}, Email: {Email}, Role: {Role}",
                     organizationId, email, role);
 
                 return ServiceResult<OrganizationMembershipDto>.Success(dto);

@@ -119,7 +119,7 @@ namespace AuthHive.Auth.Services.Handlers
         #region ILoginEventHandler Implementation
 
         /// <inheritdoc />
-        public async Task HandlePreLoginAsync(PreLoginEvent eventData)
+        public async Task HandlePreLoginAsync(PreLoginEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -189,7 +189,7 @@ namespace AuthHive.Auth.Services.Handlers
         }
 
         /// <inheritdoc />
-        public async Task HandleLoginSuccessAsync(LoginSuccessEvent eventData)
+        public async Task HandleLoginSuccessAsync(LoginSuccessEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -315,7 +315,7 @@ namespace AuthHive.Auth.Services.Handlers
         }
 
         /// <inheritdoc />
-        public async Task HandleLoginFailureAsync(LoginFailureEvent eventData)
+        public async Task HandleLoginFailureAsync(LoginFailureEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -380,7 +380,7 @@ namespace AuthHive.Auth.Services.Handlers
         }
 
         /// <inheritdoc />
-        public async Task HandleFirstLoginAsync(FirstLoginEvent eventData)
+        public async Task HandleFirstLoginAsync(FirstLoginEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -437,7 +437,7 @@ namespace AuthHive.Auth.Services.Handlers
         }
 
         /// <inheritdoc />
-        public async Task HandleNewDeviceLoginAsync(NewDeviceLoginEvent eventData)
+        public async Task HandleNewDeviceLoginAsync(NewDeviceLoginEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -449,7 +449,8 @@ namespace AuthHive.Auth.Services.Handlers
                 await _authAttemptService.NotifyNewDeviceLoginAsync(
                     eventData.UserId,
                     $"{eventData.DeviceType}: {eventData.DeviceName}",
-                    eventData.IpAddress);
+                    eventData.IpAddress,
+                    cancellationToken);
 
                 // 2. 활동 로그 기록
                 await LogUserActivityAsync(
@@ -462,7 +463,8 @@ namespace AuthHive.Auth.Services.Handlers
                         DeviceType = eventData.DeviceType,
                         DeviceName = eventData.DeviceName,
                         IpAddress = eventData.IpAddress
-                    });
+                    },
+                    cancellationToken);
 
                 // 3. 디바이스 캐싱
                 await UpdateDeviceCacheAsync(eventData.UserId, $"{eventData.DeviceType}:{eventData.DeviceName}");
@@ -495,7 +497,7 @@ namespace AuthHive.Auth.Services.Handlers
         }
 
         /// <inheritdoc />
-        public async Task HandleConcurrentLoginAsync(ConcurrentLoginEvent eventData)
+        public async Task HandleConcurrentLoginAsync(ConcurrentLoginEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -519,7 +521,7 @@ namespace AuthHive.Auth.Services.Handlers
                     }
 
                     // ConnectedId 찾기
-                    var connectedIds = await _connectedIdRepository.GetByUserIdAsync(eventData.UserId);
+                    var connectedIds = await _connectedIdRepository.GetByUserIdAsync(eventData.UserId, cancellationToken);
                     if (connectedIds.Any())
                     {
                         var primaryConnectedId = connectedIds.First().Id;
@@ -623,7 +625,7 @@ namespace AuthHive.Auth.Services.Handlers
                 });
         }
 
-        private async Task HandleAccountLockAsync(Guid userId, string reason)
+        private async Task HandleAccountLockAsync(Guid userId, string reason, CancellationToken cancellationToken = default)
         {
             // AuthenticationAttemptService를 통한 계정 잠금 처리
             await _authAttemptService.LockAccountAsync(
@@ -632,7 +634,7 @@ namespace AuthHive.Auth.Services.Handlers
                 reason);
 
             // SessionService를 통한 모든 세션 종료
-            var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId);
+            var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
             foreach (var connectedId in connectedIds)
             {
                 await _sessionService.EndAllSessionsAsync(connectedId.Id, SessionEndReason.SecurityViolation);
@@ -693,7 +695,7 @@ namespace AuthHive.Auth.Services.Handlers
             };
         }
 
-        private async Task LogUserActivityAsync(Guid connectedId, UserActivityType activityType, bool isSuccessful, object? metadata = null)
+        private async Task LogUserActivityAsync(Guid connectedId, UserActivityType activityType, bool isSuccessful, object? metadata = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -723,11 +725,11 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        private async Task<Guid> GetOrCreateConnectedIdAsync(Guid userId)
+        private async Task<Guid> GetOrCreateConnectedIdAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             if (userId != Guid.Empty)
             {
-                var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId);
+                var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                 if (connectedIds.Any())
                 {
                     return connectedIds.First().Id;

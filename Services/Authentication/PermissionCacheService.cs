@@ -473,8 +473,8 @@ namespace AuthHive.Auth.Services.Permissions
                 // 추가 핵심 권한들
                 var additionalScopes = new[]
                 {
-            "organization:read",
-            "organization:write",
+            "org:read",
+            "org:write",
 
             "user:read",
             "user:manage",

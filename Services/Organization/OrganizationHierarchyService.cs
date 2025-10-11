@@ -558,7 +558,29 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<HierarchyValidationResult>.Failure("Failed to validate hierarchy depth.");
             }
         }
+        public async Task InvalidateAncestorCachesAsync(Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            // 1. 현재 조직을 조회하여 부모 ID를 가져옵니다.
+            var currentOrg = await _repository.GetByIdAsync(organizationId, cancellationToken);
 
+            Guid? parentId = currentOrg?.ParentId;
+
+            // 2. 조상 체인을 따라 반복문(또는 재귀)으로 캐시를 무효화합니다.
+            while (parentId.HasValue)
+            {
+                var parent = await _repository.GetByIdAsync(parentId.Value, cancellationToken);
+
+                if (parent == null) break;
+
+                // [핵심] 부모 조직의 '자식 목록' 캐시를 무효화합니다.
+                // GetDirectChildrenAsync 같은 메서드가 사용하는 캐시 키를 여기서 삭제합니다.
+                // 예시 키: "org:id:{ParentId}:children" (정확한 캐시 키 패턴 사용 필요)
+                await _cacheService.RemoveAsync($"org:id:{parent.Id}:children:*", cancellationToken);
+
+                // 3. 상위 조직으로 이동
+                parentId = parent.ParentId;
+            }
+        }
         #endregion
 
         #region Private Helper Methods

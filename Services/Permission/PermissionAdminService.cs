@@ -146,7 +146,7 @@ namespace AuthHive.Auth.Services.Permission
             return new List<PermissionEntity>
             {
                 new() { Scope = "system:admin", Name = "System Administration", Description = "Full access to system-level settings.", Category = PermissionCategory.System, IsSystemPermission = true, IsActive = true },
-                new() { Scope = "organization:create", Name = "Create Organization", Description = "Allows creating new organizations.", Category = PermissionCategory.Organization, IsSystemPermission = true, IsActive = true },
+                new() { Scope = "orgnization:create", Name = "Create Organization", Description = "Allows creating new organizations.", Category = PermissionCategory.Organization, IsSystemPermission = true, IsActive = true },
             };
         }
 

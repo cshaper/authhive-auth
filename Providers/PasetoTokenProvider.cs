@@ -2,10 +2,9 @@ using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Models.Auth.Authentication;
 using AuthHive.Core.Models.Common;
 using Microsoft.Extensions.Configuration;
+using System.Text;
 using Paseto;
 using Paseto.Builder;
-using Paseto.Cryptography.Key;
-using Paseto.Protocol;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -21,7 +20,8 @@ namespace AuthHive.Auth.Providers
     /// </summary>
     public class PasetoTokenProvider : ITokenProvider
     {
-        private readonly PasetoSymmetricKey _pasetoKey;
+        // ⚠️ 변경: PasetoSymmetricKey 대신 원시 키 바이트 배열을 저장합니다.
+        private readonly byte[] _keyBytes; 
         private readonly string _issuer;
         private readonly string _audience;
         private readonly TimeSpan _accessTokenLifetime;
@@ -38,7 +38,11 @@ namespace AuthHive.Auth.Providers
                 throw new ArgumentException("PASETO key must be 32 bytes (256 bits) for v4 protocol.", "Paseto:Key");
             }
 
-            _pasetoKey = new PasetoSymmetricKey(keyBytes, new Version4());
+            // ⚠️ 수정: 키 객체 대신 바이트 배열을 저장합니다.
+            _keyBytes = keyBytes; 
+            
+            // ⚠️ 원시 키 객체 생성 로직 제거: _pasetoKey = new PasetoSymmetricKey(keyBytes, new Version4());
+
             _accessTokenLifetime = TimeSpan.FromHours(configuration.GetValue<double>("Paseto:ExpiryInHours", 24));
         }
 
@@ -51,8 +55,10 @@ namespace AuthHive.Auth.Providers
                 var expiresAt = issuedAt.Add(_accessTokenLifetime);
 
                 var builder = new PasetoBuilder()
-                    .UseV4(Purpose.Local)
-                    .WithKey(_pasetoKey)
+                    // ⚠️ 수정: UseV4(Purpose.Local) 사용 (PasetoBuilder에 존재하는 Fluent API)
+                    .UseV4(Paseto.Purpose.Local)
+                    // ⚠️ 수정: WithKey(_pasetoKey) 대신 WithSharedKey(_keyBytes) 사용
+                    .WithSharedKey(_keyBytes) 
                     .Issuer(_issuer)
                     .Audience(_audience)
                     .Expiration(expiresAt)
@@ -99,8 +105,10 @@ namespace AuthHive.Auth.Providers
             try
             {
                 var validationResult = new PasetoBuilder()
-                    .UseV4(Purpose.Local)
-                    .WithKey(_pasetoKey)
+                    // ⚠️ 수정: UseV4(Purpose.Local) 사용 (PasetoBuilder에 존재하는 Fluent API)
+                    .UseV4(Paseto.Purpose.Local)
+                    // ⚠️ 수정: WithKey(_pasetoKey) 대신 WithSharedKey(_keyBytes) 사용
+                    .WithSharedKey(_keyBytes) 
                     .Audience(_audience)
                     .Issuer(_issuer)
                     .Decode(accessToken);
@@ -141,4 +149,3 @@ namespace AuthHive.Auth.Providers
         }
     }
 }
-

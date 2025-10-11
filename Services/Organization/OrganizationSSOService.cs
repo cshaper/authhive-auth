@@ -102,7 +102,7 @@ namespace AuthHive.Auth.Services.Organization
             try
             {
                 _logger.LogInformation(
-                    "SSO 설정 시작 - Organization: {OrganizationId}, ConfiguredBy: {ConnectedId}",
+                    "SSO 설정 시작 - org: {OrganizationId}, ConfiguredBy: {ConnectedId}",
                     organizationId, configuredByConnectedId);
 
                 var organization = await _organizationRepository.GetByIdAsync(organizationId);
@@ -149,7 +149,7 @@ namespace AuthHive.Auth.Services.Organization
                 var response = MapToResponse(sso);
 
                 _logger.LogInformation(
-                    "SSO 설정 완료 - SSO ID: {SSOId}, Organization: {OrganizationId}",
+                    "SSO 설정 완료 - SSO ID: {SSOId}, org: {OrganizationId}",
                     sso.Id, organizationId);
 
                 return ServiceResult<OrganizationSSOResponse>.Success(response);
@@ -275,7 +275,7 @@ namespace AuthHive.Auth.Services.Organization
             catch (Exception ex)
             {
                 _logger.LogError(ex,
-                    "SSO 목록 조회 중 오류 - Organization: {OrganizationId}",
+                    "SSO 목록 조회 중 오류 - org: {OrganizationId}",
                     organizationId);
                 return ServiceResult<OrganizationSSOListResponse>.Failure("Failed to retrieve SSO configurations");
             }

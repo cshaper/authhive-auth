@@ -64,7 +64,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var commonScopes = new List<string>
                 {
                     "user:read", "user:write", "user:*",
-                    "organization:manage", "application:*"
+                    "org:manage", "application:*"
                 };
                 await WarmupCacheAsync(commonScopes, cancellationToken);
                 _logger.LogInformation("ScopeParsingService initialized successfully");

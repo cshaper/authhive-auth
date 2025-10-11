@@ -193,7 +193,7 @@ namespace AuthHive.Auth.Services.Authorization
                 case PricingConstants.SubscriptionPlans.BUSINESS_KEY:
                 case "business":
                     restrictions.Add("api:rate_queue"); // API 속도 제한 (Queue)
-                    restrictions.Add("organization:depth_limit"); // 조직 계층 깊이 제한
+                    restrictions.Add("org:depth_limit"); // 조직 계층 깊이 제한
                     break;
 
                 case PricingConstants.SubscriptionPlans.ENTERPRISE_KEY:
