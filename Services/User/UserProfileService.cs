@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
+using AuthHive.Auth.Middleware;
 using AuthHive.Core.Entities.Audit;
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Enums.Auth;
@@ -43,6 +44,7 @@ namespace AuthHive.Auth.Services.User
     public class UserProfileService : IUserProfileService
     {
         private readonly IConnectedIdContext _connectedIdContext;
+        private readonly IPrincipalAccessor _principalAccessor;
         private readonly IUserProfileRepository _profileRepository;
         private readonly IUserRepository _userRepository;
         private readonly IUnitOfWork _unitOfWork;
@@ -69,7 +71,7 @@ namespace AuthHive.Auth.Services.User
         private const int DISTRIBUTED_CACHE_EXPIRATION_MINUTES = 60;
 
         public UserProfileService(
-            IUserProfileEventHandler eventHandler, // 🟢 FIX: 올바른 이벤트 핸들러 주입
+            IUserProfileEventHandler eventHandler,
             IConnectedIdRepository connectedIdRepository,
             IConnectedIdContext connectedIdContext,
             IUserProfileRepository profileRepository,
@@ -80,6 +82,7 @@ namespace AuthHive.Auth.Services.User
             ILogger<UserProfileService> logger,
             IDateTimeProvider dateTimeProvider,
             IAuditService auditService,
+            IPrincipalAccessor principalAccessor,
             IUserValidator validator,
             IEmailService emailService,
             ITokenService tokenService,
@@ -97,6 +100,7 @@ namespace AuthHive.Auth.Services.User
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _dateTimeProvider = dateTimeProvider ?? throw new ArgumentNullException(nameof(dateTimeProvider));
             _auditService = auditService ?? throw new ArgumentNullException(nameof(auditService));
+            _principalAccessor = principalAccessor ?? throw new ArgumentNullException(nameof(principalAccessor)); 
             _validator = validator ?? throw new ArgumentNullException(nameof(validator));
             _emailService = emailService ?? throw new ArgumentNullException(nameof(emailService));
             _tokenService = tokenService ?? throw new ArgumentNullException(nameof(tokenService));
@@ -134,9 +138,16 @@ namespace AuthHive.Auth.Services.User
 
         #region 프로필 CRUD with Full Features
 
-        public async Task<ServiceResult<UserProfileDto>> GetByUserIdAsync(Guid userId)
+        public async Task<ServiceResult<UserProfileDto>> GetByUserIdAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             var stopwatch = Stopwatch.StartNew();
+            var requestingOrgId = _principalAccessor.OrganizationId;
+
+            // 조직 컨텍스트 없이 User 데이터 접근 시도 (정책 위반)
+            if (requestingOrgId == Guid.Empty)
+            {
+                throw new AuthHiveForbiddenException("Organization context is required to access user data.");
+            }
             try
             {
                 var localCacheKey = $"{CACHE_KEY_PREFIX}{userId}";
@@ -154,11 +165,32 @@ namespace AuthHive.Auth.Services.User
                     return ServiceResult<UserProfileDto>.Success(distributedCachedProfile);
                 }
 
-                var profile = await _profileRepository.GetByIdAsync(userId);
+
+                // 2. ✅ 보안 검증: 요청 조직이 대상 User가 속한 조직인지 확인
+                // UserProfile의 OrganizationId가 아니라, User의 ConnectedId를 통해 소속 조직을 확인해야 함
+                // 여기서는 profile.OrganizationId (AuditableEntity에서 상속받는 OrganizationId)와 
+                // 요청 조직 ID가 일치하는지 확인하는 간단한 검증을 수행합니다.
+                // 1차 검증: UserProfile 엔티티가 현재 요청 컨텍스트의 OrganizationId와 일치하는지 확인
+
+                var profile = await _profileRepository.GetByIdAsync(userId, cancellationToken);
                 if (profile == null)
                 {
                     return ServiceResult<UserProfileDto>.NotFound($"Profile not found for user: {userId}");
                 }
+
+                // 2. CS0023 해결: ServiceResult<bool>을 명시적으로 받아서 Data를 확인합니다.
+                var isMemberResult = await _connectedIdService.IsMemberOfOrganizationAsync(userId, requestingOrgId, cancellationToken);
+                if (profile == null)
+                {
+                    return ServiceResult<UserProfileDto>.NotFound($"Profile not found for user: {userId}");
+                }
+                // 🚨 CS0023 해결: ServiceResult가 성공하지 못했거나, 데이터가 false인 경우 접근을 거부합니다.
+                if (!isMemberResult.IsSuccess || isMemberResult.Data == false)
+                {
+                    _logger.LogWarning("Forbidden access attempt: Org {requestingOrgId} tried to access user {userId} from another organization.", requestingOrgId, userId);
+                    return ServiceResult<UserProfileDto>.Forbidden("User profile not found in this organization context.");
+                }
+
 
                 var user = await _userRepository.GetByIdAsync(userId);
                 var dto = MapToDto(profile, user);
@@ -173,7 +205,7 @@ namespace AuthHive.Auth.Services.User
 
                 await _auditService.LogAsync(new AuditLog
                 {
-                    PerformedByConnectedId = await GetCurrentConnectedIdAsync(),
+                    PerformedByConnectedId = _connectedIdContext.ConnectedId,
                     TargetOrganizationId = await GetUserOrganizationIdAsync(userId),
                     Timestamp = _dateTimeProvider.UtcNow,
                     ActionType = AuditActionType.Read,
@@ -341,7 +373,6 @@ namespace AuthHive.Auth.Services.User
                     UserId = userId,
                     ErrorType = "CREATE_FAILED",
                     ErrorMessage = ex.Message,
-                    OccurredAt = _dateTimeProvider.UtcNow
                 });
                 _logger.LogError(ex, "Error creating profile for user {UserId}", userId);
                 return ServiceResult<UserProfileDto>.Failure($"Failed to create profile: {ex.Message}", "PROFILE_CREATE_ERROR");
@@ -435,7 +466,6 @@ namespace AuthHive.Auth.Services.User
                     UserId = userId,
                     ErrorType = "UPDATE_FAILED",
                     ErrorMessage = ex.Message,
-                    OccurredAt = _dateTimeProvider.UtcNow
                 });
                 _logger.LogError(ex, "Error updating profile for user {UserId}", userId);
                 return ServiceResult<UserProfileDto>.Failure($"Failed to update profile: {ex.Message}", "PROFILE_UPDATE_ERROR");
@@ -863,11 +893,11 @@ namespace AuthHive.Auth.Services.User
             return Task.FromResult(_connectedIdContext.ConnectedId);
         }
 
-        private async Task<Guid?> GetUserOrganizationIdAsync(Guid userId)
+        private async Task<Guid?> GetUserOrganizationIdAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId);
+                var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                 var activeConnected = connectedIds.FirstOrDefault(c => c.Status == ConnectedIdStatus.Active);
                 return activeConnected?.OrganizationId;
             }

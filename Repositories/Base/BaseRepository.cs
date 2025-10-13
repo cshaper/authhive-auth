@@ -41,20 +41,32 @@ namespace AuthHive.Auth.Repositories.Base
         }
 
         #region Cache Key Generation
+
+        #region Cache Key Generation
+        // 🚨 CS0121 해결: Guid만 받는 GetCacheKey 메서드가 중복되지 않도록 주의
+
         /// <summary>
-        /// 전역 엔티티(예: User)를 위한 캐시 키를 생성합니다. (예: "User:a1b2c3d4...")
-        /// 이 키는 조직 ID를 포함하지 않아 모든 테넌트에서 공유될 수 있는 데이터에 사용됩니다.
+        /// 엔티티 ID를 사용하지 않고, 사용자 지정 문자열(예: 토큰 해시, 사용자명 등)을 기반으로
+        /// 캐시 키를 생성합니다. (예: "AccountRecoveryRequest:token_hash_value")
+        /// </summary>
+        /// <param name="keySuffix">캐시 키의 접미사로 사용될 문자열</param>
+        protected virtual string GetCacheKey(string keySuffix) => $"{typeof(TEntity).Name}:{keySuffix}";
+
+
+        /// <summary>
+        /// 엔티티 ID를 위한 캐시 키를 생성합니다. (예: "User:a1b2c3d4...")
         /// </summary>
         /// <param name="id">엔티티의 고유 ID</param>
         protected virtual string GetCacheKey(Guid id) => $"{typeof(TEntity).Name}:{id}";
 
+
         /// <summary>
-        /// 조직 범위 엔티티(예: Product)를 위한 캐시 키를 생성합니다. (예: "Product:org_guid:product_guid")
-        /// 조직 ID를 키에 포함하여 테넌트 간 데이터가 절대 섞이지 않도록 보장합니다.
+        /// 조직 범위 엔티티를 위한 캐시 키를 생성합니다. (예: "Product:org_guid:product_guid")
         /// </summary>
         /// <param name="id">엔티티의 고유 ID</param>
         /// <param name="organizationId">엔티티가 속한 조직의 ID</param>
         protected virtual string GetCacheKey(Guid id, Guid organizationId) => $"{typeof(TEntity).Name}:{organizationId}:{id}";
+        #endregion
         #endregion
 
         #region Core Query Methods
@@ -138,14 +150,14 @@ namespace AuthHive.Auth.Repositories.Base
         {
             return await Query().AnyAsync(predicate, cancellationToken);
         }
-        
+
         public virtual async Task<bool> ExistsAsync(Guid id, CancellationToken cancellationToken = default)
         {
             // GetByIdAsync를 호출하여 캐시 로직을 재활용하고 DB 부하를 줄입니다.
             var entity = await GetByIdAsync(id, cancellationToken);
             return entity != null;
         }
-        
+
         public virtual async Task<(IEnumerable<TEntity> Items, int TotalCount)> GetPagedAsync(int pageNumber, int pageSize, Expression<Func<TEntity, bool>>? predicate = null, Expression<Func<TEntity, object>>? orderBy = null, bool isDescending = false, CancellationToken cancellationToken = default)
         {
             if (pageNumber < 1) pageNumber = 1;
@@ -227,7 +239,7 @@ namespace AuthHive.Auth.Repositories.Base
                 await DeleteAsync(entity, cancellationToken);
             }
         }
-        
+
         public virtual async Task DeleteRangeAsync(IEnumerable<TEntity> entities, CancellationToken cancellationToken = default)
         {
             var timestamp = DateTime.UtcNow;

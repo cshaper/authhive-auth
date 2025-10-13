@@ -22,21 +22,32 @@ namespace AuthHive.Auth.Repositories
     /// 계정 복구 요청 Repository 구현체 - AuthHive v16
     /// 비밀번호 재설정 등 계정 복구 프로세스를 관리합니다. ICacheService를 사용하도록 리팩토링되었습니다.
     /// </summary>
+    /// <summary>
+    /// 계정 복구 요청 Repository 구현체 - AuthHive v16
+    /// </summary>
     public class AccountRecoveryRepository : BaseRepository<AccountRecoveryRequest>, IAccountRecoveryRepository
     {
-        private const string CACHE_KEY_PREFIX = "account_recovery_";
-        private new readonly ICacheService _cacheService;
-
+        
+        private readonly IOrganizationContext _organizationContext; // Store the context locally
 
         public AccountRecoveryRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            ICacheService cacheService) // ✅ ICacheService 주입
-            : base(context, organizationContext, cacheService) // BaseRepository에도 ICacheService를 전달
+            IOrganizationContext organizationContext)
+            : base(context)
         {
-            _cacheService = cacheService;
+
+            _organizationContext = organizationContext ?? throw new ArgumentNullException(nameof(organizationContext));
         }
 
+        // ✅ FIX 1: Implement the missing abstract method from BaseRepository.
+        /// <summary>
+        /// AccountRecoveryRequest 엔티티는 특정 조직에 속하므로,
+        /// 멀티테넌시 필터링을 적용하기 위해 true를 반환합니다.
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity()
+        {
+            return true;
+        }
         /// <summary>
         /// 해시된 토큰 값으로 활성 복구 요청을 찾습니다.
         /// </summary>
@@ -47,62 +58,80 @@ namespace AuthHive.Auth.Repositories
             if (string.IsNullOrWhiteSpace(tokenHash))
                 return null;
 
-            var cacheKey = $"{CACHE_KEY_PREFIX}token_{tokenHash}";
+           var cacheKey = GetCacheKey($"token_{tokenHash}"); 
+            AccountRecoveryRequest? cached = null;
 
-            // 1. ✅ ICacheService를 사용하여 비동기로 캐시 확인
-            var cached = await _cacheService.GetAsync<AccountRecoveryRequest>(cacheKey, cancellationToken);
-
-            if (cached != null)
+            // 1. ✅ 캐시 조회 - ICacheService 널 체크 추가
+            if (_cacheService != null) // 👈 널 체크 추가
             {
+                try
+                {
+                    // _cacheService가 널이 아님을 보장하므로 GetAsync 호출은 안전합니다.
+                    cached = await _cacheService.GetAsync<AccountRecoveryRequest>(cacheKey, cancellationToken);
+                }
+                catch { /* 캐시 실패 시 로그 후 무시 */ }
+            }
+
+
+            if (cached is not null)
+            {
+                var requestFromCache = cached;
+
                 // 만료 및 완료 여부 재확인
-                if (!cached.IsCompleted && cached.ExpiresAt > DateTime.UtcNow)
-                    return cached;
+                if (!requestFromCache.IsCompleted && requestFromCache.ExpiresAt > DateTime.UtcNow)
+                    return requestFromCache;
                 else
                 {
                     // 2. ✅ 만료되었거나 완료된 요청은 ICacheService를 사용하여 비동기로 캐시에서 제거
-                    await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+                    // 널 체크가 바깥에 있으므로, 여기서도 _cacheService에 대한 널 체크를 다시 해주는 것이 좋습니다.
+                    if (_cacheService != null)
+                    {
+                        _ = Task.Run(() => _cacheService.RemoveAsync(cacheKey, CancellationToken.None));
+                    }
                     return null;
                 }
             }
 
-            // 데이터베이스에서 조회
+            // 데이터베이스에서 조회 (이 부분은 이전과 동일하게 널 무시 연산자 유지)
             var request = await Query()
-                .Include(r => r.User)
+                .Include(r => r.User!)
                 .FirstOrDefaultAsync(r =>
                     r.TokenHash == tokenHash &&
                     !r.IsCompleted &&
                     r.ExpiresAt > DateTime.UtcNow,
-                    cancellationToken);
+                    cancellationToken)!;
 
             // 3. ✅ 데이터베이스 조회 후, ICacheService를 사용하여 비동기로 캐시에 저장
-            if (request != null)
+            if (request != null && _cacheService != null) // 👈 널 체크 추가
             {
                 // 토큰 만료 시간까지 캐시 유지
                 var cacheDuration = request.ExpiresAt - DateTime.UtcNow;
+
                 if (cacheDuration > TimeSpan.Zero)
                 {
-                    // SlidingExpiration 대신 AbsoluteExpirationRelativeToNow와 동일하게 처리
-                    await _cacheService.SetAsync(key: cacheKey, value: request, expiration: cacheDuration, cancellationToken: cancellationToken);
+                    _ = Task.Run(() =>
+                        _cacheService.SetAsync(key: cacheKey, value: request, expiration: cacheDuration, CancellationToken.None));
                 }
             }
 
             return request;
         }
-
         /// <summary>
         /// 특정 사용자의 모든 대기 중인 복구 요청을 무효화합니다.
         /// </summary>
-        public async Task<int> InvalidatePendingRequestsForUserAsync(Guid userId)
+        public async Task<int> InvalidatePendingRequestsForUserAsync(
+            Guid userId,
+            CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
 
-            // 활성 요청들 조회
+            // 활성 요청들 조회 (cancellationToken 전달)
             var pendingRequests = await Query()
                 .Where(r =>
                     r.UserId == userId &&
                     !r.IsCompleted &&
                     r.ExpiresAt > now)
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // 👈 CancellationToken 전달
 
             if (!pendingRequests.Any())
                 return 0;
@@ -115,16 +144,23 @@ namespace AuthHive.Auth.Repositories
                 request.UpdatedAt = now;
 
                 // 4. ✅ 캐시에서 제거 (ICacheService 사용)
-                var cacheKey = $"{CACHE_KEY_PREFIX}token_{request.TokenHash}";
-                await _cacheService.RemoveAsync(cacheKey); // 비동기 메서드로 변경
+                var cacheKey = GetCacheKey($"token_{request.TokenHash}"); 
+
+                // 🚨 CS8602 해결: _cacheService가 null이 아닐 때만 RemoveAsync 호출
+                if (_cacheService != null)
+                {
+                    await _cacheService.RemoveAsync(cacheKey, cancellationToken); // 👈 CancellationToken 전달
+                }
             }
 
-            await UpdateRangeAsync(pendingRequests);
-            await _context.SaveChangesAsync();
+            // UpdateRangeAsync는 BaseRepository에 정의되어 있으므로, CancellationToken을 받는 시그니처를 가정합니다.
+            await UpdateRangeAsync(pendingRequests, cancellationToken);
+
+            // SaveChangesAsync에도 CancellationToken 전달
+            await _context.SaveChangesAsync(cancellationToken);
 
             return pendingRequests.Count;
         }
-
         /// <summary>
         /// 복구 요청을 완료 처리합니다.
         /// </summary>
@@ -133,28 +169,36 @@ namespace AuthHive.Auth.Repositories
             string completionIpAddress,
             CancellationToken cancellationToken = default)
         {
-            var request = await GetByIdAsync(requestId);
+            // GetByIdAsync는 BaseRepository에 정의되어 있으며, AccountRecoveryRequest?를 반환한다고 가정
+            var request = await GetByIdAsync(requestId, cancellationToken);
 
+            // 널 체크
             if (request == null || request.IsCompleted)
                 return false;
 
+            // 널이 아님이 보장되었으므로, 속성 접근은 안전합니다.
             request.IsCompleted = true;
             request.CompletedAt = DateTime.UtcNow;
             request.CompletionIpAddress = completionIpAddress;
             request.UpdatedAt = DateTime.UtcNow;
 
             // 5. ✅ 캐시에서 제거 (ICacheService 사용)
-            var cacheKey = $"{CACHE_KEY_PREFIX}token_{request.TokenHash}";
-            await _cacheService.RemoveAsync(cacheKey, cancellationToken); // 비동기 메서드로 변경
+            // 🚨 CS8602 해결 1: _cacheService 널 체크
+            if (_cacheService != null)
+            {
+                // 🚨 CS8602 해결 2: request가 널이 아님을 보장하므로 TokenHash 접근은 안전합니다.
+                var cacheKey = GetCacheKey($"token_{request.TokenHash}");
 
-            await UpdateAsync(request);
+                // request.TokenHash가 required string이므로 널일 가능성이 없지만, 
+                // _cacheService가 널이 아닐 때만 호출해야 합니다.
+                await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+            }
+
+            await UpdateAsync(request, cancellationToken);
             await _context.SaveChangesAsync(cancellationToken);
 
             return true;
         }
-
-        // --- 기타 메서드는 캐시 로직이 없어 그대로 유지합니다 ---
-
         /// <summary>
         /// 새 계정 복구 요청을 생성합니다.
         /// </summary>

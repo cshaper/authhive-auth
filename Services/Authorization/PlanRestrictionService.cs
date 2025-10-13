@@ -11,7 +11,9 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository.Settings;
 using AuthHive.Core.Models.Infra.Events;
-using AuthHive.Auth.Middleware; // IOrganizationSettingsQueryRepository
+using AuthHive.Auth.Middleware;
+using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Models.Common; // IOrganizationSettingsQueryRepository
 
 
 namespace AuthHive.Auth.Services.Authorization
@@ -25,6 +27,7 @@ namespace AuthHive.Auth.Services.Authorization
     {
         private readonly ICacheService _cacheService;
         private readonly ILogger<PlanRestrictionService> _logger;
+        private readonly IOrganizationStatisticsRepository _statisticsRepository;
         private readonly IOrganizationSettingsQueryRepository _settingsQueryRepository;
         private readonly IEventBus _eventBus;
 
@@ -41,11 +44,13 @@ namespace AuthHive.Auth.Services.Authorization
             ICacheService cacheService,
             ILogger<PlanRestrictionService> logger,
             IOrganizationSettingsQueryRepository settingsQueryRepository,
+            IOrganizationStatisticsRepository statisticsRepository,
             IEventBus eventBus)
         {
             _cacheService = cacheService;
             _logger = logger;
             _settingsQueryRepository = settingsQueryRepository;
+            _statisticsRepository = statisticsRepository;
             _eventBus = eventBus;
         }
 
@@ -159,6 +164,44 @@ namespace AuthHive.Auth.Services.Authorization
             }
         }
 
+        /// <summary>
+        /// 활동 로그 기록 전, 조직의 현재 스토리지 사용량이 요금제 제한을 초과하는지 검사합니다.
+        /// </summary>
+        public async Task<ServiceResult> CheckLogActivityLimitAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken = default)
+        {
+            // 1. AuthHive 슈퍼 조직 우회
+            if (organizationId == PricingConstants.AuthHiveSuperOrgId)
+            {
+                return ServiceResult.Success();
+            }
+
+            // 2. 현재 플랜의 스토리지 제한 조회 (임시로 Basic 플랜을 가정)
+            // 실제 구현에서는 IOrganizationPlanRepository를 통해 현재 플랜을 조회해야 합니다.
+            const string currentPlanKey = PricingConstants.SubscriptionPlans.BASIC_KEY;
+            var maxStorageGB = PricingConstants.GetStrictLimit(
+                PricingConstants.SubscriptionPlans.StorageLimits, currentPlanKey, PricingConstants.DefaultStorageLimit);
+
+            // 3. 현재 활동 로그 스토리지 사용량 조회
+            // 🚨 CS0103 해결: IOrganizationStatisticsRepository의 메서드 호출
+            var currentLogStorageUsageGB = await _statisticsRepository.GetLogStorageUsageGBAsync(
+                organizationId, cancellationToken);
+
+            // 4. 제한 검사
+            if (currentLogStorageUsageGB >= maxStorageGB)
+            {
+                // 이벤트 발행 및 실패 응답 (메시지는 영어로 작성)
+                await _eventBus.PublishAsync(
+                    new InfraErrorEvent(organizationId, "ACTIVITY_LOG_STORAGE_EXCEEDED", $"Activity Log storage limit ({maxStorageGB}GB) exceeded for organization."), cancellationToken);
+
+                return ServiceResult.Failure(
+                    $"Activity Log storage limit ({maxStorageGB}GB) exceeded. Please upgrade your plan or archive old logs.",
+                    PricingConstants.BusinessErrorCodes.UpgradeRequired);
+            }
+
+            return ServiceResult.Success();
+        }
         #endregion
 
         // ============ [누락된 함수 추가] 빌드 로직 ============

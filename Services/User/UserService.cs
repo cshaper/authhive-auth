@@ -328,7 +328,7 @@ namespace AuthHive.Auth.Services
                 var requestingOrgId = _principalAccessor.OrganizationId;
                 if(requestingOrgId != Guid.Empty && await _userRepository.IsUserInOrganizationAsync(user.Id, requestingOrgId, cancellationToken))
                 {
-                    return ServiceResult<UserDto>.Success(MapToDto(user));
+                    return ServiceResult<UserDto>.Success(MapToDto(user)!);
                 }
             }
             

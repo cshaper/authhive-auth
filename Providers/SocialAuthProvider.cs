@@ -18,6 +18,8 @@ using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using ConnectedIdEntity = AuthHive.Core.Entities.Auth.ConnectedId;
+
 namespace AuthHive.Auth.Services.Providers
 {
     /// <summary>
@@ -159,7 +161,7 @@ namespace AuthHive.Auth.Services.Providers
             string provider,
             string code,
             string? state = null,
-            CancellationToken cancellationToken=default)
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -232,7 +234,7 @@ namespace AuthHive.Auth.Services.Providers
                     // ConnectedId 조회 (User의 ConnectedIds 컬렉션에서 첫 번째)
                     var userConnectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
                     connectedId = userConnectedIds.FirstOrDefault()?.Id ?? Guid.Empty;
-                    
+
                     var fullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
 
                     // 소셜 계정 정보 저장
@@ -295,7 +297,7 @@ namespace AuthHive.Auth.Services.Providers
                     }
                     await _userRepository.UpdateAsync(user);
                 }
-                
+
                 var profileFullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
 
                 // 결과 생성
@@ -526,7 +528,7 @@ namespace AuthHive.Auth.Services.Providers
                     // 기존 사용자에 소셜 계정 연결
                     return ServiceResult<UserEntity>.Success(existingUser);
                 }
-                
+
                 var fullName = $"{userInfo.FirstName} {userInfo.LastName}".Trim();
 
                 // 새 사용자 생성
@@ -555,7 +557,7 @@ namespace AuthHive.Auth.Services.Providers
                 await _userRepository.AddAsync(newUser);
 
                 // ConnectedId 생성
-                var connectedId = new ConnectedId
+                var connectedId = new ConnectedIdEntity
                 {
                     Id = Guid.NewGuid(),
                     UserId = newUser.Id,
