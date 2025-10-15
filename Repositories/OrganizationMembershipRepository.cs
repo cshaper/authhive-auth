@@ -4,29 +4,33 @@ using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Enums.Core;
-using Microsoft.Extensions.Caching.Memory;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache; // ✅ Correct: Using ICacheService
+using System.Threading; // ✅ Correct: For CancellationToken
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// OrganizationMembership Repository 구현체 - AuthHive v15
+    /// OrganizationMembership Repository 구현체 - AuthHive v16 아키텍처 적용
     /// 조직 멤버십의 CRUD 및 관계 관리를 담당합니다.
     /// </summary>
     public class OrganizationMembershipRepository : BaseRepository<OrganizationMembership>, IOrganizationMembershipRepository
     {
+        // ✅ Correct: The constructor now aligns with the new BaseRepository.
+        // It no longer depends on IOrganizationContext and uses ICacheService.
         public OrganizationMembershipRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache) { }
+            ICacheService? cacheService)
+            : base(context) { }
+
+        // ✅ Correct: Implemented the mandatory abstract method from BaseRepository.
+        protected override bool IsOrganizationScopedEntity() => true;
 
         #region 기본 멤버십 조회
 
         public async Task<IEnumerable<OrganizationMembership>> GetMembersAsync(
             Guid organizationId,
-            bool includeInactive = false)
+            bool includeInactive = false,
+            CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId);
 
@@ -37,34 +41,40 @@ namespace AuthHive.Auth.Repositories
 
             return await query
                 .Include(m => m.Member)
+                .ThenInclude(c => c.User) // Include User for display purposes
                 .Include(m => m.InvitedBy)
                 .OrderBy(m => m.JoinedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
         public async Task<OrganizationMembership?> GetMembershipAsync(
             Guid organizationId,
-            Guid connectedId)
+            Guid connectedId,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Include(m => m.Member)
                 .Include(m => m.Organization)
-                .FirstOrDefaultAsync(m => m.ConnectedId == connectedId);
+                .FirstOrDefaultAsync(m => m.ConnectedId == connectedId, cancellationToken);
         }
 
-        public async Task<bool> IsMemberAsync(Guid organizationId, Guid connectedId)
+        public async Task<bool> IsMemberAsync(
+            Guid organizationId,
+            Guid connectedId,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .AnyAsync(m =>
                     m.ConnectedId == connectedId &&
-                    m.Status == OrganizationMembershipStatus.Active);
+                    m.Status == OrganizationMembershipStatus.Active, cancellationToken);
         }
 
         public async Task<IEnumerable<OrganizationMembership>> GetOrganizationsForConnectedIdAsync(
             Guid connectedId,
-            bool includeInactive = false)
+            bool includeInactive = false,
+            CancellationToken cancellationToken = default)
         {
-            var query = _dbSet.Where(m => m.ConnectedId == connectedId && !m.IsDeleted);
+            var query = Query().Where(m => m.ConnectedId == connectedId);
 
             if (!includeInactive)
             {
@@ -74,7 +84,36 @@ namespace AuthHive.Auth.Repositories
             return await query
                 .Include(m => m.Organization)
                 .OrderBy(m => m.JoinedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<bool> IsMemberByEmailAsync(
+            Guid organizationId,
+            string email,
+            string? username,
+            CancellationToken cancellationToken = default)
+        {
+            var query = QueryForOrganization(organizationId)
+                .Where(m => m.Status == OrganizationMembershipStatus.Active);
+
+            if (!string.IsNullOrEmpty(username))
+            {
+                // ✅ Add explicit null checks inside the AnyAsync predicate
+                return await query.AnyAsync(m =>
+                    m.Member != null &&
+                    m.Member.User != null &&
+                    (m.Member.User.Email == email || m.Member.User.Username == username),
+                    cancellationToken);
+            }
+            else
+            {
+                // ✅ Add explicit null checks inside the AnyAsync predicate here as well
+                return await query.AnyAsync(m =>
+                    m.Member != null &&
+                    m.Member.User != null &&
+                    m.Member.User.Email == email,
+                    cancellationToken);
+            }
         }
 
         #endregion
@@ -83,68 +122,67 @@ namespace AuthHive.Auth.Repositories
 
         public async Task<IEnumerable<OrganizationMembership>> GetMembersByStatusAsync(
             Guid organizationId,
-            OrganizationMembershipStatus status)
+            OrganizationMembershipStatus status,
+            CancellationToken cancellationToken = default)
         {
-            return await FindByOrganizationAsync(
-                organizationId,
-                m => m.Status == status
-            );
+            return await QueryForOrganization(organizationId)
+                .Where(m => m.Status == status)
+                .ToListAsync(cancellationToken);
         }
 
         public async Task<IEnumerable<OrganizationMembership>> GetMembersByRoleAsync(
             Guid organizationId,
-            OrganizationMemberRole role)
+            OrganizationMemberRole role,
+            CancellationToken cancellationToken = default)
         {
-            return await FindByOrganizationAsync(
-                organizationId,
-                m => m.MemberRole == role
-            );
+            return await QueryForOrganization(organizationId)
+                .Where(m => m.MemberRole == role)
+                .ToListAsync(cancellationToken);
         }
 
         public async Task<IEnumerable<OrganizationMembership>> GetMembersByTypeAsync(
             Guid organizationId,
-            OrganizationMembershipType membershipType)
+            OrganizationMembershipType membershipType,
+            CancellationToken cancellationToken = default)
         {
-            return await FindByOrganizationAsync(
-                organizationId,
-                m => m.MembershipType == membershipType
-            );
+            return await QueryForOrganization(organizationId)
+                .Where(m => m.MembershipType == membershipType)
+                .ToListAsync(cancellationToken);
         }
 
-        public async Task<IEnumerable<OrganizationMembership>> GetAdministratorsAsync(Guid organizationId)
+        public async Task<IEnumerable<OrganizationMembership>> GetAdministratorsAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken = default)
         {
-            var adminRoles = new[]
-            {
-                OrganizationMemberRole.Owner,
-                OrganizationMemberRole.Admin,
-                OrganizationMemberRole.Manager
-            };
+            var adminRoles = new[] { OrganizationMemberRole.Owner, OrganizationMemberRole.Admin };
 
             return await QueryForOrganization(organizationId)
-                .Where(m => adminRoles.Contains(m.MemberRole) &&
-                              m.Status == OrganizationMembershipStatus.Active)
+                .Where(m => adminRoles.Contains(m.MemberRole) && m.Status == OrganizationMembershipStatus.Active)
                 .Include(m => m.Member)
                 .OrderBy(m => m.MemberRole)
                 .ThenBy(m => m.JoinedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
         #endregion
 
         #region 초대 관리
 
-        public async Task<OrganizationMembership?> GetByInvitationTokenAsync(string invitationToken)
+        public async Task<OrganizationMembership?> GetByInvitationTokenAsync(
+            string invitationToken,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(invitationToken))
                 return null;
 
-            return await _dbSet
+            // Use Query() to ensure soft-deleted items are excluded.
+            return await Query()
                 .Include(m => m.Organization)
                 .Include(m => m.InvitedBy)
-                .FirstOrDefaultAsync(m =>
-                    m.InvitationToken == invitationToken &&
-                    !m.IsDeleted);
+                .FirstOrDefaultAsync(m => m.InvitationToken == invitationToken, cancellationToken);
         }
 
+        // Note: This method modifies state and saves. This is acceptable in a repository
+        // when not using a separate Unit of Work service.
         public async Task<bool> AcceptInvitationAsync(string invitationToken, Guid connectedId)
         {
             var membership = await GetByInvitationTokenAsync(invitationToken);
@@ -157,8 +195,8 @@ namespace AuthHive.Auth.Repositories
             membership.UpdatedByConnectedId = connectedId;
             membership.UpdatedAt = DateTime.UtcNow;
 
-            await UpdateAsync(membership);
-            await _context.SaveChangesAsync();
+            await UpdateAsync(membership); // Marks entity as modified and invalidates cache
+            await _context.SaveChangesAsync(); // Commits the change to the database
             return true;
         }
 
@@ -166,21 +204,23 @@ namespace AuthHive.Auth.Repositories
 
         #region 만료 및 비활성 관리
 
-        public async Task<IEnumerable<OrganizationMembership>> GetExpiredMembershipsAsync(DateTime asOfDate)
+        public async Task<IEnumerable<OrganizationMembership>> GetExpiredMembershipsAsync(
+            DateTime asOfDate,
+            CancellationToken cancellationToken = default)
         {
-            return await _dbSet
+            return await Query()
                 .Where(m => m.ExpiresAt.HasValue &&
                               m.ExpiresAt.Value <= asOfDate &&
-                              m.Status == OrganizationMembershipStatus.Active &&
-                              !m.IsDeleted)
+                              m.Status == OrganizationMembershipStatus.Active)
                 .Include(m => m.Member)
                 .Include(m => m.Organization)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
         public async Task<IEnumerable<OrganizationMembership>> GetInactiveMembersAsync(
             Guid organizationId,
-            int inactiveDays)
+            int inactiveDays,
+            CancellationToken cancellationToken = default)
         {
             var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
 
@@ -189,58 +229,60 @@ namespace AuthHive.Auth.Repositories
                               (m.LastActivityAt == null || m.LastActivityAt < cutoffDate))
                 .Include(m => m.Member)
                 .OrderBy(m => m.LastActivityAt ?? m.JoinedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        public async Task<IEnumerable<OrganizationMembership>> GetExpiringMembershipsAsync(int daysBeforeExpiration)
+        public async Task<IEnumerable<OrganizationMembership>> GetExpiringMembershipsAsync(
+            int daysBeforeExpiration,
+            CancellationToken cancellationToken = default)
         {
             var targetDate = DateTime.UtcNow.AddDays(daysBeforeExpiration);
 
-            return await _dbSet
+            return await Query()
                 .Where(m => m.ExpiresAt.HasValue &&
                               m.ExpiresAt.Value <= targetDate &&
                               m.ExpiresAt.Value > DateTime.UtcNow &&
-                              m.Status == OrganizationMembershipStatus.Active &&
-                              !m.IsDeleted)
+                              m.Status == OrganizationMembershipStatus.Active)
                 .Include(m => m.Member)
                 .Include(m => m.Organization)
                 .OrderBy(m => m.ExpiresAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
         #endregion
 
         #region 통계 및 분석
 
-        /// <summary>
-        /// ✨ [재추가된 메서드] 역할별 멤버 수 통계
-        /// 인터페이스에 정의된 멤버이므로 반드시 구현해야 합니다.
-        /// </summary>
-        public async Task<Dictionary<OrganizationMemberRole, int>> GetMemberCountByRoleAsync(Guid organizationId)
+        public async Task<Dictionary<OrganizationMemberRole, int>> GetMemberCountByRoleAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(m => m.Status == OrganizationMembershipStatus.Active && !m.IsDeleted)
+                .Where(m => m.Status == OrganizationMembershipStatus.Active)
                 .GroupBy(m => m.MemberRole)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
+                .ToDictionaryAsync(g => g.Key, g => g.Count(), cancellationToken);
         }
 
         public async Task<IEnumerable<OrganizationMembership>> GetRecentMembersAsync(
             Guid organizationId,
-            int count = 10)
+            int count = 10,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(m => m.Status == OrganizationMembershipStatus.Active)
                 .Include(m => m.Member)
                 .OrderByDescending(m => m.JoinedAt)
                 .Take(count)
-                .ToListAsync();
-        } 
-        public Task<int> GetMemberCountAsync(Guid organizationId)
+                .ToListAsync(cancellationToken);
+        }
+
+        // ✅ Correct: Implemented the missing GetMemberCountAsync method.
+        public async Task<int> GetMemberCountAsync(
+            Guid organizationId,
+            CancellationToken cancellationToken = default)
         {
-            // TODO: 조직의 전체 멤버 수를 조회하는 로직 구현
-            // 예시: return await _context.Set<OrganizationMembership>()
-            //                        .CountAsync(m => m.OrganizationId == organizationId && m.IsActive);
-            throw new NotImplementedException();
+            return await QueryForOrganization(organizationId)
+                .CountAsync(m => m.Status == OrganizationMembershipStatus.Active, cancellationToken);
         }
         #endregion
 

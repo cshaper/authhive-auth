@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+// 제거: using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Enums.Auth;
@@ -14,6 +15,8 @@ using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Security;
+using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService 추가
+using AuthHive.Core.Interfaces.Infra; // IDateTimeProvider 추가
 using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Events;
@@ -25,6 +28,7 @@ using AuthHive.Core.Models.Infra.Security;
 using AuthHive.Core.Models.Infra.Security.Common;
 using AuthHive.Core.Constants.Auth;
 using static AuthHive.Core.Enums.Core.UserEnums;
+using AuthHive.Core.Models.User.Requests;
 
 // Type aliases to avoid conflicts
 using LocationInfo = AuthHive.Core.Models.User.Responses.LocationInfo;
@@ -44,8 +48,10 @@ namespace AuthHive.Auth.Services.Security
         private readonly ISessionActivityLogRepository _sessionActivityRepository;
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IGeolocationService _geolocationService;
-        private readonly IMemoryCache _memoryCache;
+        private readonly ICacheService _cacheService; // 변경: IMemoryCache -> ICacheService
         private readonly IUnitOfWork _unitOfWork;
+        private readonly IEventBus _eventBus; // 추가: 이벤트 버스를 통한 느슨한 결합
+        private readonly IDateTimeProvider _dateTimeProvider; // 추가: 테스트 용이성을 위한 시간 제공자
         private readonly ILogger<RiskAssessmentService> _logger;
         private readonly RiskAssessmentSettings _settings;
 
@@ -59,8 +65,10 @@ namespace AuthHive.Auth.Services.Security
             ISessionActivityLogRepository sessionActivityRepository,
             IConnectedIdRepository connectedIdRepository,
             IGeolocationService geolocationService,
-            IMemoryCache memoryCache,
+            ICacheService cacheService, // 변경: IMemoryCache 제거, ICacheService 추가
             IUnitOfWork unitOfWork,
+            IEventBus eventBus, // 추가: 이벤트 버스 주입
+            IDateTimeProvider dateTimeProvider, // 추가: 시간 제공자 주입
             ILogger<RiskAssessmentService> logger,
             IOptions<RiskAssessmentSettings> settings)
         {
@@ -69,8 +77,10 @@ namespace AuthHive.Auth.Services.Security
             _sessionActivityRepository = sessionActivityRepository ?? throw new ArgumentNullException(nameof(sessionActivityRepository));
             _connectedIdRepository = connectedIdRepository ?? throw new ArgumentNullException(nameof(connectedIdRepository));
             _geolocationService = geolocationService ?? throw new ArgumentNullException(nameof(geolocationService));
-            _memoryCache = memoryCache ?? throw new ArgumentNullException(nameof(memoryCache));
+            _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService)); // 할당
             _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
+            _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus)); // 할당
+            _dateTimeProvider = dateTimeProvider ?? throw new ArgumentNullException(nameof(dateTimeProvider)); // 할당
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _settings = settings?.Value ?? throw new ArgumentNullException(nameof(settings));
         }
@@ -79,25 +89,24 @@ namespace AuthHive.Auth.Services.Security
 
         #region IService Implementation
         /// <summary>
-        /// 서비스 초기화
+        /// 서비스 초기화 - 캐시 정책 로드
         /// </summary>
-        public async Task InitializeAsync(CancellationToken cancellationToken = default) 
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogInformation("Initializing RiskAssessmentService");
 
-                // Note: MemoryCache operations are synchronous and don't take a CancellationToken,
-                // but the method is kept async due to the awaited LoadRiskPolicyAsync.
-                _memoryCache.Remove("risk_policy:default");
+                // MemoryCache 대신 ICacheService의 비동기 RemoveAsync 사용
+                await _cacheService.RemoveAsync("risk_policy:default", cancellationToken);
 
-                // Pass the token to the LoadRiskPolicyAsync call.
+                // CancellationToken을 LoadRiskPolicyAsync 호출에 전달
                 var defaultPolicy = await LoadRiskPolicyAsync(null, cancellationToken);
 
                 if (defaultPolicy != null)
                 {
-                    // MemoryCache is synchronous.
-                    _memoryCache.Set("risk_policy:default", defaultPolicy, TimeSpan.FromHours(1));
+                    // MemoryCache 대신 ICacheService의 비동기 SetAsync 사용
+                    await _cacheService.SetAsync("risk_policy:default", defaultPolicy, TimeSpan.FromHours(1), cancellationToken);
                 }
 
                 _logger.LogInformation("RiskAssessmentService initialized successfully");
@@ -110,45 +119,61 @@ namespace AuthHive.Auth.Services.Security
         }
 
         /// <summary>
-        /// 서비스 상태 확인
+        /// 서비스 상태 확인 - DB 및 캐시 의존성 검사
         /// </summary>
-        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
                 // 1. Repository Check (DB Dependency)
-                var repoCheckTask = Task.Run(async () =>
+                // CancellationToken을 Repository 호출에 전달
+                var repoCheckTask = _userRepository.GetByIdAsync(Guid.NewGuid(), cancellationToken)
+                    .ContinueWith(t => !t.IsFaulted && !t.IsCanceled, cancellationToken);
+
+                // 2. Cache Check (ICacheService Dependency)
+                // ICacheService의 SetStringAsync를 사용하여 값 타입 제약 조건 회피
+                var cacheCheckTask = Task.Run(async () =>
                 {
                     try
                     {
-                        // Pass the token to the repository call.
-                        await _userRepository.GetByIdAsync(Guid.NewGuid(), cancellationToken);
-                        return true;
+                        var key = "health_check";
+                        const string healthValue = "OK"; // 값 대신 참조 타입(string) 사용
+
+                        // ICacheService.SetStringAsync를 사용하여 string 값 저장
+                        await _cacheService.SetStringAsync(key, healthValue, TimeSpan.FromSeconds(1), cancellationToken);
+
+                        // ICacheService.GetStringAsync를 사용하여 값 읽기 및 검증
+                        var result = await _cacheService.GetStringAsync(key, cancellationToken);
+
+                        // 읽어온 값이 "OK"인지 확인
+                        return result == healthValue;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // 취소 요청이 들어온 경우 작업 중단
+                        throw;
                     }
                     catch
                     {
+                        // 캐시 작업 실패 시 false 반환
                         return false;
                     }
-                });
+                }, cancellationToken);
 
-                // 2. MemoryCache Check (Synchronous/In-memory Dependency)
-                var cacheCheck = true;
-                try
-                {
-                    // MemoryCache operations are synchronous and fast.
-                    _memoryCache.Set("health_check", true, TimeSpan.FromSeconds(1));
-                    cacheCheck = _memoryCache.Get<bool>("health_check");
-                }
-                catch
-                {
-                    cacheCheck = false;
-                }
 
-                // Wait for the repository check to complete.
-                var isRepoHealthy = await repoCheckTask;
+                // 모든 비동기 상태 확인 작업이 완료될 때까지 대기
+                await Task.WhenAll(repoCheckTask, cacheCheckTask);
 
-                // Combine results.
-                return isRepoHealthy && cacheCheck;
+                var isRepoHealthy = repoCheckTask.Result;
+                var isCacheHealthy = cacheCheckTask.Result;
+
+                // 두 종속성 모두 정상인지 결합하여 반환
+                return isRepoHealthy && isCacheHealthy;
+            }
+            catch (OperationCanceledException)
+            {
+                // 외부에서 취소 요청이 들어온 경우 예외 전파
+                throw;
             }
             catch (Exception ex)
             {
@@ -164,7 +189,7 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 인증 위험도 평가
         /// </summary>
-        public async Task<ServiceResult<RiskAssessment>> AssessAuthenticationRiskAsync(AuthenticationRequest request)
+        public async Task<ServiceResult<RiskAssessment>> AssessAuthenticationRiskAsync(AuthenticationRequest request, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -173,7 +198,8 @@ namespace AuthHive.Auth.Services.Security
 
                 if (!string.IsNullOrWhiteSpace(request.IpAddress))
                 {
-                    var ipRiskFactor = await AssessIpRiskAsync(request.IpAddress);
+                    // CancellationToken 전달
+                    var ipRiskFactor = await AssessIpRiskAsync(request.IpAddress, cancellationToken);
                     if (ipRiskFactor != null)
                     {
                         riskFactors.Add(ipRiskFactor);
@@ -183,7 +209,8 @@ namespace AuthHive.Auth.Services.Security
 
                 if (request.DeviceInfo != null)
                 {
-                    var deviceRiskFactor = await AssessDeviceRiskAsync(request.DeviceInfo);
+                    // CancellationToken 전달
+                    var deviceRiskFactor = await AssessDeviceRiskAsync(request.DeviceInfo, cancellationToken);
                     if (deviceRiskFactor != null)
                     {
                         riskFactors.Add(deviceRiskFactor);
@@ -200,7 +227,8 @@ namespace AuthHive.Auth.Services.Security
 
                 if (!string.IsNullOrWhiteSpace(request.Username))
                 {
-                    var failureRiskFactor = await AssessRecentFailuresAsync(request.Username);
+                    // CancellationToken 전달
+                    var failureRiskFactor = await AssessRecentFailuresAsync(request.Username, cancellationToken);
                     if (failureRiskFactor != null)
                     {
                         riskFactors.Add(failureRiskFactor);
@@ -208,7 +236,8 @@ namespace AuthHive.Auth.Services.Security
                     }
                 }
 
-                var timeRiskFactor = AssessTimeBasedRisk(DateTime.UtcNow);
+                // IDateTimeProvider 사용
+                var timeRiskFactor = AssessTimeBasedRisk(_dateTimeProvider.UtcNow);
                 if (timeRiskFactor != null)
                 {
                     riskFactors.Add(timeRiskFactor);
@@ -226,7 +255,7 @@ namespace AuthHive.Auth.Services.Security
                     RequiresMfa = riskScore >= _settings.MfaRequiredThreshold,
                     RequiresAdditionalVerification = riskScore >= _settings.AdditionalVerificationThreshold,
                     RecommendedActions = GenerateRecommendedActions(riskScore, riskFactors),
-                    AssessedAt = DateTime.UtcNow
+                    AssessedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
 
                 return ServiceResult<RiskAssessment>.Success(assessment);
@@ -243,12 +272,12 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 세션 위험도 평가
         /// </summary>
-        public async Task<ServiceResult<RiskAssessment>> AssessSessionRiskAsync(Guid sessionId)
+        public async Task<ServiceResult<RiskAssessment>> AssessSessionRiskAsync(Guid sessionId, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 세션 활동 로그 조회
-                var activities = await GetBySessionIdAsync(sessionId);
+                // CancellationToken 전달
+                var activities = await GetBySessionIdAsync(sessionId, cancellationToken);
                 if (!activities.Any())
                 {
                     return ServiceResult<RiskAssessment>.NotFound("Session activities not found");
@@ -273,8 +302,9 @@ namespace AuthHive.Auth.Services.Security
                     riskScore += patternRisk.WeightedScore / 100.0;
                 }
 
-                // 3. 지역 변경 감지 (동기 메서드로 변경)
-                var locationRisk = AnalyzeLocationChanges(activities);
+                // 3. 지역 변경 감지 (비동기 호출 포함하도록 수정)
+                // CancellationToken 전달
+                var locationRisk = await AnalyzeLocationChangesAsync(activities, cancellationToken);
                 if (locationRisk != null)
                 {
                     riskFactors.Add(locationRisk);
@@ -293,7 +323,7 @@ namespace AuthHive.Auth.Services.Security
                     RequiresMfa = riskScore >= _settings.MfaRequiredThreshold,
                     RequiresAdditionalVerification = riskScore >= _settings.AdditionalVerificationThreshold,
                     RecommendedActions = GenerateRecommendedActions(riskScore, riskFactors),
-                    AssessedAt = DateTime.UtcNow
+                    AssessedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
 
                 return ServiceResult<RiskAssessment>.Success(assessment);
@@ -306,10 +336,11 @@ namespace AuthHive.Auth.Services.Security
                     "RISK_ASSESSMENT_ERROR");
             }
         }
+
         /// <summary>
         /// 사용자 활동 위험도 평가
         /// </summary>
-        public async Task<ServiceResult<RiskAssessment>> AssessUserActivityRiskAsync(Guid userId, UserActivity activity)
+        public async Task<ServiceResult<RiskAssessment>> AssessUserActivityRiskAsync(Guid userId, UserActivity activity, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -325,7 +356,8 @@ namespace AuthHive.Auth.Services.Security
 
                 if (!string.IsNullOrWhiteSpace(activity.IpAddress))
                 {
-                    var ipRisk = await AssessIpRiskAsync(activity.IpAddress);
+                    // CancellationToken 전달
+                    var ipRisk = await AssessIpRiskAsync(activity.IpAddress, cancellationToken);
                     if (ipRisk != null)
                     {
                         riskFactors.Add(ipRisk);
@@ -333,7 +365,8 @@ namespace AuthHive.Auth.Services.Security
                     }
                 }
 
-                var userHistoryRisk = await AssessUserHistoryRiskAsync(userId);
+                // CancellationToken 전달
+                var userHistoryRisk = await AssessUserHistoryRiskAsync(userId, cancellationToken);
                 if (userHistoryRisk != null)
                 {
                     riskFactors.Add(userHistoryRisk);
@@ -351,7 +384,7 @@ namespace AuthHive.Auth.Services.Security
                     RequiresMfa = riskScore >= _settings.MfaRequiredThreshold,
                     RequiresAdditionalVerification = riskScore >= _settings.AdditionalVerificationThreshold,
                     RecommendedActions = GenerateRecommendedActions(riskScore, riskFactors),
-                    AssessedAt = DateTime.UtcNow
+                    AssessedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
 
                 return ServiceResult<RiskAssessment>.Success(assessment);
@@ -368,7 +401,7 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 거래 위험도 평가
         /// </summary>
-        public async Task<ServiceResult<TransactionRiskAssessment>> AssessTransactionRiskAsync(TransactionContext context)
+        public async Task<ServiceResult<TransactionRiskAssessment>> AssessTransactionRiskAsync(TransactionContext context, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -381,7 +414,8 @@ namespace AuthHive.Auth.Services.Security
                     riskScore += 30;
                 }
 
-                var patternRisk = await AnalyzeTransactionPatternAsync(context.UserId, context.Amount);
+                // CancellationToken 전달
+                var patternRisk = await AnalyzeTransactionPatternAsync(context.UserId, context.Amount, cancellationToken);
                 if (patternRisk > 0)
                 {
                     riskFactors.Add("Unusual transaction pattern");
@@ -390,7 +424,8 @@ namespace AuthHive.Auth.Services.Security
 
                 if (!string.IsNullOrWhiteSpace(context.IpAddress))
                 {
-                    var ipRisk = await AssessIpRiskAsync(context.IpAddress);
+                    // CancellationToken 전달
+                    var ipRisk = await AssessIpRiskAsync(context.IpAddress, cancellationToken);
                     if (ipRisk != null && (ipRisk.Impact / 100.0) > 0.5)
                     {
                         riskFactors.Add("Suspicious IP address");
@@ -427,50 +462,86 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
+        /// <summary>
+        /// UserActivityLogService 전용 위험도 평가 (LogUserActivityRequest DTO 기반)
+        /// ConnectedId를 통해 UserId를 조회하여 해당 User의 위험 평가를 수행합니다.
+        /// </summary>
+        public async Task<int> AssessActivityRiskAsync(LogUserActivityRequest request, CancellationToken cancellationToken = default)
+        {
+            // 이 메서드는 사용자 활동 로깅 시점에 간소화된 위험 점수를 계산합니다.
+
+            // 💡 ConnectedId를 사용하여 해당 ConnectedId 엔티티 조회
+            var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(request.ConnectedId, cancellationToken);
+
+            // 🚨 CS8602 해결: connectedIdEntity가 null이거나, UserId가 null인 경우를 명시적으로 처리
+            if (connectedIdEntity == null || !connectedIdEntity.UserId.HasValue)
+            {
+                _logger.LogWarning("Cannot assess activity risk: ConnectedId {ConnectedId} not linked to a valid User or entity is null. Treating as minimal risk.", request.ConnectedId);
+                return 0;
+            }
+
+            // 이제 connectedIdEntity는 null이 아님이 보장되고, UserId도 값을 가짐 (경고 해제)
+            var userId = connectedIdEntity.UserId.Value;
+
+            var activity = new UserActivity { ActivityType = request.ActivityType, IpAddress = request.IpAddress };
+
+            // 조회된 UserId를 사용하여 위험 평가 수행. 
+            // (이 로직은 ConnectedId 요청 컨텍스트를 User의 통합 위험 평가에 반영함.)
+            var assessmentResult = await AssessUserActivityRiskAsync(userId, activity, cancellationToken);
+
+            return assessmentResult.IsSuccess && assessmentResult.Data != null
+                ? (int)(assessmentResult.Data.RiskScore * 100)
+                : 0;
+        }
+
         #endregion
         #region 이상 탐지
 
         /// <summary>
         /// 이상 접근 감지
         /// </summary>
-        public async Task<ServiceResult<AnomalyDetectionResult>> DetectAnomalyAsync(Guid userId, AuthenticationContext context)
+        public async Task<ServiceResult<AnomalyDetectionResult>> DetectAnomalyAsync(Guid userId, AuthenticationContext context, CancellationToken cancellationToken = default)
         {
             try
             {
                 var anomalies = new List<SecurityAnomaly>();
                 var anomalyScore = 0.0;
 
-                var locationAnomaly = await DetectLocationAnomalyInternalAsync(userId, context.IpAddress);
+                // CancellationToken 전달
+                var locationAnomaly = await DetectLocationAnomalyInternalAsync(userId, context.IpAddress, cancellationToken);
                 if (locationAnomaly != null)
                 {
                     anomalies.Add(locationAnomaly);
-                    // SecurityAnomaly의 Severity는 AuditEventSeverity 타입
-                    var severity = locationAnomaly.Severity;
-                    anomalyScore += (severity == AuditEventSeverity.Critical || severity == AuditEventSeverity.Error) ? 0.4 : 0.2;
+                    // SecurityAnomaly의 Severity는 AuditEventSeverity 타입 (간단화를 위해 Impact 사용)
+                    var impact = locationAnomaly.Confidence;
+                    anomalyScore += (impact >= 0.8) ? 0.4 : 0.2;
                 }
 
-                var timeAnomaly = await DetectTimeAnomalyAsync(userId, context.Timestamp);
+                // CancellationToken 전달
+                var timeAnomaly = await DetectTimeAnomalyAsync(userId, context.Timestamp, cancellationToken);
                 if (timeAnomaly != null)
                 {
                     anomalies.Add(timeAnomaly);
-                    var severity = timeAnomaly.Severity;
-                    anomalyScore += (severity == AuditEventSeverity.Critical || severity == AuditEventSeverity.Error) ? 0.3 : 0.15;
+                    var impact = timeAnomaly.Confidence;
+                    anomalyScore += (impact >= 0.8) ? 0.3 : 0.15;
                 }
 
-                var deviceAnomaly = await DetectDeviceAnomalyAsync(userId, context.DeviceFingerprint);
+                // CancellationToken 전달
+                var deviceAnomaly = await DetectDeviceAnomalyAsync(userId, context.DeviceFingerprint, cancellationToken);
                 if (deviceAnomaly != null)
                 {
                     anomalies.Add(deviceAnomaly);
-                    var severity = deviceAnomaly.Severity;
-                    anomalyScore += (severity == AuditEventSeverity.Critical || severity == AuditEventSeverity.Error) ? 0.3 : 0.15;
+                    var impact = deviceAnomaly.Confidence;
+                    anomalyScore += (impact >= 0.8) ? 0.3 : 0.15;
                 }
 
-                var behaviorAnomaly = await DetectBehaviorAnomalyAsync(userId, context);
+                // CancellationToken 전달
+                var behaviorAnomaly = await DetectBehaviorAnomalyAsync(userId, context, cancellationToken);
                 if (behaviorAnomaly != null)
                 {
                     anomalies.Add(behaviorAnomaly);
-                    var severity = behaviorAnomaly.Severity;
-                    anomalyScore += (severity == AuditEventSeverity.Critical || severity == AuditEventSeverity.Error) ? 0.35 : 0.2;
+                    var impact = behaviorAnomaly.Confidence;
+                    anomalyScore += (impact >= 0.8) ? 0.35 : 0.2;
                 }
 
                 anomalyScore = Math.Min(1.0, Math.Max(0.0, anomalyScore));
@@ -485,7 +556,7 @@ namespace AuthHive.Auth.Services.Security
                     RequireAdditionalVerification = anomalyScore >= 0.5,
                     BlockAccess = anomalyScore >= 0.8,
                     RecommendedAction = DetermineAnomalyAction(anomalyScore),
-                    DetectedAt = DateTime.UtcNow
+                    DetectedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
 
                 return ServiceResult<AnomalyDetectionResult>.Success(result);
@@ -502,11 +573,12 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위치 기반 이상 탐지
         /// </summary>
-        public async Task<ServiceResult<LocationAnomalyResult>> DetectLocationAnomalyAsync(Guid userId, LocationInfo currentLocation)
+        public async Task<ServiceResult<LocationAnomalyResult>> DetectLocationAnomalyAsync(Guid userId, LocationInfo currentLocation, CancellationToken cancellationToken = default)
         {
             try
             {
-                var recentActivities = await GetRecentByUserIdAsync(userId, 10);
+                // CancellationToken 전달
+                var recentActivities = await GetRecentByUserIdAsync(userId, 10, cancellationToken);
                 if (!recentActivities.Any())
                 {
                     return ServiceResult<LocationAnomalyResult>.Success(new LocationAnomalyResult
@@ -522,7 +594,8 @@ namespace AuthHive.Auth.Services.Security
                 {
                     if (!string.IsNullOrWhiteSpace(activity.Location))
                     {
-                        var location = await GetLocationFromStringAsync(activity.Location);
+                        // CancellationToken 전달
+                        var location = await GetLocationFromStringAsync(activity.Location, cancellationToken);
                         if (location != null && !IsSameLocation(location, currentLocation))
                         {
                             previousLocation = location;
@@ -541,12 +614,14 @@ namespace AuthHive.Auth.Services.Security
                 }
 
                 var distance = CalculateDistance(previousLocation, currentLocation);
-                var timeDifference = DateTime.UtcNow - previousTime!.Value;
+                // IDateTimeProvider.UtcNow 사용
+                var timeDifference = _dateTimeProvider.UtcNow - previousTime!.Value;
 
                 var impossibleTravel = false;
                 if (timeDifference.TotalHours > 0)
                 {
                     var speed = distance / timeDifference.TotalHours;
+                    // 시속 1000km 이상은 불가능한 이동으로 간주 (상용 항공기보다 빠름)
                     impossibleTravel = speed > 1000;
                 }
 
@@ -577,13 +652,16 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// IP 평판 확인
         /// </summary>
-        public async Task<ServiceResult<IpReputationResult>> CheckIpReputationAsync(string ipAddress)
+        public async Task<ServiceResult<IpReputationResult>> CheckIpReputationAsync(string ipAddress, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"ip_reputation:{ipAddress}";
 
-                if (_memoryCache.TryGetValue<IpReputationResult>(cacheKey, out var cached) && cached != null)
+                // ICacheService.GetAsync 사용
+                var cached = await _cacheService.GetAsync<IpReputationResult>(cacheKey, cancellationToken);
+
+                if (cached != null)
                 {
                     return ServiceResult<IpReputationResult>.Success(cached);
                 }
@@ -591,13 +669,14 @@ namespace AuthHive.Auth.Services.Security
                 var result = new IpReputationResult
                 {
                     IpAddress = ipAddress,
-                    CheckedAt = DateTime.UtcNow,
+                    CheckedAt = _dateTimeProvider.UtcNow, // IDateTimeProvider 사용
                     ReputationScore = 1.0,
                     IsTrusted = true,
                     IsBlocked = false
                 };
 
-                if (await IsIpInBlacklistAsync(ipAddress))
+                // CancellationToken 전달
+                if (await IsIpInBlacklistAsync(ipAddress, cancellationToken))
                 {
                     result.IsBlacklisted = true;
                     result.IsBlocked = true;
@@ -606,7 +685,8 @@ namespace AuthHive.Auth.Services.Security
                     result.Categories.Add("Blacklisted");
                 }
 
-                var vpnTorCheck = await CheckVpnTorAsync(ipAddress);
+                // CancellationToken 전달
+                var vpnTorCheck = await CheckVpnTorAsync(ipAddress, cancellationToken);
                 if (vpnTorCheck.IsVpn)
                 {
                     result.IsVpn = true;
@@ -620,7 +700,8 @@ namespace AuthHive.Auth.Services.Security
                     result.ReputationScore *= 0.5;
                 }
 
-                var geoInfo = await _geolocationService.GetLocationAsync(ipAddress);
+                // CancellationToken 전달
+                var geoInfo = await _geolocationService.GetLocationAsync(ipAddress, cancellationToken);
                 if (geoInfo != null)
                 {
                     result.Country = geoInfo.CountryCode;
@@ -635,7 +716,8 @@ namespace AuthHive.Auth.Services.Security
 
                 result.IsTrusted = result.ReputationScore >= _settings.TrustedIpThreshold;
 
-                _memoryCache.Set(cacheKey, result, TimeSpan.FromHours(1));
+                // ICacheService.SetAsync 사용
+                await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromHours(1), cancellationToken);
 
                 return ServiceResult<IpReputationResult>.Success(result);
             }
@@ -651,20 +733,23 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 장치 평판 확인
         /// </summary>
-        public async Task<ServiceResult<DeviceReputationResult>> CheckDeviceReputationAsync(string deviceFingerprint)
+        public async Task<ServiceResult<DeviceReputationResult>> CheckDeviceReputationAsync(string deviceFingerprint, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"device_reputation:{deviceFingerprint}";
 
+                // ICacheService.GetAsync 사용
+                var cached = await _cacheService.GetAsync<DeviceReputationResult>(cacheKey, cancellationToken);
 
-                // 수정된 코드
-                if (_memoryCache.TryGetValue<DeviceReputationResult>(cacheKey, out var cached))
+                if (cached != null)
                 {
-                    return ServiceResult<DeviceReputationResult>.Success(cached!);  // ! 추가
+                    // ! 연산자 대신 null 체크를 통해 안정성 확보
+                    return ServiceResult<DeviceReputationResult>.Success(cached);
                 }
 
-                var deviceHistory = await GetDeviceHistoryAsync(deviceFingerprint);
+                // CancellationToken 전달
+                var deviceHistory = await GetDeviceHistoryAsync(deviceFingerprint, cancellationToken);
 
                 var result = new DeviceReputationResult
                 {
@@ -677,7 +762,8 @@ namespace AuthHive.Auth.Services.Security
                     LastSeen = deviceHistory.LastSeen
                 };
 
-                if (await IsDeviceBlacklistedInternalAsync(deviceFingerprint))
+                // CancellationToken 전달
+                if (await IsDeviceBlacklistedInternalAsync(deviceFingerprint, cancellationToken))
                 {
                     result.IsBlacklisted = true;
                     result.IsTrusted = false;
@@ -685,8 +771,9 @@ namespace AuthHive.Auth.Services.Security
                     result.RiskIndicators++;
                 }
 
+                // IDateTimeProvider.UtcNow 사용
                 if (!deviceHistory.FirstSeen.HasValue ||
-                    (DateTime.UtcNow - deviceHistory.FirstSeen.Value).TotalDays < 1)
+                    (_dateTimeProvider.UtcNow - deviceHistory.FirstSeen.Value).TotalDays < 1)
                 {
                     result.RiskIndicators++;
                     result.ReputationScore -= 20;
@@ -707,7 +794,8 @@ namespace AuthHive.Auth.Services.Security
                 result.ReputationScore = Math.Max(0, result.ReputationScore);
                 result.IsTrusted = result.ReputationScore >= 70;
 
-                _memoryCache.Set(cacheKey, result, TimeSpan.FromMinutes(30));
+                // ICacheService.SetAsync 사용
+                await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(30), cancellationToken);
 
                 return ServiceResult<DeviceReputationResult>.Success(result);
             }
@@ -723,11 +811,12 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// IP 블랙리스트 확인
         /// </summary>
-        public async Task<ServiceResult<bool>> IsIpBlacklistedAsync(string ipAddress)
+        public async Task<ServiceResult<bool>> IsIpBlacklistedAsync(string ipAddress, CancellationToken cancellationToken = default)
         {
             try
             {
-                var isBlacklisted = await IsIpInBlacklistAsync(ipAddress);
+                // CancellationToken 전달
+                var isBlacklisted = await IsIpInBlacklistAsync(ipAddress, cancellationToken);
                 return ServiceResult<bool>.Success(isBlacklisted);
             }
             catch (Exception ex)
@@ -742,11 +831,12 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 장치 블랙리스트 확인
         /// </summary>
-        public async Task<ServiceResult<bool>> IsDeviceBlacklistedAsync(string deviceFingerprint)
+        public async Task<ServiceResult<bool>> IsDeviceBlacklistedAsync(string deviceFingerprint, CancellationToken cancellationToken = default)
         {
             try
             {
-                var isBlacklisted = await IsDeviceBlacklistedInternalAsync(deviceFingerprint);
+                // CancellationToken 전달
+                var isBlacklisted = await IsDeviceBlacklistedInternalAsync(deviceFingerprint, cancellationToken);
                 return ServiceResult<bool>.Success(isBlacklisted);
             }
             catch (Exception ex)
@@ -765,20 +855,25 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위험 정책 조회
         /// </summary>
-        public async Task<ServiceResult<RiskPolicy>> GetRiskPolicyAsync(Guid? organizationId = null)
+        public async Task<ServiceResult<RiskPolicy>> GetRiskPolicyAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"risk_policy:{organizationId ?? Guid.Empty}";
 
-                if (_memoryCache.TryGetValue<RiskPolicy>(cacheKey, out var cached))
+                // ICacheService.GetAsync 사용
+                var cached = await _cacheService.GetAsync<RiskPolicy>(cacheKey, cancellationToken);
+
+                if (cached != null)
                 {
-                    return ServiceResult<RiskPolicy>.Success(cached!);  // ! 추가
+                    return ServiceResult<RiskPolicy>.Success(cached);
                 }
 
-                var policy = await LoadRiskPolicyAsync(organizationId);
+                // CancellationToken 전달
+                var policy = await LoadRiskPolicyAsync(organizationId, cancellationToken);
 
-                _memoryCache.Set(cacheKey, policy, TimeSpan.FromMinutes(10));
+                // ICacheService.SetAsync 사용
+                await _cacheService.SetAsync(cacheKey, policy, TimeSpan.FromMinutes(10), cancellationToken);
 
                 return ServiceResult<RiskPolicy>.Success(policy);
             }
@@ -794,7 +889,7 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위험 정책 설정
         /// </summary>
-        public async Task<ServiceResult> SetRiskPolicyAsync(Guid organizationId, RiskPolicy policy)
+        public async Task<ServiceResult> SetRiskPolicyAsync(Guid organizationId, RiskPolicy policy, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -803,10 +898,12 @@ namespace AuthHive.Auth.Services.Security
                     return ServiceResult.Failure("Invalid risk policy", "INVALID_POLICY");
                 }
 
-                await SaveRiskPolicyAsync(organizationId, policy);
+                // CancellationToken 전달
+                await SaveRiskPolicyAsync(organizationId, policy, cancellationToken);
 
                 var cacheKey = $"risk_policy:{organizationId}";
-                _memoryCache.Remove(cacheKey);
+                // ICacheService.RemoveAsync 사용
+                await _cacheService.RemoveAsync(cacheKey, cancellationToken);
 
                 return ServiceResult.Success("Risk policy updated successfully");
             }
@@ -822,7 +919,7 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위험 임계값 설정
         /// </summary>
-        public async Task<ServiceResult> SetRiskThresholdsAsync(Guid organizationId, RiskThresholds thresholds)
+        public async Task<ServiceResult> SetRiskThresholdsAsync(Guid organizationId, RiskThresholds thresholds, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -831,7 +928,8 @@ namespace AuthHive.Auth.Services.Security
                     return ServiceResult.Failure("Invalid thresholds", "INVALID_THRESHOLDS");
                 }
 
-                var policyResult = await GetRiskPolicyAsync(organizationId);
+                // CancellationToken 전달
+                var policyResult = await GetRiskPolicyAsync(organizationId, cancellationToken);
                 if (!policyResult.IsSuccess)
                 {
                     return ServiceResult.Failure("Failed to get current policy", "POLICY_NOT_FOUND");
@@ -840,7 +938,8 @@ namespace AuthHive.Auth.Services.Security
                 var policy = policyResult.Data!;
                 policy.Thresholds = thresholds;
 
-                return await SetRiskPolicyAsync(organizationId, policy);
+                // CancellationToken 전달
+                return await SetRiskPolicyAsync(organizationId, policy, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -854,7 +953,7 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위험 대응 규칙 설정
         /// </summary>
-        public async Task<ServiceResult> SetRiskResponseRulesAsync(Guid organizationId, List<RiskResponseRule> rules)
+        public async Task<ServiceResult> SetRiskResponseRulesAsync(Guid organizationId, List<RiskResponseRule> rules, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -863,7 +962,8 @@ namespace AuthHive.Auth.Services.Security
                     return ServiceResult.Failure("Invalid response rules", "INVALID_RULES");
                 }
 
-                var policyResult = await GetRiskPolicyAsync(organizationId);
+                // CancellationToken 전달
+                var policyResult = await GetRiskPolicyAsync(organizationId, cancellationToken);
                 if (!policyResult.IsSuccess)
                 {
                     return ServiceResult.Failure("Failed to get current policy", "POLICY_NOT_FOUND");
@@ -872,7 +972,8 @@ namespace AuthHive.Auth.Services.Security
                 var policy = policyResult.Data!;
                 policy.ResponseRules = rules;
 
-                return await SetRiskPolicyAsync(organizationId, policy);
+                // CancellationToken 전달
+                return await SetRiskPolicyAsync(organizationId, policy, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -888,19 +989,58 @@ namespace AuthHive.Auth.Services.Security
         #region 위험 이력
 
         /// <summary>
-        /// 위험 이벤트 기록
+        /// 위험 이벤트 기록 및 고위험 인증 이벤트 발행 (이벤트 버스 사용)
         /// </summary>
-        public async Task<ServiceResult> LogRiskEventAsync(RiskEvent riskEvent)
+// Path: AuthHive.Auth.Services.Security.RiskAssessmentService.cs (994번째 줄 주변)
+
+        /// <summary>
+        /// 위험 이벤트 기록 및 고위험 인증 이벤트 발행 (이벤트 버스 사용)
+        /// </summary>
+        public async Task<ServiceResult> LogRiskEventAsync(RiskEvent riskEvent, CancellationToken cancellationToken = default)
         {
             try
             {
-                await SaveRiskEventAsync(riskEvent);
+                // CancellationToken 전달
+                await SaveRiskEventAsync(riskEvent, cancellationToken);
 
+                // HighRiskSecurityEvent 대신 HighRiskAuthenticationEvent 사용
                 if (riskEvent.RiskScore >= 80)
                 {
-                    await SendHighRiskAlertAsync(riskEvent);
-                }
+                    // High Risk Alert 로그 및 이벤트 버스 발행
+                    await SendHighRiskAlertAsync(riskEvent, cancellationToken);
 
+                    // 💡 수정된 로직: OrganizationId 조회
+                    Guid organizationId = Guid.Empty;
+                    var eventData = riskEvent.EventData;
+
+                    if (eventData != null) // Dictionary가 null이 아닌 경우에만 로직 실행
+                    {
+                        // ConnectedId를 통해 OrganizationId를 찾습니다.
+                        if (eventData.TryGetValue("ConnectedId", out var connectedIdObj) && connectedIdObj is Guid connectedId)
+                        {
+                            var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(connectedId, cancellationToken);
+                            if (connectedIdEntity != null)
+                            {
+                                organizationId = connectedIdEntity.OrganizationId;
+                            }
+                        }
+
+                        // HighRiskAuthenticationEvent 생성 및 발행
+                        var highRiskEvent = new HighRiskAuthenticationEvent(organizationId)
+                        {
+                            UserId = riskEvent.UserId,
+                            Username = eventData.GetValueOrDefault("Username") as string ?? "N/A",
+                            IpAddress = eventData.GetValueOrDefault("IpAddress") as string ?? CommonDefaults.UnknownDevice,
+                            RiskScore = riskEvent.RiskScore,
+                            RiskLevel = DetermineRiskLevel(riskEvent.RiskScore / 100.0),
+                            RiskFactors = (eventData.GetValueOrDefault("RiskFactors") as List<string>) ?? new List<string>(),
+                            RequiresMfa = riskEvent.RiskScore >= _settings.MfaRequiredThreshold * 100,
+                            RequiresAdditionalVerification = riskEvent.RiskScore >= _settings.AdditionalVerificationThreshold * 100
+                        };
+
+                        await _eventBus.PublishAsync(highRiskEvent, cancellationToken);
+                    }
+                }
                 return ServiceResult.Success("Risk event logged successfully");
             }
             catch (Exception ex)
@@ -918,11 +1058,13 @@ namespace AuthHive.Auth.Services.Security
         public async Task<ServiceResult<IEnumerable<RiskEvent>>> GetRiskHistoryAsync(
             Guid? userId = null,
             DateTime? from = null,
-            DateTime? to = null)
+            DateTime? to = null,
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                var events = await LoadRiskEventsAsync(userId, from, to);
+                // CancellationToken 전달
+                var events = await LoadRiskEventsAsync(userId, from, to, cancellationToken);
                 return ServiceResult<IEnumerable<RiskEvent>>.Success(events);
             }
             catch (Exception ex)
@@ -939,7 +1081,8 @@ namespace AuthHive.Auth.Services.Security
         /// </summary>
         public async Task<ServiceResult<RiskTrendAnalysis>> AnalyzeRiskTrendsAsync(
             Guid? organizationId = null,
-            TimeSpan period = default)
+            TimeSpan period = default,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -948,10 +1091,11 @@ namespace AuthHive.Auth.Services.Security
                     period = TimeSpan.FromDays(30);
                 }
 
-                var endDate = DateTime.UtcNow;
+                var endDate = _dateTimeProvider.UtcNow; // IDateTimeProvider 사용
                 var startDate = endDate - period;
 
-                var events = await LoadRiskEventsAsync(null, startDate, endDate);
+                // CancellationToken 전달
+                var events = await LoadRiskEventsAsync(null, startDate, endDate, cancellationToken);
 
                 var analysis = new RiskTrendAnalysis
                 {
@@ -979,24 +1123,27 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 사용자 위험 점수 계산
         /// </summary>
-        public async Task<ServiceResult<UserRiskScore>> CalculateUserRiskScoreAsync(Guid userId)
+        public async Task<ServiceResult<UserRiskScore>> CalculateUserRiskScoreAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var score = 0;
                 var riskFactors = new List<string>();
 
-                var recentFailures = await CountRecentFailuresAsync(userId);
+                // CancellationToken 전달
+                var recentFailures = await CountRecentFailuresAsync(userId, cancellationToken);
                 if (recentFailures > 0)
                 {
                     score += recentFailures * 10;
                     riskFactors.Add($"{recentFailures} recent failed authentications");
                 }
 
-                var user = await _userRepository.GetByIdAsync(userId);
+                // CancellationToken 전달
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user != null)
                 {
-                    var accountAge = DateTime.UtcNow - user.CreatedAt;
+                    // IDateTimeProvider.UtcNow 사용
+                    var accountAge = _dateTimeProvider.UtcNow - user.CreatedAt;
                     if (accountAge.TotalDays < 7)
                     {
                         score += 20;
@@ -1004,14 +1151,16 @@ namespace AuthHive.Auth.Services.Security
                     }
                 }
 
-                var anomalyCount = await CountRecentAnomaliesAsync(userId);
+                // CancellationToken 전달
+                var anomalyCount = await CountRecentAnomaliesAsync(userId, cancellationToken);
                 if (anomalyCount > 0)
                 {
                     score += anomalyCount * 15;
                     riskFactors.Add($"{anomalyCount} recent anomalies detected");
                 }
 
-                var riskyIpUsage = await CheckRiskyIpUsageAsync(userId);
+                // CancellationToken 전달
+                var riskyIpUsage = await CheckRiskyIpUsageAsync(userId, cancellationToken);
                 if (riskyIpUsage)
                 {
                     score += 25;
@@ -1026,7 +1175,7 @@ namespace AuthHive.Auth.Services.Security
                     CurrentScore = score,
                     RiskLevel = DetermineTransactionRiskLevel(score),
                     RiskFactors = riskFactors,
-                    CalculatedAt = DateTime.UtcNow
+                    CalculatedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
 
                 return ServiceResult<UserRiskScore>.Success(userRiskScore);
@@ -1043,11 +1192,12 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 조직 위험 점수 계산
         /// </summary>
-        public async Task<ServiceResult<OrganizationRiskScore>> CalculateOrganizationRiskScoreAsync(Guid organizationId)
+        public async Task<ServiceResult<OrganizationRiskScore>> CalculateOrganizationRiskScoreAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var connectedIds = await GetByOrganizationIdAsync(organizationId);
+                // CancellationToken 전달
+                var connectedIds = await GetByOrganizationIdAsync(organizationId, cancellationToken);
 
                 var userScores = new Dictionary<Guid, int>();
                 var totalScore = 0;
@@ -1063,7 +1213,8 @@ namespace AuthHive.Auth.Services.Security
                         continue;
                     }
 
-                    var userScoreResult = await CalculateUserRiskScoreAsync(connectedId.UserId.Value);
+                    // CancellationToken 전달
+                    var userScoreResult = await CalculateUserRiskScoreAsync(connectedId.UserId.Value, cancellationToken);
                     if (userScoreResult.IsSuccess && userScoreResult.Data != null)
                     {
                         userScores[connectedId.UserId.Value] = userScoreResult.Data.CurrentScore;
@@ -1078,7 +1229,8 @@ namespace AuthHive.Auth.Services.Security
 
                 var overallScore = userScores.Any() ? totalScore / userScores.Count : 0;
 
-                if (await HasRecentSecurityIncidentsAsync(organizationId))
+                // CancellationToken 전달
+                if (await HasRecentSecurityIncidentsAsync(organizationId, cancellationToken))
                 {
                     overallScore += 15;
                     topRiskFactors.Add("Recent security incidents");
@@ -1107,11 +1259,12 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위험 점수 업데이트
         /// </summary>
-        public async Task<ServiceResult> UpdateRiskScoreAsync(Guid userId, RiskScoreUpdate update)
+        public async Task<ServiceResult> UpdateRiskScoreAsync(Guid userId, RiskScoreUpdate update, CancellationToken cancellationToken = default)
         {
             try
             {
-                var currentScoreResult = await CalculateUserRiskScoreAsync(userId);
+                // CancellationToken 전달
+                var currentScoreResult = await CalculateUserRiskScoreAsync(userId, cancellationToken);
                 if (!currentScoreResult.IsSuccess)
                 {
                     return ServiceResult.Failure("Failed to get current risk score", "SCORE_NOT_FOUND");
@@ -1127,7 +1280,7 @@ namespace AuthHive.Auth.Services.Security
                     EventType = "RiskScoreUpdated",
                     RiskScore = newScore,
                     UserId = userId,
-                    OccurredAt = DateTime.UtcNow,
+                    OccurredAt = _dateTimeProvider.UtcNow, // IDateTimeProvider 사용
                     EventData = new Dictionary<string, object>
                     {
                         ["previousScore"] = currentScore,
@@ -1137,7 +1290,8 @@ namespace AuthHive.Auth.Services.Security
                     }
                 };
 
-                await LogRiskEventAsync(riskEvent);
+                // CancellationToken 전달
+                await LogRiskEventAsync(riskEvent, cancellationToken);
 
                 return ServiceResult.Success("Risk score updated successfully");
             }
@@ -1154,9 +1308,10 @@ namespace AuthHive.Auth.Services.Security
 
         #region Private Helper Methods
 
-        private async Task<RiskFactor?> AssessIpRiskAsync(string ipAddress)
+        private async Task<RiskFactor?> AssessIpRiskAsync(string ipAddress, CancellationToken cancellationToken = default)
         {
-            var reputationResult = await CheckIpReputationAsync(ipAddress);
+            // CancellationToken 전달
+            var reputationResult = await CheckIpReputationAsync(ipAddress, cancellationToken);
             if (!reputationResult.IsSuccess || reputationResult.Data == null)
                 return null;
 
@@ -1209,12 +1364,13 @@ namespace AuthHive.Auth.Services.Security
             return null;
         }
 
-        private async Task<RiskFactor?> AssessDeviceRiskAsync(DeviceInfo deviceInfo)
+        private async Task<RiskFactor?> AssessDeviceRiskAsync(DeviceInfo deviceInfo, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(deviceInfo.DeviceId))
                 return null;
 
-            var reputationResult = await CheckDeviceReputationAsync(deviceInfo.DeviceId);
+            // CancellationToken 전달
+            var reputationResult = await CheckDeviceReputationAsync(deviceInfo.DeviceId, cancellationToken);
             if (!reputationResult.IsSuccess || reputationResult.Data == null)
                 return null;
 
@@ -1274,9 +1430,10 @@ namespace AuthHive.Auth.Services.Security
             };
         }
 
-        private async Task<RiskFactor?> AssessRecentFailuresAsync(string username)
+        private async Task<RiskFactor?> AssessRecentFailuresAsync(string username, CancellationToken cancellationToken = default)
         {
-            var failures = await GetRecentFailedAttemptsAsync(username, TimeSpan.FromHours(1));
+            // CancellationToken 전달
+            var failures = await GetRecentFailedAttemptsAsync(username, TimeSpan.FromHours(1), cancellationToken);
 
             if (failures.Count() > 5)
             {
@@ -1296,12 +1453,13 @@ namespace AuthHive.Auth.Services.Security
         {
             var hour = attemptTime.Hour;
 
+            // UTC 기준 02:00 ~ 05:00 사이 활동은 비정상 시간으로 간주 (상황에 따라 현지 시간으로 변환 필요)
             if (hour >= 2 && hour <= 5)
             {
                 return new RiskFactor
                 {
                     Name = "UnusualTime",
-                    Description = "Login attempt at unusual hour",
+                    Description = "Login attempt at unusual hour (UTC)",
                     Impact = 40,
                     Weight = 0.15
                 };
@@ -1309,21 +1467,22 @@ namespace AuthHive.Auth.Services.Security
 
             return null;
         }
+
         private RiskFactor? AnalyzeActivityFrequency(IEnumerable<Core.Entities.Auth.SessionActivityLog> activities)
         {
             var count = activities.Count();
-            var timeSpan = DateTime.UtcNow - activities.Min(a => a.Timestamp);
+            var timeSpan = _dateTimeProvider.UtcNow - activities.Min(a => a.Timestamp); // IDateTimeProvider 사용
 
             if (timeSpan.TotalMinutes > 0)
             {
                 var rate = count / timeSpan.TotalMinutes;
 
-                if (rate > 10)
+                if (rate > 10) // 분당 10회 이상의 활동은 비정상으로 간주
                 {
                     return new RiskFactor
                     {
                         Name = "HighActivityFrequency",
-                        Description = "Unusually high activity frequency",
+                        Description = $"Unusually high activity frequency: {rate:F2} activities/min",
                         Impact = Math.Min(100, (int)(rate * 5)),
                         Weight = 0.25
                     };
@@ -1332,6 +1491,7 @@ namespace AuthHive.Auth.Services.Security
 
             return null;
         }
+
         private RiskFactor? AnalyzeActivityPattern(IEnumerable<Core.Entities.Auth.SessionActivityLog> activities)
         {
             var distinctTypes = activities.Select(a => a.ActivityType).Distinct().Count();
@@ -1341,7 +1501,7 @@ namespace AuthHive.Auth.Services.Security
                 return new RiskFactor
                 {
                     Name = "UnusualActivityPattern",
-                    Description = "Unusual variety of activities",
+                    Description = $"Unusual variety of activities detected: {distinctTypes} types",
                     Impact = 60,
                     Weight = 0.2
                 };
@@ -1350,7 +1510,10 @@ namespace AuthHive.Auth.Services.Security
             return null;
         }
 
-        private RiskFactor? AnalyzeLocationChanges(IEnumerable<Core.Entities.Auth.SessionActivityLog> activities)  // async/Task 제거
+        /// <summary>
+        /// 세션 활동 로그의 위치 변화를 분석합니다.
+        /// </summary>
+        private async Task<RiskFactor?> AnalyzeLocationChangesAsync(IEnumerable<Core.Entities.Auth.SessionActivityLog> activities, CancellationToken cancellationToken = default)
         {
             var locations = activities
                 .Where(a => !string.IsNullOrWhiteSpace(a.IpAddress))
@@ -1363,10 +1526,36 @@ namespace AuthHive.Auth.Services.Security
                 return new RiskFactor
                 {
                     Name = "MultipleLocations",
-                    Description = "Session accessed from multiple locations",
+                    Description = $"Session accessed from multiple locations: {locations.Count} IPs",
                     Impact = 70,
                     Weight = 0.3
                 };
+            }
+
+            // 추가: 지리적 위치 변동성 검사 (첫 활동과 마지막 활동 IP의 지리적 위치가 다른 경우)
+            if (activities.Count() >= 2)
+            {
+                var firstActivity = activities.OrderBy(a => a.Timestamp).First();
+                var lastActivity = activities.OrderByDescending(a => a.Timestamp).First();
+
+                if (!string.IsNullOrWhiteSpace(firstActivity.IpAddress) && !string.IsNullOrWhiteSpace(lastActivity.IpAddress) &&
+                    firstActivity.IpAddress != lastActivity.IpAddress)
+                {
+                    // 위치 정보 조회 및 비교 (GeolocationService 사용)
+                    var firstGeo = await _geolocationService.GetLocationAsync(firstActivity.IpAddress, cancellationToken);
+                    var lastGeo = await _geolocationService.GetLocationAsync(lastActivity.IpAddress, cancellationToken);
+
+                    if (firstGeo?.CountryCode != lastGeo?.CountryCode)
+                    {
+                        return new RiskFactor
+                        {
+                            Name = "CountryChange",
+                            Description = $"Session country changed from {firstGeo?.CountryCode} to {lastGeo?.CountryCode}",
+                            Impact = 80,
+                            Weight = 0.4
+                        };
+                    }
+                }
             }
 
             return null;
@@ -1374,7 +1563,7 @@ namespace AuthHive.Auth.Services.Security
 
         private RiskFactor? AssessActivityTypeRisk(string activityType)
         {
-            var highRiskActivities = new[] { "DataExport", "BulkDelete", "PermissionChange" };
+            var highRiskActivities = new[] { "DataExport", "BulkDelete", "PermissionChange", "PolicyModification" };
 
             if (highRiskActivities.Contains(activityType))
             {
@@ -1390,9 +1579,10 @@ namespace AuthHive.Auth.Services.Security
             return null;
         }
 
-        private async Task<RiskFactor?> AssessUserHistoryRiskAsync(Guid userId)
+        private async Task<RiskFactor?> AssessUserHistoryRiskAsync(Guid userId, CancellationToken cancellationToken = default)
         {
-            var user = await _userRepository.GetByIdAsync(userId);
+            // CancellationToken 전달
+            var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
             if (user == null)
                 return null;
 
@@ -1412,14 +1602,16 @@ namespace AuthHive.Auth.Services.Security
 
         // Repository Extension Methods
         private async Task<IEnumerable<AuthenticationAttemptLog>> GetRecentFailedAttemptsAsync(
-            string username, TimeSpan timeSpan)
+            string username, TimeSpan timeSpan, CancellationToken cancellationToken = default)
         {
             try
             {
-                var endTime = DateTime.UtcNow;
+                var endTime = _dateTimeProvider.UtcNow; // IDateTimeProvider 사용
                 var startTime = endTime - timeSpan;
 
-                var allAttempts = await _authAttemptRepository.GetAllAsync();
+                // CancellationToken 전달
+                // ⚠️ 주의: _authAttemptRepository.GetAllAsync()가 User의 모든 ConnectedId 시도를 포함한다고 가정
+                var allAttempts = await _authAttemptRepository.GetAllAsync(cancellationToken);
 
                 return allAttempts
                     .Where(a => a.Username == username &&
@@ -1436,11 +1628,13 @@ namespace AuthHive.Auth.Services.Security
         }
 
         private async Task<IEnumerable<AuthenticationAttemptLog>> GetRecentByUserIdAsync(
-            Guid userId, int count)
+            Guid userId, int count, CancellationToken cancellationToken = default)
         {
             try
             {
-                var allAttempts = await _authAttemptRepository.GetAllAsync();
+                // CancellationToken 전달
+                // ⚠️ 주의: _authAttemptRepository.GetAllAsync()가 User의 모든 ConnectedId 시도를 포함한다고 가정
+                var allAttempts = await _authAttemptRepository.GetAllAsync(cancellationToken);
 
                 return allAttempts
                     .Where(a => a.UserId == userId)
@@ -1454,11 +1648,13 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<IEnumerable<Core.Entities.Auth.SessionActivityLog>> GetBySessionIdAsync(Guid sessionId)
+        private async Task<IEnumerable<Core.Entities.Auth.SessionActivityLog>> GetBySessionIdAsync(Guid sessionId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var allActivities = await _sessionActivityRepository.GetAllAsync();
+                // CancellationToken 전달
+                // ⚠️ 주의: _sessionActivityRepository.GetAllAsync()가 ConnectedId/UserID 정보를 포함한다고 가정
+                var allActivities = await _sessionActivityRepository.GetAllAsync(cancellationToken);
 
                 return allActivities
                     .Where(a => a.SessionId == sessionId)
@@ -1471,11 +1667,12 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<IEnumerable<Core.Entities.Auth.ConnectedId>> GetByOrganizationIdAsync(Guid organizationId)
+        private async Task<IEnumerable<Core.Entities.Auth.ConnectedId>> GetByOrganizationIdAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var allConnectedIds = await _connectedIdRepository.GetAllAsync();
+                // CancellationToken 전달
+                var allConnectedIds = await _connectedIdRepository.GetAllAsync(cancellationToken);
 
                 return allConnectedIds
                     .Where(c => c.OrganizationId == organizationId);
@@ -1488,8 +1685,10 @@ namespace AuthHive.Auth.Services.Security
         }
 
         // Geolocation Helper Methods
-        // Geolocation Helper Methods
-        private async Task<LocationInfo?> GetLocationFromStringAsync(string locationString)
+        /// <summary>
+        /// 위치 문자열을 LocationInfo 객체로 파싱합니다. (비동기 처리)
+        /// </summary>
+        private async Task<LocationInfo?> GetLocationFromStringAsync(string locationString, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -1529,8 +1728,9 @@ namespace AuthHive.Auth.Services.Security
                     }
                 }
 
-                // async 메서드이므로 Task.FromResult 사용
-                return await Task.FromResult(location);
+                // CancellationToken을 존중하기 위해 Task.Yield 사용
+                await Task.Yield();
+                return location;
             }
             catch (Exception ex)
             {
@@ -1538,12 +1738,14 @@ namespace AuthHive.Auth.Services.Security
                 return null;
             }
         }
+
         // Additional Helper Methods
-        private async Task<(bool IsVpn, bool IsTor)> CheckVpnTorAsync(string ipAddress)
+        private async Task<(bool IsVpn, bool IsTor)> CheckVpnTorAsync(string ipAddress, CancellationToken cancellationToken = default)
         {
             try
             {
-                await Task.Delay(10);
+                // Task.Delay에도 CancellationToken 전달
+                await Task.Delay(10, cancellationToken);
                 var torExitNodes = new[] { "192.168.99.1", "10.0.99.1" };
                 var isTor = torExitNodes.Contains(ipAddress);
                 var isVpn = ipAddress.StartsWith("10.8.") || ipAddress.StartsWith("172.16.");
@@ -1556,13 +1758,16 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        // GetDeviceHistoryAsync 메서드 수정
-        private async Task<DeviceHistory> GetDeviceHistoryAsync(string deviceFingerprint)
+        /// <summary>
+        /// 장치 지문 기록 조회
+        /// </summary>
+        private async Task<DeviceHistory> GetDeviceHistoryAsync(string deviceFingerprint, CancellationToken cancellationToken = default)
         {
             try
             {
-                var allAttempts = await _authAttemptRepository.GetAllAsync();
-                var deviceAttempts = allAttempts.Where(a => a.DeviceId == deviceFingerprint).ToList();  // DeviceFingerprint → DeviceId
+                // CancellationToken 전달
+                var allAttempts = await _authAttemptRepository.GetAllAsync(cancellationToken);
+                var deviceAttempts = allAttempts.Where(a => a.DeviceId == deviceFingerprint).ToList();
 
                 var firstAttempt = deviceAttempts.OrderBy(a => a.AttemptedAt).FirstOrDefault();
                 var lastAttempt = deviceAttempts.OrderByDescending(a => a.AttemptedAt).FirstOrDefault();
@@ -1582,18 +1787,19 @@ namespace AuthHive.Auth.Services.Security
                 _logger.LogWarning(ex, "Failed to get device history for {DeviceFingerprint}", deviceFingerprint);
                 return new DeviceHistory
                 {
-                    FirstSeen = DateTime.UtcNow,
-                    LastSeen = DateTime.UtcNow,
+                    FirstSeen = _dateTimeProvider.UtcNow,
+                    LastSeen = _dateTimeProvider.UtcNow,
                     FailedAttempts = 0,
                     UniqueUsers = 1
                 };
             }
         }
 
-        private async Task<bool> IsDeviceBlacklistedInternalAsync(string deviceFingerprint)
+        private async Task<bool> IsDeviceBlacklistedInternalAsync(string deviceFingerprint, CancellationToken cancellationToken = default)
         {
             try
             {
+                // CancellationToken 전달
                 var blacklistedDevices = new[] { "BLACKLISTED_DEVICE_001", "BLACKLISTED_DEVICE_002" };
                 return await Task.FromResult(blacklistedDevices.Contains(deviceFingerprint));
             }
@@ -1604,10 +1810,11 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<bool> IsIpInBlacklistAsync(string ipAddress)
+        private async Task<bool> IsIpInBlacklistAsync(string ipAddress, CancellationToken cancellationToken = default)
         {
             try
             {
+                // CancellationToken 전달
                 var blacklistedIps = new[] { "192.168.100.1", "10.0.0.1", "172.16.0.1" };
                 return await Task.FromResult(blacklistedIps.Contains(ipAddress));
             }
@@ -1618,10 +1825,15 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
+        /// <summary>
+        /// 위험 정책 로드 (Mock 구현)
+        /// </summary>
         private async Task<RiskPolicy> LoadRiskPolicyAsync(Guid? organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
+                // CancellationToken 전달
+                await Task.Delay(10, cancellationToken);
                 return await Task.FromResult(new RiskPolicy
                 {
                     IsEnabled = true,
@@ -1669,16 +1881,22 @@ namespace AuthHive.Auth.Services.Security
             return ValidateThresholds(policy.Thresholds);
         }
 
-        private async Task SaveRiskPolicyAsync(Guid organizationId, RiskPolicy policy)
+        /// <summary>
+        /// 위험 정책 저장 (Mock 구현) - 트랜잭션 처리 포함
+        /// </summary>
+        private async Task SaveRiskPolicyAsync(Guid organizationId, RiskPolicy policy, CancellationToken cancellationToken = default)
         {
             try
             {
-                await _unitOfWork.BeginTransactionAsync();
-                await _unitOfWork.CommitTransactionAsync();
+                // CancellationToken 전달
+                await _unitOfWork.BeginTransactionAsync(cancellationToken);
+                // 실제 DB 저장 로직 수행 (Mock)
+                await Task.Delay(10, cancellationToken);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 _logger.LogError(ex, "Failed to save risk policy for organization {OrganizationId}", organizationId);
                 throw;
             }
@@ -1706,13 +1924,17 @@ namespace AuthHive.Auth.Services.Security
             return true;
         }
 
-        private async Task SaveRiskEventAsync(RiskEvent riskEvent)
+        /// <summary>
+        /// 위험 이벤트 저장 (Mock 구현)
+        /// </summary>
+        private async Task SaveRiskEventAsync(RiskEvent riskEvent, CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogInformation("Risk event saved: {EventType} for user {UserId} with score {RiskScore}",
                     riskEvent.EventType, riskEvent.UserId, riskEvent.RiskScore);
-                await Task.Delay(10);
+                // CancellationToken 전달
+                await Task.Delay(10, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -1721,13 +1943,17 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task SendHighRiskAlertAsync(RiskEvent riskEvent)
+        /// <summary>
+        /// High Risk Alert 전송 (Mock 구현)
+        /// </summary>
+        private async Task SendHighRiskAlertAsync(RiskEvent riskEvent, CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogCritical("HIGH RISK ALERT: {EventType} detected for user {UserId} with score {RiskScore}",
                     riskEvent.EventType, riskEvent.UserId, riskEvent.RiskScore);
-                await Task.Delay(10);
+                // CancellationToken 전달
+                await Task.Delay(10, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -1735,10 +1961,14 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<IEnumerable<RiskEvent>> LoadRiskEventsAsync(Guid? userId, DateTime? from, DateTime? to)
+        /// <summary>
+        /// 위험 이벤트 로드 (Mock 구현)
+        /// </summary>
+        private async Task<IEnumerable<RiskEvent>> LoadRiskEventsAsync(Guid? userId, DateTime? from, DateTime? to, CancellationToken cancellationToken = default)
         {
             try
             {
+                // CancellationToken 전달
                 return await Task.FromResult(new List<RiskEvent>());
             }
             catch (Exception ex)
@@ -1768,13 +1998,14 @@ namespace AuthHive.Auth.Services.Security
             return trend;
         }
 
-        private async Task<int> CountRecentFailuresAsync(Guid userId)
+        private async Task<int> CountRecentFailuresAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var endTime = DateTime.UtcNow;
+                var endTime = _dateTimeProvider.UtcNow; // IDateTimeProvider 사용
                 var startTime = endTime.AddHours(-24);
-                var allAttempts = await _authAttemptRepository.GetAllAsync();
+                // CancellationToken 전달
+                var allAttempts = await _authAttemptRepository.GetAllAsync(cancellationToken);
                 return allAttempts.Count(a => a.UserId == userId && !a.IsSuccess &&
                                              a.AttemptedAt >= startTime && a.AttemptedAt <= endTime);
             }
@@ -1785,10 +2016,11 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<int> CountRecentAnomaliesAsync(Guid userId)
+        private async Task<int> CountRecentAnomaliesAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
+                // CancellationToken 전달
                 return await Task.FromResult(0);
             }
             catch (Exception ex)
@@ -1798,20 +2030,23 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<bool> CheckRiskyIpUsageAsync(Guid userId)
+        private async Task<bool> CheckRiskyIpUsageAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var attempts = await GetRecentByUserIdAsync(userId, 10);
+                // CancellationToken 전달
+                var attempts = await GetRecentByUserIdAsync(userId, 10, cancellationToken);
 
                 foreach (var attempt in attempts)
                 {
                     if (!string.IsNullOrWhiteSpace(attempt.IpAddress))
                     {
-                        if (await IsIpInBlacklistAsync(attempt.IpAddress))
+                        // CancellationToken 전달
+                        if (await IsIpInBlacklistAsync(attempt.IpAddress, cancellationToken))
                             return true;
 
-                        var vpnTorCheck = await CheckVpnTorAsync(attempt.IpAddress);
+                        // CancellationToken 전달
+                        var vpnTorCheck = await CheckVpnTorAsync(attempt.IpAddress, cancellationToken);
                         if (vpnTorCheck.IsTor)
                             return true;
                     }
@@ -1826,10 +2061,11 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<bool> HasRecentSecurityIncidentsAsync(Guid organizationId)
+        private async Task<bool> HasRecentSecurityIncidentsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
+                // CancellationToken 전달
                 return await Task.FromResult(false);
             }
             catch (Exception ex)
@@ -1839,8 +2075,9 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<int> AnalyzeTransactionPatternAsync(Guid userId, decimal amount)
+        private async Task<int> AnalyzeTransactionPatternAsync(Guid userId, decimal amount, CancellationToken cancellationToken = default)
         {
+            // CancellationToken 전달
             return await Task.FromResult(0);
         }
 
@@ -1866,14 +2103,15 @@ namespace AuthHive.Auth.Services.Security
             };
         }
 
-        private async Task<SecurityAnomaly?> DetectLocationAnomalyInternalAsync(Guid userId, string? ipAddress)
+        private async Task<SecurityAnomaly?> DetectLocationAnomalyInternalAsync(Guid userId, string? ipAddress, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(ipAddress))
                 return null;
 
             try
             {
-                var geoInfo = await _geolocationService.GetLocationAsync(ipAddress);
+                // CancellationToken 전달
+                var geoInfo = await _geolocationService.GetLocationAsync(ipAddress, cancellationToken);
                 if (geoInfo == null)
                     return null;
 
@@ -1885,9 +2123,16 @@ namespace AuthHive.Auth.Services.Security
                     Longitude = geoInfo.Longitude
                 };
 
-                var anomalyResult = await DetectLocationAnomalyAsync(userId, currentLocation);
+                // CancellationToken 전달
+                var anomalyResult = await DetectLocationAnomalyAsync(userId, currentLocation, cancellationToken);
                 if (!anomalyResult.IsSuccess || anomalyResult.Data?.IsAnomaly != true)
                     return null;
+
+                // 최근 활동 로그를 다시 가져와서 lastActivity.AttemptedAt을 정확히 참조해야 합니다.
+                var recentActivities = await GetRecentByUserIdAsync(userId, 1, cancellationToken);
+                var lastAttemptTime = recentActivities.FirstOrDefault()?.AttemptedAt ?? _dateTimeProvider.UtcNow;
+                var timeDifferenceMinutes = (_dateTimeProvider.UtcNow - lastAttemptTime).TotalMinutes;
+
 
                 return new SecurityAnomaly
                 {
@@ -1898,9 +2143,10 @@ namespace AuthHive.Auth.Services.Security
                     Evidence = new Dictionary<string, object>
                     {
                         ["distance"] = anomalyResult.Data.Distance,
-                        ["timeDifference"] = anomalyResult.Data.TimeDifference.TotalMinutes
+                        // IDateTimeProvider.UtcNow 사용
+                        ["timeDifference"] = timeDifferenceMinutes
                     },
-                    DetectedAt = DateTime.UtcNow
+                    DetectedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
             }
             catch (Exception ex)
@@ -1910,9 +2156,10 @@ namespace AuthHive.Auth.Services.Security
             }
         }
 
-        private async Task<SecurityAnomaly?> DetectTimeAnomalyAsync(Guid userId, DateTime timestamp)
+        private async Task<SecurityAnomaly?> DetectTimeAnomalyAsync(Guid userId, DateTime timestamp, CancellationToken cancellationToken = default)
         {
-            var user = await _userRepository.GetByIdAsync(userId);
+            // CancellationToken 전달
+            var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
             if (user == null)
                 return null;
 
@@ -1930,19 +2177,20 @@ namespace AuthHive.Auth.Services.Security
                         ["hour"] = hour,
                         ["timestamp"] = timestamp
                     },
-                    DetectedAt = DateTime.UtcNow
+                    DetectedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
             }
 
             return null;
         }
 
-        private async Task<SecurityAnomaly?> DetectDeviceAnomalyAsync(Guid userId, string? deviceFingerprint)
+        private async Task<SecurityAnomaly?> DetectDeviceAnomalyAsync(Guid userId, string? deviceFingerprint, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(deviceFingerprint))
                 return null;
 
-            var reputationResult = await CheckDeviceReputationAsync(deviceFingerprint);
+            // CancellationToken 전달
+            var reputationResult = await CheckDeviceReputationAsync(deviceFingerprint, cancellationToken);
             if (!reputationResult.IsSuccess || reputationResult.Data == null)
                 return null;
 
@@ -1959,15 +2207,16 @@ namespace AuthHive.Auth.Services.Security
                         ["deviceId"] = deviceFingerprint,
                         ["riskIndicators"] = reputationResult.Data.RiskIndicators
                     },
-                    DetectedAt = DateTime.UtcNow
+                    DetectedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
             }
 
             return null;
         }
 
-        private async Task<SecurityAnomaly?> DetectBehaviorAnomalyAsync(Guid userId, AuthenticationContext context)
+        private async Task<SecurityAnomaly?> DetectBehaviorAnomalyAsync(Guid userId, AuthenticationContext context, CancellationToken cancellationToken = default)
         {
+            // CancellationToken 전달
             return await Task.FromResult<SecurityAnomaly?>(null);
         }
 
@@ -2019,8 +2268,8 @@ namespace AuthHive.Auth.Services.Security
             var deltaLon = (loc2.Longitude.Value - loc1.Longitude.Value) * Math.PI / 180;
 
             var a = Math.Sin(deltaLat / 2) * Math.Sin(deltaLat / 2) +
-                   Math.Cos(lat1Rad) * Math.Cos(lat2Rad) *
-                   Math.Sin(deltaLon / 2) * Math.Sin(deltaLon / 2);
+                    Math.Cos(lat1Rad) * Math.Cos(lat2Rad) *
+                    Math.Sin(deltaLon / 2) * Math.Sin(deltaLon / 2);
 
             var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
 
@@ -2089,41 +2338,7 @@ namespace AuthHive.Auth.Services.Security
 
         #endregion
 
-        #region Helper Classes
-
-        private class DeviceHistory
-        {
-            public DateTime? FirstSeen { get; set; }
-            public DateTime? LastSeen { get; set; }
-            public int FailedAttempts { get; set; }
-            public int UniqueUsers { get; set; }
-        }
-
-        private class SessionActivityLog
-        {
-            public Guid Id { get; set; }
-            public Guid SessionId { get; set; }
-            public string ActivityType { get; set; } = string.Empty;
-            public DateTime Timestamp { get; set; }
-            public string? IpAddress { get; set; }
-        }
-
-        private class ConnectedId
-        {
-            public Guid Id { get; set; }
-            public Guid UserId { get; set; }
-            public Guid OrganizationId { get; set; }
-            public string? ExternalId { get; set; }
-        }
-
-        #endregion
     }
-
-    #region Supporting Classes
-
-    /// <summary>
-    /// 위험 평가 설정
-    /// </summary>
     public class RiskAssessmentSettings
     {
         public double MfaRequiredThreshold { get; set; } = 0.6;
@@ -2133,6 +2348,4 @@ namespace AuthHive.Auth.Services.Security
         public double SuspiciousDistanceKm { get; set; } = 500;
         public List<string> HighRiskCountries { get; set; } = new() { "XX", "YY" };
     }
-
-    #endregion
 }

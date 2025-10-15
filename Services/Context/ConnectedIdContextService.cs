@@ -2,6 +2,7 @@ using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Models.Auth.Context;
 using AuthHive.Core.Models.Common;
 using System;
+using System.Threading; // CancellationToken 사용을 위해 추가
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using AuthHive.Core.Interfaces.Auth.Repository;
@@ -64,18 +65,17 @@ namespace AuthHive.Auth.Services.Context
         /// ConnectedId의 현재 컨텍스트를 가져옵니다.
         /// 먼저 캐시에서 찾고, 없으면 DB에서 새로 빌드하여 가져옵니다.
         /// </summary>
-        public async Task<ServiceResult<ConnectedIdContextDto>> GetContextAsync(Guid connectedId)
+        public async Task<ServiceResult<ConnectedIdContextDto>> GetContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             if (connectedId == Guid.Empty)
                 return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId cannot be empty.");
 
-            // 권한 컨텍스트를 위한 고유 캐시 키 생성
             var cacheKey = GenerateCacheKeyForContext(connectedId, ConnectedIdContextType.Permissions);
 
             try
             {
                 // 1. 캐시에서 먼저 컨텍스트를 찾아봅니다.
-                var cachedContext = await _cacheService.GetAsync<ConnectedIdContextDto>(cacheKey);
+                var cachedContext = await _cacheService.GetAsync<ConnectedIdContextDto>(cacheKey, cancellationToken);
                 if (cachedContext != null && !cachedContext.IsExpired)
                 {
                     _logger.LogDebug("Context cache hit for ConnectedId: {ConnectedId}", connectedId);
@@ -84,7 +84,12 @@ namespace AuthHive.Auth.Services.Context
 
                 // 2. 캐시에 없으면 DB에서 새로 빌드합니다.
                 _logger.LogDebug("Context cache miss for ConnectedId: {ConnectedId}. Building from DB.", connectedId);
-                return await BuildAndCachePermissionContextAsync(connectedId);
+                return await BuildAndCachePermissionContextAsync(connectedId, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("GetContextAsync operation was canceled for ConnectedId: {ConnectedId}", connectedId);
+                return ServiceResult<ConnectedIdContextDto>.Failure("Operation was canceled.");
             }
             catch (Exception ex)
             {
@@ -97,7 +102,7 @@ namespace AuthHive.Auth.Services.Context
         /// 캐시와 상관없이 DB에서 직접 컨텍스트를 강제로 다시 빌드하고 갱신합니다.
         /// 역할이나 권한이 변경되었을 때 즉시 적용하기 위해 사용됩니다.
         /// </summary>
-        public async Task<ServiceResult<ConnectedIdContextDto>> RefreshContextAsync(Guid connectedId)
+        public async Task<ServiceResult<ConnectedIdContextDto>> RefreshContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             if (connectedId == Guid.Empty)
                 return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId cannot be empty.");
@@ -106,8 +111,12 @@ namespace AuthHive.Auth.Services.Context
 
             try
             {
-                // 캐시를 무시하고 DB에서 컨텍스트를 빌드하는 내부 메서드 호출
-                return await BuildAndCachePermissionContextAsync(connectedId);
+                return await BuildAndCachePermissionContextAsync(connectedId, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("RefreshContextAsync operation was canceled for ConnectedId: {ConnectedId}", connectedId);
+                return ServiceResult<ConnectedIdContextDto>.Failure("Operation was canceled.");
             }
             catch (Exception ex)
             {
@@ -120,67 +129,47 @@ namespace AuthHive.Auth.Services.Context
         /// 사용자가 다른 조직으로 컨텍스트를 전환할 때 호출됩니다.
         /// 새로운 조직에 맞는 새 컨텍스트와 새 액세스 토큰을 발급합니다.
         /// </summary>
-        public async Task<ServiceResult<SwitchContextResult>> SwitchOrganizationContextAsync(Guid currentConnectedId, Guid targetOrganizationId)
+        public async Task<ServiceResult<SwitchContextResult>> SwitchOrganizationContextAsync(Guid currentConnectedId, Guid targetOrganizationId, CancellationToken cancellationToken = default)
         {
-            // CancellationToken은 일반적으로 서비스 메서드에 포함되어야 하지만, 
-            // 현재 시그니처에 없으므로 일단 제외하고 로직만 수정합니다.
-
             if (currentConnectedId == Guid.Empty || targetOrganizationId == Guid.Empty)
                 return ServiceResult<SwitchContextResult>.Failure("CurrentConnectedId and TargetOrganizationId cannot be empty.");
 
             try
             {
-                // 1. 현재 사용자의 정보를 조회합니다.
-                // GetByIdAsync는 ConnectedId? 를 반환할 수 있습니다.
-                var currentConnection = await _connectedIdRepository.GetByIdAsync(currentConnectedId);
-                if (currentConnection == null)
-                    return ServiceResult<SwitchContextResult>.Failure("Current ConnectedId not found.");
+                var currentConnection = await _connectedIdRepository.GetByIdAsync(currentConnectedId, cancellationToken);
+                if (currentConnection?.UserId == null)
+                    return ServiceResult<SwitchContextResult>.Failure("Current ConnectedId not found or has no associated user.");
 
-                // 🚨 UserId는 Guid? 타입일 가능성이 높으므로 null 체크를 먼저 수행합니다.
-                if (currentConnection.UserId == null)
-                    return ServiceResult<SwitchContextResult>.Failure("Current ConnectedId has no associated UserId.");
-
-                // 2. 사용자가 전환하려는 조직의 멤버인지 확인합니다.
                 var newConnection = await _connectedIdRepository.FirstOrDefaultAsync(
-                    c => c.UserId == currentConnection.UserId && c.OrganizationId == targetOrganizationId);
+                    c => c.UserId == currentConnection.UserId && c.OrganizationId == targetOrganizationId, cancellationToken);
 
                 if (newConnection == null)
                     return ServiceResult<SwitchContextResult>.Failure("User is not a member of the target organization.");
 
-                // 3. 새로운 조직에 맞는 컨텍스트를 생성합니다.
-                var newContextResult = await RefreshContextAsync(newConnection.Id);
+                var newContextResult = await RefreshContextAsync(newConnection.Id, cancellationToken);
                 if (!newContextResult.IsSuccess || newContextResult.Data == null)
                     return ServiceResult<SwitchContextResult>.Failure("Failed to create context for the new organization.");
 
-                // 4. 새로운 컨텍스트 정보(ConnectedId, OrgId 등)를 담은 새 액세스 토큰을 발급합니다.
                 var claims = new List<Claim>
-        {
-            // CS8604 해결: UserId는 이미 null 체크를 했으므로 .Value를 사용하거나 null-forgiving (!) 사용 가능
-            // 하지만 currentConnection.UserId의 null 체크를 통해 이미 안전합니다.
-            new Claim(ClaimTypes.NameIdentifier, newConnection.UserId.ToString()!), // <--- 라인 150 추정 위치: Guid?의 ToString() 호출 시 !를 사용해 안전성 명시
-            new Claim("connected_id", newConnection.Id.ToString()),
-            new Claim("org_id", newConnection.OrganizationId.ToString()),
-            
-            // 만약 다른 널 허용 문자열 속성이 있다면 다음과 같이 처리해야 CS8604가 발생하지 않습니다.
-            // new Claim(ClaimTypes.Role, newConnection.Role ?? string.Empty), 
-        };
-
-                // CS8629 해결: newConnection.UserId는 Guid? 타입입니다.
-                // 1. GetValueOrDefault()를 사용하여 안전하게 Guid를 추출합니다.
-                // 2. 157 라인 이전(예: 31 라인)에 currentConnection.UserId에 대한 null 체크를 했으므로, 
-                // newConnection.UserId가 null일 가능성은 없지만, 타입 시스템을 위해 .Value를 사용합니다.
-                // (currentConnection.UserId가 null이 아니므로 newConnection.UserId도 null이 아니어야 함)
-                var userId = newConnection.UserId!.Value; // 널이 아님을 확신하고 .Value를 사용하거나 GetValueOrDefault(Guid.Empty) 사용
-
+                {
+                    new Claim(ClaimTypes.NameIdentifier, newConnection.UserId.ToString()!),
+                    new Claim("connected_id", newConnection.Id.ToString()),
+                    new Claim("org_id", newConnection.OrganizationId.ToString()),
+                };
+                if (newConnection.UserId == null)
+                {
+                    _logger.LogError("The new connection for target organization {OrgId} has no associated UserId.", targetOrganizationId);
+                    return ServiceResult<SwitchContextResult>.Failure("Target connection does not have a valid user.");
+                }
                 var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
-                    userId, // CS8629 해결: Guid?에서 Guid로 변환하여 전달
+                    newConnection.UserId.Value,
                     newConnection.Id,
-                    claims);
+                    claims,
+                    cancellationToken);
 
                 if (!tokenResult.IsSuccess || tokenResult.Data == null)
                     return ServiceResult<SwitchContextResult>.Failure("Failed to generate new access token.");
 
-                // 5. 최종 결과를 DTO에 담아 반환합니다.
                 var result = new SwitchContextResult
                 {
                     NewContext = newContextResult.Data,
@@ -188,6 +177,11 @@ namespace AuthHive.Auth.Services.Context
                 };
 
                 return ServiceResult<SwitchContextResult>.Success(result);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("SwitchOrganizationContextAsync operation was canceled for ConnectedId: {ConnectedId}", currentConnectedId);
+                return ServiceResult<SwitchContextResult>.Failure("Operation was canceled.");
             }
             catch (Exception ex)
             {
@@ -200,22 +194,26 @@ namespace AuthHive.Auth.Services.Context
         /// 특정 사용자의 모든 컨텍스트 캐시를 삭제합니다.
         /// 역할/권한 변경 시 호출하여 오래된 캐시 정보를 제거합니다.
         /// </summary>
-        public async Task<ServiceResult> InvalidateContextCacheAsync(Guid connectedId)
+        public async Task<ServiceResult> InvalidateContextCacheAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             if (connectedId == Guid.Empty)
                 return ServiceResult.Failure("ConnectedId cannot be empty.");
 
-            // 향후 추가될 다른 컨텍스트 타입(설정, 기능 플래그 등)도 모두 삭제하도록 확장 가능
             var contextTypes = Enum.GetValues(typeof(ConnectedIdContextType)).Cast<ConnectedIdContextType>();
             try
             {
                 foreach (var type in contextTypes)
                 {
                     var cacheKey = GenerateCacheKeyForContext(connectedId, type);
-                    await _cacheService.RemoveAsync(cacheKey);
+                    await _cacheService.RemoveAsync(cacheKey, cancellationToken);
                 }
                 _logger.LogInformation("All context caches invalidated for ConnectedId: {ConnectedId}", connectedId);
                 return ServiceResult.Success();
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("InvalidateContextCacheAsync operation was canceled for ConnectedId: {ConnectedId}", connectedId);
+                return ServiceResult.Failure("Operation was canceled.");
             }
             catch (Exception ex)
             {
@@ -229,41 +227,33 @@ namespace AuthHive.Auth.Services.Context
         /// </summary>
         private async Task<ServiceResult<ConnectedIdContextDto>> BuildAndCachePermissionContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
-            // 1. 필요한 모든 정보를 DB에서 한 번에 조회합니다.
             var connection = await _connectedIdRepository.GetWithDetailsAsync(connectedId, cancellationToken);
             if (connection?.User == null || connection.Organization == null)
                 return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId details (User, Organization) not found.");
 
-            var roles = await _roleRepository.GetByConnectedIdAsync(connectedId);
-            var permissions = await _permissionRepository.GetPermissionsForConnectedIdAsync(connectedId);
+            var roles = await _roleRepository.GetByConnectedIdAsync(connectedId, cancellationToken: cancellationToken);
+            var permissions = await _permissionRepository.GetPermissionsForConnectedIdAsync(connectedId, cancellationToken: cancellationToken);
 
-            // 2. 조회한 정보를 DTO가 요구하는 형식으로 가공합니다.
             var roleNames = roles.Select(r => r.Name).ToList();
             var permissionScopes = permissions.Select(p => p.Scope).ToList();
 
-            // 3. 유연한 확장을 위해 실제 데이터는 JSON 객체로 만듭니다.
-            var contextData = new
-            {
-                Roles = roleNames,
-                Permissions = permissionScopes
-            };
+            var contextData = new { Roles = roleNames, Permissions = permissionScopes };
 
-            // 4. 최종 DTO를 생성합니다.
             var contextDto = new ConnectedIdContextDto
             {
-                Id = Guid.NewGuid(), // 컨텍스트 자체의 고유 ID
+                Id = Guid.NewGuid(),
                 ConnectedId = connection.Id,
                 OrganizationId = connection.OrganizationId,
                 ContextKey = GenerateCacheKeyForContext(connectedId, ConnectedIdContextType.Permissions),
                 ContextType = ConnectedIdContextType.Permissions,
-                ContextData = JsonSerializer.Serialize(contextData), // JSON 문자열로 직렬화하여 저장
-                ExpiresAt = DateTime.UtcNow.AddHours(1), // 예시: 1시간 유효기간
+                ContextData = JsonSerializer.Serialize(contextData),
+                ExpiresAt = DateTime.UtcNow.AddHours(1),
                 CreatedAt = DateTime.UtcNow,
-                IsHotPath = true // 권한 컨텍스트는 항상 자주 사용되므로 Hot Path로 표시
+                IsHotPath = true
             };
 
-            // 5. 생성된 DTO를 캐시에 저장합니다.
-            await _cacheService.SetAsync(contextDto.ContextKey, contextDto, TimeSpan.FromHours(1));
+            var cacheExpiration = TimeSpan.FromHours(1);
+            await _cacheService.SetAsync(contextDto.ContextKey, contextDto, cacheExpiration, cancellationToken);
             _logger.LogInformation("Permission context built and cached for ConnectedId: {ConnectedId}", connectedId);
 
             return ServiceResult<ConnectedIdContextDto>.Success(contextDto);
@@ -271,7 +261,6 @@ namespace AuthHive.Auth.Services.Context
 
         /// <summary>
         /// 컨텍스트 캐시 키를 생성하는 헬퍼 메서드입니다. 일관된 키 형식을 보장합니다.
-        /// 예: "context:사용자ID:권한"
         /// </summary>
         private string GenerateCacheKeyForContext(Guid connectedId, ConnectedIdContextType contextType, Guid? applicationId = null)
         {

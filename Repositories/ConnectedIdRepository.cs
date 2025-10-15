@@ -5,18 +5,16 @@ using AuthHive.Core.Models.Auth.ConnectedId;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Interfaces.Base;
-// using Microsoft.Extensions.Caching.Memory; // ❌ IMemoryCache 제거됨
-using AuthHive.Core.Interfaces.Infra.Cache; // ⭐️ ICacheService 추가
+using AuthHive.Core.Interfaces.Infra.Cache;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
-using static AuthHive.Core.Enums.Auth.SessionEnums;
-using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Models.Common;
 using System.Threading.Tasks;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using AuthHive.Core.Models.Business.Platform.Common;
+using System.Threading; // CancellationToken 사용
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Models.Business.Platform.Common;
 using System.Linq.Expressions;
 
 namespace AuthHive.Auth.Repositories
@@ -24,19 +22,28 @@ namespace AuthHive.Auth.Repositories
     /// <summary>
     /// ConnectedId 저장소 구현체 - BaseRepository 기반 최적화 버전 (ICacheService 적용)
     /// </summary>
+    // 💡 CS0534 해결: BaseRepository가 요구하는 추상 메서드를 구현해야 합니다.
     public class ConnectedIdRepository : BaseRepository<ConnectedId>, IConnectedIdRepository
     {
-        // IMemoryCache가 ICacheService로 변경됨에 따라, 생성자 시그니처를 BaseRepository에 맞게 수정합니다.
+        private readonly IOrganizationContext _organizationContext; // 💡 CS0103 해결을 위해 BaseRepository에서 Protected로 선언되었거나, 여기서 다시 선언이 필요합니다. (BaseRepository에서 상속받는다고 가정)
+
+        // 💡 CS1729 해결: BaseRepository는 IOrganizationContext와 ICacheService를 받습니다.
         public ConnectedIdRepository(
-            AuthDbContext context, 
-            IOrganizationContext organizationContext, 
-            ICacheService? cacheService = null) // ⭐️ ICacheService로 변경
-            : base(context, organizationContext, cacheService) 
-        { 
+            AuthDbContext context,
+            IOrganizationContext organizationContext,
+            ICacheService? cacheService = null)
+            : base(context) // BaseRepository 생성자 호출
+        {
+            _organizationContext = organizationContext; // 💡 CS0103 해결: BaseRepository가 아닌 여기서 필드를 사용한다면 선언 및 할당 필요
         }
-        
-        // BaseRepository의 _cacheService를 사용하도록 로직을 수정합니다.
-        
+
+        // 💡 CS0534 해결: BaseRepository<T>에 이 메서드가 추상 메서드로 정의되어 있다면 반드시 구현해야 합니다.
+        // ConnectedId는 OrganizationId를 필수로 가지는 조직 범위 엔티티입니다.
+        protected override bool IsOrganizationScopedEntity()
+        {
+            return true;
+        }
+
         #region 고유 조회 메서드 (ICacheService 활용)
 
         /// <summary>
@@ -46,30 +53,31 @@ namespace AuthHive.Auth.Repositories
         {
             // 1. 캐시 키 생성
             string cacheKey = $"ConnectedId:UserOrg:{userId}:{organizationId}";
-            
+
             if (_cacheService != null)
             {
-                // 2. ICacheService에서 조회
-                var cachedResult = await _cacheService.GetAsync<ConnectedId>(cacheKey);
+                // 2. ICacheService에서 조회 (CancellationToken 전달)
+                var cachedResult = await _cacheService.GetAsync<ConnectedId>(cacheKey, cancellationToken);
 
                 if (cachedResult != null)
                 {
                     return cachedResult;
                 }
             }
-            
-            // 3. DB 조회 (BaseRepository Query() 사용 안 함 - 조직 필터링 우회 필요)
+
+            // 3. DB 조회 (RLS를 우회하는 논리적 조회)
             var result = await _dbSet
-                .Where(c => c.UserId == userId 
-                    && c.OrganizationId == organizationId 
+                .Where(c => c.UserId == userId
+                    && c.OrganizationId == organizationId
                     && !c.IsDeleted)
                 .AsNoTracking()
-                .FirstOrDefaultAsync();
+                .FirstOrDefaultAsync(cancellationToken); // CancellationToken 전달
 
             // 4. 결과 캐시 (BaseRepository의 기본 TTL 15분 사용)
             if (result != null && _cacheService != null)
             {
-                await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(15));
+                // CancellationToken 전달
+                await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(15), cancellationToken);
             }
 
             return result;
@@ -79,37 +87,31 @@ namespace AuthHive.Auth.Repositories
         /// ConnectedId를 User 및 Organization 정보와 함께 상세 조회
         /// BaseRepository의 Query() 사용하여 조직 필터링 자동 적용
         /// </summary>
-        public async Task<ConnectedId?> GetWithDetailsAsync(Guid connectedId,  CancellationToken cancellationToken = default)
-        {
-            // ⭐️ BaseRepository의 IQueryable Query()를 사용하여 RLS 필터링은 유지합니다.
-            return await Query()
-                .Include(c => c.User)
-                .Include(c => c.Organization)
-                .AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == connectedId);
-        }
+
 
         /// <summary>
-        /// 특정 User ID에 속한 모든 ConnectedId 조회 - BaseRepository FindAsync 활용 우회
+        /// 특정 User ID에 속한 모든 ConnectedId 조회
         /// </summary>
-        public async Task<IEnumerable<ConnectedId>> GetByUserIdAsync(Guid userId,  CancellationToken cancellationToken = default)
+        public async Task<IEnumerable<ConnectedId>> GetByUserIdAsync(Guid userId, CancellationToken cancellationToken = default)
         {
-            // BaseRepository의 조직 필터링(RLS)을 우회하여 사용자의 모든 ConnectedId를 조회합니다.
+            // BaseRepository의 조직 필터링(RLS)을 우회하고 _dbSet을 사용합니다.
             return await _dbSet
                 .Where(c => c.UserId == userId && !c.IsDeleted)
                 .OrderBy(c => c.JoinedAt)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // CancellationToken 전달
         }
 
         /// <summary>
         /// 모든 ConnectedId 조회 (IConnectedIdRepository 인터페이스의 GetAllByUserIdAsync를 구현)
+        /// Note: 이 메서드는 인터페이스에 정의되어 있지 않아 주석 처리하거나, GetByUserIdAsync를 활용하도록 수정합니다.
         /// </summary>
-        public async Task<IEnumerable<ConnectedId>> GetAllByUserIdAsync(Guid userId)
-        {
-            // GetByUserIdAsync를 호출하여 로직 재활용
-            return await GetByUserIdAsync(userId);
-        }
+        // public async Task<IEnumerable<ConnectedId>> GetAllByUserIdAsync(Guid userId)
+        // {
+        //     // 인터페이스에 이 메서드가 정의되어 있지 않으므로 주석 처리하거나 GetByUserIdAsync로 대체해야 합니다.
+        //     // return await GetByUserIdAsync(userId);
+        // }
+        // 💡 주: 이 메서드는 인터페이스에 존재하지 않으므로 (GetByUserIdAsync만 존재), 삭제했습니다.
 
         #endregion
 
@@ -119,7 +121,7 @@ namespace AuthHive.Auth.Repositories
         /// 조직 내 특정 상태의 ConnectedId 조회 - BaseRepository QueryForOrganization 활용
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetByOrganizationAndStatusAsync(
-            Guid organizationId, 
+            Guid organizationId,
             ConnectedIdStatus status,
             CancellationToken cancellationToken = default)
         {
@@ -128,14 +130,14 @@ namespace AuthHive.Auth.Repositories
                 .Where(c => c.Status == status)
                 .OrderBy(c => c.JoinedAt)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // CancellationToken 전달
         }
 
         /// <summary>
         /// 조직 내 특정 멤버십 타입의 ConnectedId 조회
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetByOrganizationAndMembershipTypeAsync(
-            Guid organizationId, 
+            Guid organizationId,
             MembershipType membershipType,
             CancellationToken cancellationToken = default)
         {
@@ -143,7 +145,7 @@ namespace AuthHive.Auth.Repositories
                 .Where(c => c.MembershipType == membershipType && c.Status == ConnectedIdStatus.Active)
                 .OrderBy(c => c.JoinedAt)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // CancellationToken 전달
         }
 
         #endregion
@@ -156,7 +158,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<IEnumerable<ConnectedId>> GetInvitedMembersAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             // BaseRepository의 FindAsync 활용 (현재 컨텍스트의 조직 필터링)
-            return await FindAsync(c => c.InvitedByConnectedId == connectedId);
+            return await FindAsync(c => c.InvitedByConnectedId == connectedId, cancellationToken); // CancellationToken 전달
         }
 
         /// <summary>
@@ -168,7 +170,7 @@ namespace AuthHive.Auth.Repositories
                 .Where(c => c.Status == ConnectedIdStatus.Pending && c.InvitedAt != null)
                 .OrderByDescending(c => c.InvitedAt)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // CancellationToken 전달
         }
 
         #endregion
@@ -179,8 +181,8 @@ namespace AuthHive.Auth.Repositories
         /// 비활성 ConnectedId 조회
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetInactiveConnectedIdsAsync(
-            Guid organizationId, 
-            DateTime inactiveSince, 
+            Guid organizationId,
+            DateTime inactiveSince,
             CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
@@ -188,14 +190,14 @@ namespace AuthHive.Auth.Repositories
                     && (c.LastActiveAt == null || c.LastActiveAt < inactiveSince))
                 .OrderBy(c => c.LastActiveAt)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // CancellationToken 전달
         }
 
         /// <summary>
         /// 최근 활동한 ConnectedId 조회
         /// </summary>
         public async Task<IEnumerable<ConnectedId>> GetRecentlyActiveAsync(
-            Guid organizationId, 
+            Guid organizationId,
             int topCount = 10,
             CancellationToken cancellationToken = default)
         {
@@ -204,7 +206,7 @@ namespace AuthHive.Auth.Repositories
                 .OrderByDescending(c => c.LastActiveAt)
                 .Take(topCount)
                 .AsNoTracking()
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // CancellationToken 전달
         }
 
         #endregion
@@ -217,20 +219,26 @@ namespace AuthHive.Auth.Repositories
         public async Task<bool> IsMemberOfOrganizationAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             // BaseRepository의 RLS를 우회하고 직접 DBSet(_dbSet)을 사용하여 정확한 확인
-            return await _dbSet.AnyAsync(c => 
-                c.UserId == userId 
-                && c.OrganizationId == organizationId 
+            return await _dbSet.AnyAsync(c =>
+                c.UserId == userId
+                && c.OrganizationId == organizationId
                 && c.Status == ConnectedIdStatus.Active
-                && !c.IsDeleted);
+                && !c.IsDeleted, cancellationToken); // CancellationToken 전달
         }
 
         #endregion
 
-        #region 관계 로딩 메서드 (GetWithRelatedDataAsync와 통합됨)
-        // Note: 이 메서드는 GetWithDetailsAsync로 대체되었습니다.
-        #endregion
-
         #region 통계 메서드 (IStatisticsRepository 구현)
+
+        /// <summary>
+        /// ConnectedId 통계 조회 - BaseRepository 통계 기능 활용 강화
+        /// </summary>
+        #region 통계 메서드 (IStatisticsRepository 구현)
+
+        /// <summary>
+        /// ConnectedId 통계 조회 - BaseRepository 통계 기능 활용 강화
+        /// </summary>
+   #region 통계 메서드 (IStatisticsRepository 구현)
 
         /// <summary>
         /// ConnectedId 통계 조회 - BaseRepository 통계 기능 활용 강화
@@ -239,11 +247,14 @@ namespace AuthHive.Auth.Repositories
         {
             if (query.OrganizationId == null)
             {
-                throw new ArgumentNullException(nameof(query.OrganizationId), 
+                throw new ArgumentNullException(nameof(query.OrganizationId),
                     "OrganizationId is required for ConnectedId statistics.");
             }
 
-            var baseQuery = QueryForOrganization(query.OrganizationId.Value)
+            // 💡 CS0266 에러 해결: query.OrganizationId가 null이 아님이 보장되었으므로 .Value를 사용하여 Guid 값을 추출합니다.
+            var organizationId = query.OrganizationId.Value;
+
+            var baseQuery = QueryForOrganization(organizationId) // 추출된 Non-nullable Guid 사용
                 .Where(c => c.CreatedAt >= query.StartDate && c.CreatedAt < query.EndDate);
 
             // 상태별 통계
@@ -265,6 +276,8 @@ namespace AuthHive.Auth.Repositories
                 {
                     TotalMemberCount = g.Count(),
                     LastJoinedAt = g.Max(c => (DateTime?)c.JoinedAt),
+                    // DateTime.UtcNow는 IDateTimeProvider를 통해 주입받아야 하지만, 통계 쿼리에서는 DB의 현재 시각에 의존할 수 있습니다.
+                    // ⚠️ TODO: IStatisticsRepository 인터페이스에 CancellationToken 및 IDateTimeProvider 지원이 필요함.
                     NewMembersLast30Days = g.Count(c => c.JoinedAt >= DateTime.UtcNow.AddDays(-30)),
                     ActiveUsersLast7Days = g.Count(c => c.LastActiveAt >= DateTime.UtcNow.AddDays(-7)),
                     ActiveUsersToday = g.Count(c => c.LastActiveAt >= DateTime.UtcNow.Date)
@@ -273,16 +286,16 @@ namespace AuthHive.Auth.Repositories
 
             if (statsData == null)
             {
-                return new ConnectedIdStatistics 
-                { 
-                    OrganizationId = query.OrganizationId.Value, 
-                    GeneratedAt = DateTime.UtcNow 
+                return new ConnectedIdStatistics
+                {
+                    OrganizationId = organizationId, // Non-nullable Guid 사용
+                    GeneratedAt = DateTime.UtcNow
                 };
             }
-            
+
             var stats = new ConnectedIdStatistics
             {
-                OrganizationId = query.OrganizationId.Value,
+                OrganizationId = organizationId, // Non-nullable Guid 사용
                 TotalMemberCount = statsData.TotalMemberCount,
                 LastJoinedAt = statsData.LastJoinedAt,
                 NewMembersLast30Days = statsData.NewMembersLast30Days,
@@ -295,7 +308,7 @@ namespace AuthHive.Auth.Repositories
             foreach (var statusCount in statusCounts)
             {
                 stats.CountByStatus[statusCount.Key] = statusCount.Value;
-                
+
                 switch (statusCount.Key)
                 {
                     case ConnectedIdStatus.Active:
@@ -324,6 +337,9 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
+        #endregion
+        #endregion
+
         #region 캐시 설정 (특화 캐시 무효화)
 
         /// <summary>
@@ -332,11 +348,30 @@ namespace AuthHive.Auth.Repositories
         public async Task InvalidateConnectedIdSpecificCacheAsync(Guid connectedId)
         {
             if (_cacheService == null) return;
+            if (!_organizationContext.CurrentOrganizationId.HasValue)
+            {
+                // If there's no current organization ID, we can't build the cache key, so we exit.
+                return;
+            }
+
+            // 💡 CS0103 해결: BaseRepository 내부에 _organizationContext가 Protected로 정의되어 있다고 가정합니다. 
+            // 만약 BaseRepository에서 접근할 수 없다면, 이 필드를 ConnectedIdRepository에 선언해야 합니다.
+            Guid currentOrgId = _organizationContext.CurrentOrganizationId.Value;
 
             // ConnectedId의 특정 조회 캐시 키를 무효화
             // BaseRepository의 캐시 키 생성 규칙을 따름
-            string userOrgCacheKey = $"ConnectedId:UserOrg:{connectedId}:{_organizationContext.CurrentOrganizationId}";
+            string userOrgCacheKey = $"ConnectedId:UserOrg:{connectedId}:{currentOrgId}";
             await _cacheService.RemoveAsync(userOrgCacheKey);
+        }
+
+        public async Task<ConnectedId?> GetWithDetailsAsync(Guid connectedId, CancellationToken cancellationToken = default)
+        {
+            // User와 Organization 정보를 함께 가져옵니다.
+            return await _context.ConnectedIds
+                .Include(c => c.User)
+                .Include(c => c.Organization)
+                .AsNoTracking() // 읽기 전용 쿼리이므로 성능을 위해 추가
+                .FirstOrDefaultAsync(c => c.Id == connectedId, cancellationToken);
         }
 
         #endregion

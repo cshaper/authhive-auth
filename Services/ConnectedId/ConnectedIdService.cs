@@ -10,6 +10,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Interfaces.Repositories.Business.Platform; // CORRECT NAMESPACE
 using AuthHive.Core.Models.Auth.ConnectedId.Requests;
@@ -18,13 +19,14 @@ using AuthHive.Core.Models.Auth.Events;
 using AuthHive.Core.Models.Business.Events;
 using AuthHive.Core.Models.Common;
 using AutoMapper;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
-
+using ConnectedIdEntity = AuthHive.Core.Entities.Auth.ConnectedId;
 namespace AuthHive.Auth.Services
 {
     public class ConnectedIdService : IConnectedIdService
@@ -41,7 +43,8 @@ namespace AuthHive.Auth.Services
         private readonly IAuditService _auditService;
         private readonly ICacheService _cacheService;
         private readonly AuthDbContext _context;
-
+        private readonly IOrganizationContext _organizationContext;
+        private readonly IConnectedIdContext _connectedIdContext;
         public ConnectedIdService(
             IUnitOfWork unitOfWork,
             IConnectedIdRepository connectedIdRepository,
@@ -54,7 +57,9 @@ namespace AuthHive.Auth.Services
             IEventBus eventBus,
             IAuditService auditService,
             ICacheService cacheService,
-            AuthDbContext context)
+            AuthDbContext context,
+            IOrganizationContext organizationContext,
+            IConnectedIdContext connectedIdContext)
         {
             _unitOfWork = unitOfWork;
             _connectedIdRepository = connectedIdRepository;
@@ -68,6 +73,8 @@ namespace AuthHive.Auth.Services
             _auditService = auditService;
             _cacheService = cacheService;
             _context = context;
+            _organizationContext = organizationContext;
+            _connectedIdContext = connectedIdContext;
         }
         #region IService Implementation
 
@@ -125,7 +132,7 @@ namespace AuthHive.Auth.Services
                     );
                 }
 
-                var newEntity = _mapper.Map<ConnectedId>(request);
+                var newEntity = _mapper.Map<ConnectedIdEntity>(request);
                 newEntity.Status = ConnectedIdStatus.Active;
                 newEntity.JoinedAt = _dateTimeProvider.UtcNow;
 
@@ -244,12 +251,12 @@ namespace AuthHive.Auth.Services
                 return ServiceResult.Failure($"Failed to delete ConnectedId: {ex.Message}", "DELETE_ERROR");
             }
         }
-        public async Task<ServiceResult<ConnectedId>> GetOrCreateAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<ConnectedIdEntity>> GetOrCreateAsync(Guid userId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             var existingEntity = await _connectedIdRepository.GetByUserAndOrganizationAsync(userId, organizationId, cancellationToken);
             if (existingEntity != null)
             {
-                return ServiceResult<ConnectedId>.Success(existingEntity);
+                return ServiceResult<ConnectedIdEntity>.Success(existingEntity);
             }
 
             var createRequest = new CreateConnectedIdRequest { UserId = userId, OrganizationId = organizationId };
@@ -257,7 +264,7 @@ namespace AuthHive.Auth.Services
 
             if (!creationResult.IsSuccess)
             {
-                return ServiceResult<ConnectedId>.Failure(
+                return ServiceResult<ConnectedIdEntity>.Failure(
                     creationResult.ErrorMessage ?? "Failed to create ConnectedId for an unknown reason.",
                     creationResult.ErrorCode
                 );
@@ -265,16 +272,16 @@ namespace AuthHive.Auth.Services
 
             if (creationResult.Data == null)
             {
-                return ServiceResult<ConnectedId>.Failure("Creation succeeded but returned no data.", "DATA_INCONSISTENCY");
+                return ServiceResult<ConnectedIdEntity>.Failure("Creation succeeded but returned no data.", "DATA_INCONSISTENCY");
             }
 
             var newEntity = await _connectedIdRepository.GetByIdAsync(creationResult.Data.Id, cancellationToken);
             if (newEntity == null)
             {
-                return ServiceResult<ConnectedId>.Failure("Failed to retrieve the newly created ConnectedId.", "RETRIEVAL_ERROR");
+                return ServiceResult<ConnectedIdEntity>.Failure("Failed to retrieve the newly created ConnectedId.", "RETRIEVAL_ERROR");
             }
 
-            return ServiceResult<ConnectedId>.Success(newEntity);
+            return ServiceResult<ConnectedIdEntity>.Success(newEntity);
         }
 
         #endregion
@@ -550,7 +557,7 @@ namespace AuthHive.Auth.Services
                 }
 
                 // 새로운 서비스 계정 ConnectedId를 생성합니다.
-                var newServiceAccount = new ConnectedId
+                var newServiceAccount = new ConnectedIdEntity
                 {
                     OrganizationId = application.OrganizationId,
                     ApplicationId = applicationId, // 이제 이 속성이 존재합니다.
@@ -574,9 +581,114 @@ namespace AuthHive.Auth.Services
                 return ServiceResult<Guid>.Failure("An internal error occurred while creating the service account.");
             }
         }
-
         #endregion
 
+
+        #region 누락된 인터페이스 구현
+
+        /// <summary>
+        /// 현재 요청 컨텍스트에서 조직 ID를 동기적으로 가져옵니다.
+        /// </summary>
+        public ServiceResult<Guid> GetCurrentOrganizationId()
+        {
+            if (!_organizationContext.CurrentOrganizationId.HasValue)
+            {
+                return ServiceResult<Guid>.Failure("현재 요청에서 조직 컨텍스트를 찾을 수 없습니다.");
+            }
+            return ServiceResult<Guid>.Success(_organizationContext.CurrentOrganizationId.Value);
+        }
+
+        /// <summary>
+        /// 현재 요청 컨텍스트에서 ConnectedId를 동기적으로 가져옵니다.
+        /// </summary>
+        public ServiceResult<Guid> GetCurrentConnectedId()
+        {
+            if (!_connectedIdContext.CurrentConnectedId.HasValue)
+            {
+                return ServiceResult<Guid>.Failure("현재 요청에서 ConnectedId 컨텍스트를 찾을 수 없습니다.");
+            }
+            return ServiceResult<Guid>.Success(_connectedIdContext.CurrentConnectedId.Value);
+        }
+
+        /// <summary>
+        /// 지정된 ConnectedId가 대상 조직에 대해 관리자 권한(Admin/Owner)을 가졌는지 확인합니다.
+        /// </summary>
+        public async Task<bool> HasAdminAccessToOrganizationAsync(
+        Guid connectedId,
+        Guid organizationId,
+        CancellationToken cancellationToken = default)
+        {
+            // 💡 Cache-first approach to reduce DB load on repeated permission checks.
+            string cacheKey = $"auth:access:conn:{connectedId}:org:{organizationId}:admin";
+
+            // 1. ✅ Get the cached value as a string.
+            var cachedString = await _cacheService.GetStringAsync(cacheKey, cancellationToken);
+
+            // 2. ✅ If the string exists, parse it back to a boolean.
+            if (!string.IsNullOrEmpty(cachedString) && bool.TryParse(cachedString, out var cachedValue))
+            {
+                _logger.LogDebug("Admin access check cache hit for ConnectedId: {ConnectedId}", connectedId);
+                return cachedValue;
+            }
+
+            _logger.LogDebug("Admin access check cache miss for ConnectedId: {ConnectedId}. Querying DB.", connectedId);
+
+            // List of roles that grant admin access.
+            var adminRoles = new[] { "Admin", "Owner" };
+
+            // Query the database to see if the ConnectedId has any of the admin roles.
+            var hasAccess = await _context.ConnectedIds
+                .Where(c => c.Id == connectedId && c.OrganizationId == organizationId)
+                .AnyAsync(c => c.RoleAssignments.Any(ra => adminRoles.Contains(ra.Role.Name)),
+                          cancellationToken);
+
+            // 3. ✅ Store the boolean result as a string in the cache for future requests.
+            await _cacheService.SetStringAsync(cacheKey, hasAccess.ToString(), TimeSpan.FromMinutes(5), cancellationToken);
+
+            return hasAccess;
+        }
+
+        /// <summary>
+        /// 지정된 ConnectedId가 특정 역할을 가졌는지 확인합니다.
+        /// </summary>
+        public async Task<bool> HasRequiredRoleAsync(
+     Guid connectedId,
+     string requiredRole,
+     CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(requiredRole))
+            {
+                return false;
+            }
+
+            string cacheKey = $"auth:access:conn:{connectedId}:role:{requiredRole}";
+
+            // 1. ✅ Get the cached value as a string.
+            var cachedString = await _cacheService.GetStringAsync(cacheKey, cancellationToken);
+
+            // 2. ✅ If the string exists, parse it back to a boolean and return.
+            if (!string.IsNullOrEmpty(cachedString) && bool.TryParse(cachedString, out var cachedValue))
+            {
+                _logger.LogDebug("Role check cache hit for ConnectedId: {ConnectedId}, Role: {Role}", connectedId, requiredRole);
+                return cachedValue;
+            }
+
+            _logger.LogDebug("Role check cache miss for ConnectedId: {ConnectedId}, Role: {Role}. Querying DB.", connectedId, requiredRole);
+
+            // Check if the ConnectedId has any role assignment where the role's name matches the required role (case-insensitive).
+            var hasRole = await _context.ConnectedIds
+                .Where(c => c.Id == connectedId)
+                .AnyAsync(c => c.RoleAssignments.Any(ra => ra.Role.Name.Equals(requiredRole, StringComparison.OrdinalIgnoreCase)),
+                          cancellationToken);
+
+            // 3. ✅ Store the boolean result as a string in the cache.
+            await _cacheService.SetStringAsync(cacheKey, hasRole.ToString(), TimeSpan.FromMinutes(5), cancellationToken);
+
+            return hasRole;
+        }
+
         #endregion
+        #endregion
+
     }
 }

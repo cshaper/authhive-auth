@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Threading; // CancellationToken 사용을 위해 추가
 using System.Threading.Tasks;
 
 namespace AuthHive.Auth.Providers
@@ -20,8 +21,7 @@ namespace AuthHive.Auth.Providers
     /// </summary>
     public class PasetoTokenProvider : ITokenProvider
     {
-        // ⚠️ 변경: PasetoSymmetricKey 대신 원시 키 바이트 배열을 저장합니다.
-        private readonly byte[] _keyBytes; 
+        private readonly byte[] _keyBytes;
         private readonly string _issuer;
         private readonly string _audience;
         private readonly TimeSpan _accessTokenLifetime;
@@ -37,43 +37,36 @@ namespace AuthHive.Auth.Providers
             {
                 throw new ArgumentException("PASETO key must be 32 bytes (256 bits) for v4 protocol.", "Paseto:Key");
             }
-
-            // ⚠️ 수정: 키 객체 대신 바이트 배열을 저장합니다.
-            _keyBytes = keyBytes; 
-            
-            // ⚠️ 원시 키 객체 생성 로직 제거: _pasetoKey = new PasetoSymmetricKey(keyBytes, new Version4());
+            _keyBytes = keyBytes;
 
             _accessTokenLifetime = TimeSpan.FromHours(configuration.GetValue<double>("Paseto:ExpiryInHours", 24));
         }
 
         /// <inheritdoc />
-        public Task<ServiceResult<TokenInfo>> GenerateAccessTokenAsync(Guid userId, Guid connectedId, IEnumerable<Claim>? additionalClaims = null)
+        public Task<ServiceResult<TokenInfo>> GenerateAccessTokenAsync(Guid userId, Guid connectedId, IEnumerable<Claim>? additionalClaims = null, CancellationToken cancellationToken = default)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested(); // 작업 취소 확인
+
                 var issuedAt = DateTime.UtcNow;
                 var expiresAt = issuedAt.Add(_accessTokenLifetime);
 
                 var builder = new PasetoBuilder()
-                    // ⚠️ 수정: UseV4(Purpose.Local) 사용 (PasetoBuilder에 존재하는 Fluent API)
-                    .UseV4(Paseto.Purpose.Local)
-                    // ⚠️ 수정: WithKey(_pasetoKey) 대신 WithSharedKey(_keyBytes) 사용
-                    .WithSharedKey(_keyBytes) 
+                    .UseV4(Purpose.Local)
+                    .WithSharedKey(_keyBytes)
                     .Issuer(_issuer)
                     .Audience(_audience)
                     .Expiration(expiresAt)
                     .IssuedAt(issuedAt)
-                    // Core claims that are essential for the system
-                    .Subject(userId.ToString()) // 'sub' is the standard claim for user identifier
+                    .Subject(userId.ToString())
                     .AddClaim(ClaimTypes.NameIdentifier, userId.ToString())
                     .AddClaim("connected_id", connectedId.ToString());
 
-                // Add any extra claims if they are provided
                 if (additionalClaims != null)
                 {
                     foreach (var claim in additionalClaims)
                     {
-                        // Ensure we don't overwrite the essential claims
                         if (claim.Type != "sub" && claim.Type != ClaimTypes.NameIdentifier && claim.Type != "connected_id")
                         {
                             builder.AddClaim(claim.Type, claim.Value);
@@ -83,42 +76,43 @@ namespace AuthHive.Auth.Providers
 
                 var token = builder.Encode();
 
-                var tokenInfo = new TokenInfo 
-                { 
-                    AccessToken = token, 
+                var tokenInfo = new TokenInfo
+                {
+                    AccessToken = token,
                     ExpiresAt = expiresAt,
                     IssuedAt = issuedAt,
                     ExpiresIn = (int)_accessTokenLifetime.TotalSeconds
                 };
                 return Task.FromResult(ServiceResult<TokenInfo>.Success(tokenInfo));
             }
+            catch (OperationCanceledException)
+            {
+                return Task.FromResult(ServiceResult<TokenInfo>.Failure("Token generation was canceled."));
+            }
             catch (Exception ex)
             {
-                // In a real application, you should log this exception.
                 return Task.FromResult(ServiceResult<TokenInfo>.Failure($"Token generation failed: {ex.Message}"));
             }
         }
 
         /// <inheritdoc />
-        public Task<ServiceResult<ClaimsPrincipal>> ValidateAccessTokenAsync(string accessToken)
+        public Task<ServiceResult<ClaimsPrincipal>> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested(); // 작업 취소 확인
+
                 var validationResult = new PasetoBuilder()
-                    // ⚠️ 수정: UseV4(Purpose.Local) 사용 (PasetoBuilder에 존재하는 Fluent API)
-                    .UseV4(Paseto.Purpose.Local)
-                    // ⚠️ 수정: WithKey(_pasetoKey) 대신 WithSharedKey(_keyBytes) 사용
-                    .WithSharedKey(_keyBytes) 
+                    .UseV4(Purpose.Local)
+                    .WithSharedKey(_keyBytes)
                     .Audience(_audience)
                     .Issuer(_issuer)
                     .Decode(accessToken);
 
-                // Convert the Paseto payload dictionary to a standard .NET Claims list.
                 var pasetoClaims = validationResult.Paseto.Payload
                     .Select(p => new Claim(p.Key, p.Value?.ToString() ?? string.Empty))
                     .ToList();
-                
-                // Ensure the subject claim is correctly mapped to NameIdentifier if not present
+
                 if (!pasetoClaims.Any(c => c.Type == ClaimTypes.NameIdentifier) && validationResult.Paseto.Payload.ContainsKey("sub"))
                 {
                     pasetoClaims.Add(new Claim(ClaimTypes.NameIdentifier, validationResult.Paseto.Payload["sub"]?.ToString() ?? string.Empty));
@@ -129,22 +123,26 @@ namespace AuthHive.Auth.Providers
 
                 return Task.FromResult(ServiceResult<ClaimsPrincipal>.Success(principal));
             }
+            catch (OperationCanceledException)
+            {
+                return Task.FromResult(ServiceResult<ClaimsPrincipal>.Failure("Token validation was canceled."));
+            }
             catch (Exception ex)
             {
-                // In a real application, you should log this exception.
                 return Task.FromResult(ServiceResult<ClaimsPrincipal>.Failure($"Token validation failed: {ex.Message}"));
             }
         }
 
         /// <inheritdoc />
-        public Task<ServiceResult<string>> GenerateRefreshTokenAsync(Guid userId)
+        public Task<ServiceResult<string>> GenerateRefreshTokenAsync(Guid userId, CancellationToken cancellationToken = default)
         {
-            // A refresh token should be a cryptographically secure random string.
+            cancellationToken.ThrowIfCancellationRequested(); // 작업 취소 확인
+            
             var randomNumber = new byte[32];
             using var rng = RandomNumberGenerator.Create();
             rng.GetBytes(randomNumber);
             var refreshToken = Convert.ToBase64String(randomNumber);
-            
+
             return Task.FromResult(ServiceResult<string>.Success(refreshToken));
         }
     }

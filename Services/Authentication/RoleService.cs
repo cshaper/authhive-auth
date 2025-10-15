@@ -1,13 +1,20 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Caching.Memory;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
+
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.System; // IDateTimeProvider 추가
+using AuthHive.Core.Interfaces.Organization.Service; // IPlanRestrictionService 추가
+
 using AuthHive.Core.Models.Auth.Permissions;
 using AuthHive.Core.Models.Auth.Permissions.Responses;
 using AuthHive.Core.Models.Auth.Role;
@@ -15,19 +22,19 @@ using AuthHive.Core.Models.Auth.Role.Requests;
 using AuthHive.Core.Models.Auth.Role.Responses;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Base.Summaries;
-using AuthHive.Core.Enums.Auth;
-using static AuthHive.Core.Enums.Auth.PermissionEnums;
-using System.Text.Json;
 using AuthHive.Core.Models.Auth.Role.Common;
+
+using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Constants.Auth;
-using AuthHive.Core.Interfaces.Infra.Cache;
-using AuthHive.Core.Interfaces.Audit;
-using AuthHive.Core.Enums.Core; // RoleConstants 사용
+using static AuthHive.Core.Enums.Auth.PermissionEnums;
+using AuthHive.Core.Interfaces.Infra;
+
 
 namespace AuthHive.Auth.Services.Authentication
 {
     /// <summary>
-    /// 역할 관리의 핵심 비즈니스 로직을 담당하는 서비스
+    /// 역할 관리의 핵심 비즈니스 로직을 담당하는 서비스 (CancellationToken, IPrincipalAccessor, IDateTimeProvider 통합)
     /// </summary>
     public class RoleService : IRoleService
     {
@@ -38,6 +45,9 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IUnitOfWork _unitOfWork;
         private readonly IAuditService _auditService;
         private readonly ICacheService _cacheService;
+        private readonly IPrincipalAccessor _principalAccessor; // ⭐️ 작업 주체 (ConnectedId) 확보
+        private readonly IDateTimeProvider _dateTimeProvider;
+        private readonly IPlanRestrictionService _planRestrictionService; // ⭐️ 조직 제한 사항
         private readonly ILogger<RoleService> _logger;
 
         public RoleService(
@@ -48,6 +58,9 @@ namespace AuthHive.Auth.Services.Authentication
             IUnitOfWork unitOfWork,
             IAuditService auditService,
             ICacheService cacheService,
+            IPrincipalAccessor principalAccessor, // ⭐️ DI 추가
+            IDateTimeProvider dateTimeProvider,     // ⭐️ DI 추가
+            IPlanRestrictionService planRestrictionService, // ⭐️ DI 추가
             ILogger<RoleService> logger)
         {
             _roleRepository = roleRepository;
@@ -57,45 +70,31 @@ namespace AuthHive.Auth.Services.Authentication
             _unitOfWork = unitOfWork;
             _auditService = auditService;
             _cacheService = cacheService;
+            _principalAccessor = principalAccessor; // ⭐️ 할당
+            _dateTimeProvider = dateTimeProvider;   // ⭐️ 할당
+            _planRestrictionService = planRestrictionService; // ⭐️ 할당
             _logger = logger;
         }
 
         #region IService Implementation
 
-        /// <summary>
-        /// 서비스 초기화
-        /// </summary>
         public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
-            try
-            {
-                _logger.LogInformation("RoleService initializing...");
-
-                // async 없이 Task.CompletedTask를 반환하여 최적화
-                _logger.LogInformation("RoleService initialized successfully");
-                return Task.CompletedTask;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize RoleService");
-                throw;
-            }
+            _logger.LogInformation("RoleService initializing...");
+            _logger.LogInformation("RoleService initialized successfully");
+            return Task.CompletedTask;
         }
 
-        /// <summary>
-        /// 서비스 상태 확인
-        /// </summary>
         public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // AnyAsync에 CancellationToken을 전달합니다.
-                var testQuery = await _roleRepository.AnyAsync(r => true, cancellationToken);
+                await _roleRepository.AnyAsync(r => true, cancellationToken);
                 return true;
             }
             catch (OperationCanceledException)
             {
-                return false;
+                throw;
             }
             catch (Exception ex)
             {
@@ -106,77 +105,83 @@ namespace AuthHive.Auth.Services.Authentication
 
         #endregion
 
-        #region 역할 검증 (ConnectedIdContextStatisticsService에서 필요)
+        #region 역할 검증 (IRoleService 계약)
 
-        /// <summary>
-        /// 특정 ConnectedId가 특정 RoleKey를 가진 역할을 할당받았는지 확인합니다.
-        /// </summary>
-        /// <param name="connectedId">ConnectedId (사용자 또는 서비스 계정 ID)</param>
-        /// <param name="roleKey">검증할 역할 키 (예: SUPER_ADMIN)</param>
-        /// <returns>역할을 가지고 있으면 true</returns>
-        public async Task<bool> IsConnectedIdInRoleAsync(Guid connectedId, string roleKey)
+        public async Task<ServiceResult<bool>> IsConnectedIdInRoleAsync(
+            Guid connectedId,
+            string roleKey,
+            CancellationToken cancellationToken = default)
         {
+            // Guid.Empty (시스템) 처리 로직
             if (connectedId == Guid.Empty)
             {
-                // 시스템 내부 호출에 대한 명시적 처리 (SaaS 원칙에 따라 명확히 처리되어야 함)
-                // Guid.Empty가 SUPER_ADMIN 권한을 가져야 하는지 여부는 정책에 따라 결정됩니다.
                 if (roleKey.Equals(RoleConstants.SystemReservedKeys.SUPER_ADMIN, StringComparison.OrdinalIgnoreCase))
                 {
-                    _logger.LogWarning("Implicitly granting SUPER_ADMIN role for System ConnectedId (Guid.Empty).");
-                    return true;
+                    return ServiceResult<bool>.Success(true);
                 }
-                return false;
+                return ServiceResult<bool>.Success(false);
             }
 
             var cacheKey = string.Format(RoleConstants.CacheKeys.UserRoles, connectedId);
-
             // 1. 캐시에서 ConnectedId의 활성 역할 연결 정보 조회 (ICacheService 대신 IMemoryCache 사용)
-            var roleConnections = await _cacheService.GetOrSetAsync(cacheKey, async () =>
-                    {
-                        // CS1061 해결: IConnectedIdRoleRepository의 GetActiveRolesAsync를 사용
-                        return (await _connectedIdRoleRepository.GetActiveRolesAsync(connectedId)).ToList();
-                    }, TimeSpan.FromMinutes(RoleConstants.Limits.CacheDurationMinutes)); // CacheDurationMinutes 사용
-
+            var roleConnections = await _cacheService.GetOrSetAsync(
+                     cacheKey,
+                     async () =>
+                     {
+                         // ⭐️ [수정된 부분]: 세 번째 인자(bool)에 false를 위치 기반으로 추가하고,
+                         // CancellationToken을 네 번째 인자로 올바르게 전달합니다.
+                         return (await _connectedIdRoleRepository.GetActiveRolesAsync(
+                             connectedId,
+                             null,   // Argument 2: Guid? organizationId
+                             false,  // 🚨 Argument 3: bool includeInactive (false = 활성 역할만)
+                             cancellationToken)).ToList();
+                     },
+                     TimeSpan.FromMinutes(RoleConstants.Limits.CacheDurationMinutes),
+                     cancellationToken);
 
             if (roleConnections == null || !roleConnections.Any())
             {
-                return false;
+                return ServiceResult<bool>.Success(false);
             }
 
-            // 2. 연결된 역할 ID 목록 생성
             var roleIds = roleConnections.Select(cr => cr.RoleId).Distinct().ToList();
 
-            // 3. 역할 ID 목록을 기반으로 RoleKey를 가진 역할이 있는지 확인
-            // NOTE: _roleRepository에 RoleIds와 RoleKey를 동시에 쿼리하는 최적화된 메서드가 있어야 이상적입니다.
-            var roles = await _roleRepository.GetByIdsAsync(roleIds); // List<Role>을 반환한다고 가정
+            // CancellationToken 전달
+            var roles = await _roleRepository.GetByIdsAsync(roleIds, cancellationToken);
 
-            // 4. 역할 키를 비교합니다.
-            return roles.Any(r => r.RoleKey.Equals(roleKey, StringComparison.OrdinalIgnoreCase) && r.IsActive);
+            var isInRole = roles.Any(r => r.RoleKey.Equals(roleKey, StringComparison.OrdinalIgnoreCase) && r.IsActive);
+
+            return ServiceResult<bool>.Success(isInRole);
         }
 
         #endregion
 
         #region 기본 CRUD 작업
-
-        /// <summary>
-        /// 역할 생성
-        /// </summary>
-        public async Task<ServiceResult<RoleResponse>> CreateAsync(CreateRoleRequest request)
+        public async Task<ServiceResult<RoleResponse>> CreateAsync(CreateRoleRequest request, CancellationToken cancellationToken = default)
         {
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                // 유효성 검증 (Parameterized Error Messages 적용)
-                if (await _roleRepository.RoleKeyExistsAsync(request.OrganizationId, request.RoleKey))
+                var connectedId = _principalAccessor.ConnectedId; // ⭐️ 작업 주체 확보
+
+                // [플랜 제한 검증]
+                if (await _planRestrictionService.IsRoleLimitExceededAsync(request.OrganizationId, cancellationToken))
+                {
+                    return ServiceResult<RoleResponse>.Failure(
+                        "Role creation failed. Organization limit reached.",
+                        RoleConstants.ErrorCodes.PlanLimitExceeded);
+                }
+
+                if (await _roleRepository.RoleKeyExistsAsync(request.OrganizationId, request.RoleKey, excludeRoleId: null, cancellationToken))
                 {
                     return ServiceResult<RoleResponse>.Failure(
                         string.Format(RoleConstants.ValidationMessages.DUPLICATE_ROLE_KEY, request.RoleKey),
                         RoleConstants.ErrorCodes.DuplicateKey);
                 }
 
-                // 상위 역할 검증
                 if (request.ParentRoleId.HasValue)
                 {
-                    var parentRole = await _roleRepository.GetByIdAsync(request.ParentRoleId.Value);
+                    var parentRole = await _roleRepository.GetByIdAsync(request.ParentRoleId.Value, cancellationToken);
                     if (parentRole == null || parentRole.OrganizationId != request.OrganizationId)
                     {
                         return ServiceResult<RoleResponse>.Failure(
@@ -185,7 +190,6 @@ namespace AuthHive.Auth.Services.Authentication
                     }
                 }
 
-                // 역할 생성
                 var role = new Role
                 {
                     OrganizationId = request.OrganizationId,
@@ -202,216 +206,166 @@ namespace AuthHive.Auth.Services.Authentication
                     IsActive = request.IsActive,
                     Tags = request.Tags,
                     Metadata = request.Metadata,
-                    CreatedAt = DateTime.UtcNow
+                    CreatedAt = _dateTimeProvider.UtcNow // ⭐️ IDateTimeProvider 사용
                 };
 
-                await _unitOfWork.BeginTransactionAsync();
+                var createdRole = await _roleRepository.AddAsync(role, cancellationToken);
 
-                var createdRole = await _roleRepository.AddAsync(role);
-
-                // 초기 권한 할당
+                // 초기 권한 할당 (CancellationToken 전달)
                 if (request.InitialPermissionIds?.Any() == true)
                 {
                     foreach (var permissionId in request.InitialPermissionIds)
                     {
+                        // ⭐️ [오류 해결: CS1503] DateTime? expiresAt 인자에 null 명시
                         await _rolePermissionRepository.AssignPermissionAsync(
-                            createdRole.Id,
-                            permissionId,
-                            Guid.Empty, // TODO: 실제 사용자 ID (Auditable 필드는 모두 채워져야 함)
-                            "Initial permission assignment");
+                            createdRole.Id, permissionId, connectedId,
+                            reason: "Initial permission assignment",
+                            expiresAt: null, // Arg 5: DateTime?
+                            cancellationToken: cancellationToken);
                     }
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                await InvalidateOrganizationRoleCacheAsync(request.OrganizationId, cancellationToken);
 
-                // 캐시 무효화
-                await InvalidateOrganizationRoleCacheAsync(request.OrganizationId);
+                // 감사 로그 (CancellationToken 전달)
+                await LogRoleActionAsync(
+                    connectedId: connectedId, roleId: createdRole.Id, roleKey: createdRole.RoleKey,
+                    actionType: AuditActionType.Create, success: true, message: "Role created successfully.",
+                    cancellationToken: cancellationToken);
 
-                _logger.LogInformation($"Role created: {createdRole.Id} ({createdRole.RoleKey})");
+
+                _logger.LogInformation($"Role created: {createdRole.Id} ({createdRole.RoleKey}) by {connectedId}");
 
                 var response = MapToRoleResponse(createdRole);
                 return ServiceResult<RoleResponse>.Success(response, "Role created successfully.");
             }
+            catch (OperationCanceledException)
+            {
+                await _unitOfWork.RollbackTransactionAsync(CancellationToken.None);
+                throw;
+            }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(CancellationToken.None);
                 _logger.LogError(ex, "Error creating role");
-                return ServiceResult<RoleResponse>.Failure(
-                    "An error occurred while creating the role.",
-                    RoleConstants.ErrorCodes.SystemError);
+
+                await LogRoleActionAsync(
+                    connectedId: _principalAccessor.ConnectedId, roleId: Guid.Empty, roleKey: request.RoleKey,
+                    actionType: AuditActionType.Create, success: false,
+                    message: $"Error creating role: {ex.Message}", errorCode: RoleConstants.ErrorCodes.SystemError,
+                    cancellationToken: CancellationToken.None);
+
+                return ServiceResult<RoleResponse>.Failure("An error occurred while creating the role.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
-        /// <summary>
-        /// ID로 역할 조회
-        /// </summary>
-        public async Task<ServiceResult<RoleDetailResponse>> GetByIdAsync(Guid roleId)
+        public async Task<ServiceResult<RoleDetailResponse>> GetByIdAsync(Guid roleId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"role:detail:{roleId}";
-                var cachedRole = await _cacheService.GetAsync<RoleDetailResponse>(cacheKey);
-                if (cachedRole != null)
-                {
-                    return ServiceResult<RoleDetailResponse>.Success(cachedRole);
-                }
+                var cachedRole = await _cacheService.GetAsync<RoleDetailResponse>(cacheKey, cancellationToken);
+                if (cachedRole != null) return ServiceResult<RoleDetailResponse>.Success(cachedRole);
 
-                var role = await _roleRepository.GetWithRelatedDataAsync(
-                    roleId,
-                    includePermissions: true,
-                    includeUsers: true);
-
+                var role = await _roleRepository.GetWithRelatedDataAsync(roleId, includePermissions: true, includeUsers: true, cancellationToken: cancellationToken);
                 if (role == null)
-                {
                     return ServiceResult<RoleDetailResponse>.NotFound(RoleConstants.ValidationMessages.ROLE_NOT_FOUND);
-                }
 
-                var response = await MapToRoleDetailResponse(role);
+                var response = await MapToRoleDetailResponse(role, cancellationToken);
 
-                // ⭐️ ICacheService.SetAsync 사용
-                await _cacheService.SetAsync(cacheKey, response, TimeSpan.FromMinutes(RoleConstants.Limits.CacheDurationMinutes));
+                await _cacheService.SetAsync(cacheKey, response, TimeSpan.FromMinutes(RoleConstants.Limits.CacheDurationMinutes), cancellationToken);
 
                 return ServiceResult<RoleDetailResponse>.Success(response);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error getting role {roleId}");
-                return ServiceResult<RoleDetailResponse>.Failure(
-                    "An error occurred while retrieving the role.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<RoleDetailResponse>.Failure("An error occurred while retrieving the role.", RoleConstants.ErrorCodes.SystemError);
             }
         }
-        /// <summary>
-        /// 역할 키로 조회
-        /// </summary>
-        public async Task<ServiceResult<RoleDetailResponse>> GetByRoleKeyAsync(Guid organizationId, string roleKey)
+
+        public async Task<ServiceResult<RoleDetailResponse>> GetByRoleKeyAsync(Guid organizationId, string roleKey, CancellationToken cancellationToken = default)
         {
             try
             {
-                var role = await _roleRepository.GetByRoleKeyAsync(organizationId, roleKey);
+                var role = await _roleRepository.GetByRoleKeyAsync(organizationId, roleKey, cancellationToken);
                 if (role == null)
                 {
                     return ServiceResult<RoleDetailResponse>.NotFound(RoleConstants.ValidationMessages.ROLE_NOT_FOUND);
                 }
-
-                return await GetByIdAsync(role.Id);
+                return await GetByIdAsync(role.Id, cancellationToken);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error getting role by key {roleKey}");
-                return ServiceResult<RoleDetailResponse>.Failure(
-                    "An error occurred while retrieving the role.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<RoleDetailResponse>.Failure("An error occurred while retrieving the role.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
-        /// <summary>
-        /// 역할 목록 조회
-        /// </summary>
-        public async Task<ServiceResult<RoleListResponse>> GetRolesAsync(SearchRolesRequest request)
+        public async Task<ServiceResult<RoleListResponse>> GetRolesAsync(SearchRolesRequest request, CancellationToken cancellationToken = default)
         {
             try
             {
                 IEnumerable<Role> roles;
-
-                // Repository 최적화된 메서드 사용
+                // Repository 메서드에 CancellationToken 전달
                 if (request.ConnectedId.HasValue)
                 {
-                    roles = await _roleRepository.GetByConnectedIdAsync(
-                        request.ConnectedId.Value,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
+                    roles = await _roleRepository.GetByConnectedIdAsync(request.ConnectedId.Value, includeInactive: request.IsActive == null || !request.IsActive.Value, cancellationToken);
                 }
                 else if (request.ApplicationId.HasValue)
                 {
-                    roles = await _roleRepository.GetByApplicationAsync(
-                        request.ApplicationId.Value,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
+                    roles = await _roleRepository.GetByApplicationAsync(request.ApplicationId.Value, includeInactive: request.IsActive == null || !request.IsActive.Value, cancellationToken);
                 }
                 else if (request.Scope.HasValue)
                 {
-                    roles = await _roleRepository.GetByScopeAsync(
-                        request.OrganizationId,
-                        request.Scope.Value,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
+                    roles = await _roleRepository.GetByScopeAsync(request.OrganizationId, request.Scope.Value, includeInactive: request.IsActive == null || !request.IsActive.Value, cancellationToken);
                 }
                 else if (request.Level.HasValue)
                 {
-                    roles = await _roleRepository.GetByLevelAsync(
-                        request.OrganizationId,
-                        request.Level.Value,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
+                    roles = await _roleRepository.GetByLevelAsync(request.OrganizationId, request.Level.Value, includeInactive: request.IsActive == null || !request.IsActive.Value, cancellationToken);
                 }
                 else if (request.ParentRoleId.HasValue)
                 {
-                    roles = await _roleRepository.GetChildRolesAsync(
-                        request.ParentRoleId.Value,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
+                    roles = await _roleRepository.GetChildRolesAsync(request.ParentRoleId.Value, includeInactive: request.IsActive == null || !request.IsActive.Value, cancellationToken);
                 }
                 else if (request.HasPermissionId.HasValue)
                 {
-                    roles = await _roleRepository.GetRolesWithPermissionAsync(
-                        request.OrganizationId,
-                        request.HasPermissionId.Value);
+                    roles = await _roleRepository.GetRolesWithPermissionAsync(request.OrganizationId, request.HasPermissionId.Value, cancellationToken);
                 }
                 else
                 {
-                    // 기본: 조직의 모든 역할 조회
-                    roles = await _roleRepository.GetByOrganizationAsync(
-                        request.OrganizationId,
-                        includeInactive: request.IsActive == null || !request.IsActive.Value);
+                    // ⭐️ [오류 해결: CS1061] GetByOrganizationAsync 대신 GetByOrganizationIdAsync 사용
+                    roles = await _roleRepository.GetByOrganizationIdAsync(
+                        organizationId: request.OrganizationId,
+                        startDate: request.CreatedFrom,
+                        endDate: request.CreatedTo,
+                        limit: null,
+                        cancellationToken: cancellationToken);
                 }
 
-                // 추가 필터링 (메모리에서)
+                // ... (나머지 필터링 및 로직 유지) ...
                 var query = roles.AsQueryable();
+                var now = _dateTimeProvider.UtcNow;
 
-                // 검색어 필터
+                // 필터링 로직 유지
                 if (!string.IsNullOrEmpty(request.SearchTerm))
                 {
                     var searchTerm = request.SearchTerm.ToLower();
                     query = query.Where(r =>
-                        r.Name.ToLower().Contains(searchTerm) ||
-                        r.RoleKey.ToLower().Contains(searchTerm) ||
+                        r.Name.ToLower().Contains(searchTerm) || r.RoleKey.ToLower().Contains(searchTerm) ||
                         (r.Description != null && r.Description.ToLower().Contains(searchTerm)));
                 }
+                if (!string.IsNullOrEmpty(request.RoleKey)) query = query.Where(r => r.RoleKey == request.RoleKey);
+                if (request.IsActive.HasValue) query = query.Where(r => r.IsActive == request.IsActive.Value);
+                if (request.OnlyNonExpired == true) query = query.Where(r => !r.ExpiresAt.HasValue || r.ExpiresAt.Value > now);
+                if (request.CreatedFrom.HasValue) query = query.Where(r => r.CreatedAt >= request.CreatedFrom.Value);
+                if (request.CreatedTo.HasValue) query = query.Where(r => r.CreatedAt <= request.CreatedTo.Value);
+                if (!string.IsNullOrEmpty(request.Tags)) query = query.Where(r => r.Tags != null && r.Tags.Contains(request.Tags));
 
-                // RoleKey 필터
-                if (!string.IsNullOrEmpty(request.RoleKey))
-                {
-                    query = query.Where(r => r.RoleKey == request.RoleKey);
-                }
-
-                // IsActive 필터
-                if (request.IsActive.HasValue)
-                {
-                    query = query.Where(r => r.IsActive == request.IsActive.Value);
-                }
-
-                // 만료되지 않은 역할만
-                if (request.OnlyNonExpired == true)
-                {
-                    var now = DateTime.UtcNow;
-                    // ExpiresAt이 HasValue이고, 만료되지 않은 역할만
-                    query = query.Where(r => !r.ExpiresAt.HasValue || r.ExpiresAt.Value > now);
-                }
-
-                // 날짜 범위 필터
-                if (request.CreatedFrom.HasValue)
-                {
-                    query = query.Where(r => r.CreatedAt >= request.CreatedFrom.Value);
-                }
-
-                if (request.CreatedTo.HasValue)
-                {
-                    query = query.Where(r => r.CreatedAt <= request.CreatedTo.Value);
-                }
-
-                // Tags 필터
-                if (!string.IsNullOrEmpty(request.Tags))
-                {
-                    query = query.Where(r => r.Tags != null && r.Tags.Contains(request.Tags));
-                }
-
-                // 정렬
+                // 정렬 (메모리)
                 query = request.SortBy?.ToLower() switch
                 {
                     "name" => request.IsDescending ? query.OrderByDescending(r => r.Name) : query.OrderBy(r => r.Name),
@@ -423,29 +377,18 @@ namespace AuthHive.Auth.Services.Authentication
                     _ => request.IsDescending ? query.OrderByDescending(r => r.Name) : query.OrderBy(r => r.Name)
                 };
 
-                // 전체 개수
                 var totalCount = query.Count();
 
-                // 페이징
-                var pagedItems = query
-                    .Skip((request.PageNumber - 1) * request.PageSize)
-                    .Take(request.PageSize)
-                    .ToList();
+                var pagedItems = query.Skip((request.PageNumber - 1) * request.PageSize).Take(request.PageSize).ToList();
 
-                // 각 역할에 대한 추가 정보 로드 (필요한 경우)
-                if (request.IncludeOptions.HasFlag(RoleIncludeOptions.Permissions) ||
-                    request.IncludeOptions.HasFlag(RoleIncludeOptions.AssignedUsers))
+                if (request.IncludeOptions.HasFlag(RoleIncludeOptions.Permissions) || request.IncludeOptions.HasFlag(RoleIncludeOptions.AssignedUsers))
                 {
                     foreach (var role in pagedItems)
                     {
                         if (request.IncludeOptions.HasFlag(RoleIncludeOptions.Permissions))
-                        {
-                            role.RolePermissions = (await _rolePermissionRepository.GetByRoleAsync(role.Id)).ToList();
-                        }
+                            role.RolePermissions = (await _rolePermissionRepository.GetByRoleAsync(role.Id, cancellationToken: cancellationToken)).ToList();
                         if (request.IncludeOptions.HasFlag(RoleIncludeOptions.AssignedUsers))
-                        {
-                            role.ConnectedIdRoles = (await _connectedIdRoleRepository.GetByRoleAsync(role.Id)).ToList();
-                        }
+                            role.ConnectedIdRoles = (await _connectedIdRoleRepository.GetByRoleAsync(role.Id, cancellationToken: cancellationToken)).ToList();
                     }
                 }
 
@@ -457,17 +400,15 @@ namespace AuthHive.Auth.Services.Authentication
                     PageSize = request.PageSize
                 };
 
-                // AssignedUserCount 추가 (필요시)
                 foreach (var item in response.Items)
                 {
-                    item.AssignedUserCount = await _roleRepository.GetAssignedUserCountAsync(item.Id);
-                    item.PermissionCount = await _roleRepository.GetPermissionCountAsync(item.Id);
+                    item.AssignedUserCount = await _roleRepository.GetAssignedUserCountAsync(item.Id, cancellationToken);
+                    item.PermissionCount = await _roleRepository.GetPermissionCountAsync(item.Id, cancellationToken);
                 }
 
-                // 통계 정보 추가
-                response.Statistics = await GetRoleStatistics(request.OrganizationId);
+                response.Statistics = await GetRoleStatistics(request.OrganizationId, cancellationToken);
+                response.FilterOptions = await BuildFilterOptions(request.OrganizationId, cancellationToken);
 
-                // 검색 요약 추가
                 response.SearchSummary = new SearchSummary
                 {
                     SearchTerm = request.SearchTerm,
@@ -476,17 +417,13 @@ namespace AuthHive.Auth.Services.Authentication
                     AppliedFilterCount = CountAppliedFilters(request)
                 };
 
-                // 필터 옵션 추가
-                response.FilterOptions = await BuildFilterOptions(request.OrganizationId);
-
                 return ServiceResult<RoleListResponse>.Success(response);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error searching roles");
-                return ServiceResult<RoleListResponse>.Failure(
-                    "An error occurred while searching roles.",
-                    "SEARCH_ERROR");
+                return ServiceResult<RoleListResponse>.Failure("An error occurred while searching roles.", "SEARCH_ERROR");
             }
         }
 
@@ -509,13 +446,12 @@ namespace AuthHive.Auth.Services.Authentication
             return count;
         }
 
-        private async Task<FilterOptions> BuildFilterOptions(Guid organizationId)
+        private async Task<FilterOptions> BuildFilterOptions(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var statistics = await _roleRepository.GetStatisticsAsync(organizationId);
+            var statistics = await _roleRepository.GetStatisticsAsync(organizationId, cancellationToken);
 
             return new FilterOptions
             {
-
                 AvailableScopes = statistics.CountByScope
                     .Select(kvp => new FilterOption
                     {
@@ -534,90 +470,73 @@ namespace AuthHive.Auth.Services.Authentication
             };
         }
 
-        /// <summary>
-        /// 역할 업데이트
-        /// </summary>
-        public async Task<ServiceResult<RoleResponse>> UpdateAsync(Guid roleId, UpdateRoleRequest request)
+        public async Task<ServiceResult<RoleResponse>> UpdateAsync(Guid roleId, UpdateRoleRequest request, CancellationToken cancellationToken = default)
         {
             try
             {
-                // RoleId가 request에 있는 경우 검증
                 if (request.RoleId != Guid.Empty && request.RoleId != roleId)
                 {
-                    return ServiceResult<RoleResponse>.Failure(
-                        "Request ID does not match.",
-                        "ID_MISMATCH");
+                    return ServiceResult<RoleResponse>.Failure("Request ID does not match.", "ID_MISMATCH");
                 }
 
-                var role = await _roleRepository.GetByIdAsync(roleId);
+                var role = await _roleRepository.GetByIdAsync(roleId, cancellationToken);
                 if (role == null)
                 {
                     return ServiceResult<RoleResponse>.NotFound(RoleConstants.ValidationMessages.ROLE_NOT_FOUND);
                 }
 
-                // 버전 충돌 검증 (있는 경우)
+                // 버전 충돌 검증 (로직 유지)
                 if (request.RowVersion != null && role.RowVersion != null)
                 {
                     if (!request.RowVersion.SequenceEqual(role.RowVersion))
                     {
-                        return ServiceResult<RoleResponse>.Failure(
-                            "Another user has already modified this. Please try again.",
-                            "CONCURRENCY_ERROR");
+                        return ServiceResult<RoleResponse>.Failure("Another user has already modified this. Please try again.", "CONCURRENCY_ERROR");
                     }
                 }
 
                 // 업데이트
-                if (!string.IsNullOrEmpty(request.Name))
-                    role.Name = request.Name;
-
-                if (request.Description != null)
-                    role.Description = request.Description;
-
-                if (request.Level.HasValue)
-                    role.Level = (PermissionLevel)request.Level.Value;
+                if (!string.IsNullOrEmpty(request.Name)) role.Name = request.Name;
+                if (request.Description != null) role.Description = request.Description;
+                if (request.Level.HasValue) role.Level = (PermissionLevel)request.Level.Value;
 
                 if (request.ParentRoleId.HasValue)
                 {
-                    // 순환 참조 검증
-                    if (await IsCircularReference(roleId, request.ParentRoleId.Value))
+                    // 순환 참조 검증 (CancellationToken 전달)
+                    if (await IsCircularReference(roleId, request.ParentRoleId.Value, cancellationToken))
                     {
-                        return ServiceResult<RoleResponse>.Failure(
-                            RoleConstants.ValidationMessages.CIRCULAR_REFERENCE,
-                            RoleConstants.ErrorCodes.CircularReference);
+                        return ServiceResult<RoleResponse>.Failure(RoleConstants.ValidationMessages.CIRCULAR_REFERENCE, RoleConstants.ErrorCodes.CircularReference);
                     }
                     role.ParentRoleId = request.ParentRoleId;
                 }
 
-                if (request.Priority.HasValue)
-                    role.Priority = request.Priority.Value;
+                if (request.Priority.HasValue) role.Priority = request.Priority.Value;
+                if (request.MaxAssignments.HasValue) role.MaxAssignments = request.MaxAssignments.Value;
+                if (request.ExpiresAt.HasValue) role.ExpiresAt = request.ExpiresAt;
+                if (request.IsActive.HasValue) role.IsActive = request.IsActive.Value;
+                if (!string.IsNullOrEmpty(request.Tags)) role.Tags = request.Tags;
+                if (!string.IsNullOrEmpty(request.Metadata)) role.Metadata = request.Metadata;
 
-                if (request.MaxAssignments.HasValue)
-                    role.MaxAssignments = request.MaxAssignments.Value;
+                role.UpdatedAt = _dateTimeProvider.UtcNow; // ⭐️ IDateTimeProvider 사용
 
-                if (request.ExpiresAt.HasValue)
-                    role.ExpiresAt = request.ExpiresAt;
+                await _roleRepository.UpdateAsync(role, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                if (request.IsActive.HasValue)
-                    role.IsActive = request.IsActive.Value;
+                // 캐시 무효화 (CancellationToken 전달)
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
-                if (!string.IsNullOrEmpty(request.Tags))
-                    role.Tags = request.Tags;
-
-                if (!string.IsNullOrEmpty(request.Metadata))
-                    role.Metadata = request.Metadata;
-
-                role.UpdatedAt = DateTime.UtcNow;
-
-                await _roleRepository.UpdateAsync(role);
-                await _unitOfWork.SaveChangesAsync();
-
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
+                // 감사 로그 (CancellationToken 전달)
+                await LogRoleActionAsync(
+                    _principalAccessor.ConnectedId, roleId, role.RoleKey, AuditActionType.Update, true,
+                    $"Role updated: {request.UpdateReason}", null, cancellationToken);
 
                 _logger.LogInformation($"Role updated: {roleId}. Reason: {request.UpdateReason}");
 
                 var response = MapToRoleResponse(role);
                 return ServiceResult<RoleResponse>.Success(response, "Role updated successfully.");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -628,39 +547,43 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        /// <summary>
-        /// 역할 삭제
-        /// </summary>
-        public async Task<ServiceResult> DeleteAsync(Guid roleId)
+        public async Task<ServiceResult> DeleteAsync(Guid roleId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var role = await _roleRepository.GetByIdAsync(roleId);
+                var role = await _roleRepository.GetByIdAsync(roleId, cancellationToken);
                 if (role == null)
                 {
                     return ServiceResult.Failure(RoleConstants.ValidationMessages.ROLE_NOT_FOUND, RoleConstants.ErrorCodes.RoleNotFound);
                 }
 
-                // 삭제 가능 여부 확인
-                var canDelete = await CanDeleteRoleAsync(roleId);
+                // 삭제 가능 여부 확인 (CancellationToken 전달)
+                var canDelete = await CanDeleteRoleAsync(roleId, cancellationToken);
                 if (!canDelete.IsSuccess || !canDelete.Data)
                 {
-                    // Parameterized Error Message 적용
                     var errorMessage = canDelete.ErrorMessage ?? RoleConstants.ValidationMessages.ROLE_IN_USE;
                     var errorCode = canDelete.ErrorCode ?? RoleConstants.ErrorCodes.RoleInUse;
-
                     return ServiceResult.Failure(errorMessage, errorCode);
                 }
 
-                await _roleRepository.SoftDeleteAsync(roleId);
-                await _unitOfWork.SaveChangesAsync();
+                await _roleRepository.SoftDeleteAsync(roleId, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
-                await InvalidateOrganizationRoleCacheAsync(role.OrganizationId);
+                // 캐시 무효화 (CancellationToken 전달)
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
+                await InvalidateOrganizationRoleCacheAsync(role.OrganizationId, cancellationToken);
+
+                // 감사 로그 (CancellationToken 전달)
+                await LogRoleActionAsync(_principalAccessor.ConnectedId, roleId, role.RoleKey, AuditActionType.Delete, true,
+                    "Role soft deleted successfully.", null, cancellationToken);
+
                 _logger.LogInformation($"Role deleted: {roleId}");
 
                 return ServiceResult.Success("Role deleted successfully.");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -675,14 +598,11 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 계층 구조 관리
 
-        /// <summary>
-        /// 하위 역할 조회
-        /// </summary>
-        public async Task<ServiceResult<IEnumerable<RoleDto>>> GetChildRolesAsync(Guid parentRoleId)
+        public async Task<ServiceResult<IEnumerable<RoleDto>>> GetChildRolesAsync(Guid parentRoleId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var childRoles = await _roleRepository.GetChildRolesAsync(parentRoleId);
+                var childRoles = await _roleRepository.GetChildRolesAsync(parentRoleId, cancellationToken: cancellationToken);
                 var roleDtos = childRoles.Select(r => new RoleDto
                 {
                     Id = r.Id,
@@ -695,25 +615,21 @@ namespace AuthHive.Auth.Services.Authentication
 
                 return ServiceResult<IEnumerable<RoleDto>>.Success(roleDtos);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error getting child roles for {parentRoleId}");
-                return ServiceResult<IEnumerable<RoleDto>>.Failure(
-                    "An error occurred while retrieving child roles.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<IEnumerable<RoleDto>>.Failure("An error occurred while retrieving child roles.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
-        /// <summary>
-        /// 역할 이동 (계층 구조 변경)
-        /// </summary>
-        public async Task<ServiceResult> MoveRoleAsync(Guid roleId, Guid? newParentId, Guid movedByConnectedId)
+        public async Task<ServiceResult> MoveRoleAsync(Guid roleId, Guid? newParentId, Guid movedByConnectedId, CancellationToken cancellationToken = default)
         {
-            Role? role = null; //
+            Role? role = null;
 
             try
             {
-                role = await _roleRepository.GetByIdAsync(roleId); // ⭐️ 외부 변수에 할당
+                role = await _roleRepository.GetByIdAsync(roleId, cancellationToken);
                 if (role == null)
                 {
                     return ServiceResult.Failure(RoleConstants.ValidationMessages.ROLE_NOT_FOUND, RoleConstants.ErrorCodes.RoleNotFound);
@@ -721,148 +637,126 @@ namespace AuthHive.Auth.Services.Authentication
 
                 Guid? oldParentId = role.ParentRoleId;
 
-                // 순환 참조 검증
+                // 순환 참조 검증 (CancellationToken 전달)
                 if (newParentId.HasValue)
                 {
-                    if (await IsCircularReference(roleId, newParentId.Value))
+                    if (await IsCircularReference(roleId, newParentId.Value, cancellationToken))
                     {
-                        // ⭐️ 감사 로그: 실패 기록 (순환 참조)
-                        await LogRoleActionAsync(
-                            movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update,
-                            false, "Circular reference detected.", RoleConstants.ErrorCodes.CircularReference);
-
-                        return ServiceResult.Failure(
-                            RoleConstants.ValidationMessages.CIRCULAR_REFERENCE,
-                            RoleConstants.ErrorCodes.CircularReference);
+                        await LogRoleActionAsync(movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update, false,
+                            "Circular reference detected.", RoleConstants.ErrorCodes.CircularReference, cancellationToken);
+                        return ServiceResult.Failure(RoleConstants.ValidationMessages.CIRCULAR_REFERENCE, RoleConstants.ErrorCodes.CircularReference);
                     }
                 }
 
                 role.ParentRoleId = newParentId;
-                role.UpdatedAt = DateTime.UtcNow;
+                role.UpdatedAt = _dateTimeProvider.UtcNow; // ⭐️ IDateTimeProvider 사용
 
-                await _roleRepository.UpdateAsync(role);
-                await _unitOfWork.SaveChangesAsync();
+                await _roleRepository.UpdateAsync(role, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                await InvalidateRoleCacheAsync(roleId);
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
-                // ⭐️ 감사 로그: 성공 기록
-                await LogRoleActionAsync(
-                    movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update,
-                    true, $"ParentRoleId changed from {oldParentId} to {newParentId}.");
+                // 감사 로그 (CancellationToken 전달)
+                await LogRoleActionAsync(movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update, true,
+                    $"ParentRoleId changed from {oldParentId} to {newParentId}.", cancellationToken: cancellationToken);
 
                 _logger.LogInformation($"Role {roleId} moved to parent {newParentId}");
 
                 return ServiceResult.Success("Role moved successfully.");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error moving role {roleId}");
 
-                // ⭐️ 감사 로그: 시스템 에러 기록 (null 검사 후 호출)
-                // role이 null이 아니거나, 시스템 에러 로그에 필요한 최소한의 정보가 있을 때만 호출
                 if (role != null)
                 {
-                    await LogRoleActionAsync(
-                        movedByConnectedId,
-                        roleId,
-                        role.RoleKey, // ⭐️ 수정됨: role 객체 참조를 통해 접근
-                        AuditActionType.Update,
-                        false,
-                        $"System error: {ex.Message}",
-                        RoleConstants.ErrorCodes.SystemError
-                    );
+                    await LogRoleActionAsync(movedByConnectedId, roleId, role.RoleKey, AuditActionType.Update, false,
+                        $"System error: {ex.Message}", RoleConstants.ErrorCodes.SystemError, CancellationToken.None);
                 }
 
-                return ServiceResult.Failure(
-                    "An error occurred while moving the role.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult.Failure("An error occurred while moving the role.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
         #endregion
 
         #region 권한 관리 (RolePermission)
+        // RoleService.cs (AssignPermissionAsync 메서드 내부)
 
         /// <summary>
-        /// 단일 권한 할당
-        /// </summary>
-        public async Task<ServiceResult> AssignPermissionAsync(Guid roleId, Guid permissionId)
+                /// 단일 권한 할당
+                /// </summary>
+        public async Task<ServiceResult> AssignPermissionAsync(Guid roleId, Guid permissionId, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 이미 할당되어 있는지 확인
-                if (await _rolePermissionRepository.ExistsAsync(roleId, permissionId))
+                // 이미 할당되어 있는지 확인
+                if (await _rolePermissionRepository.ExistsAsync(roleId, permissionId, cancellationToken))
                 {
                     return ServiceResult.Success("Permission is already assigned.");
                 }
 
+                // ⭐️ 수정된 부분: expiresAt 인자(DateTime?)에 null을 명시적으로 전달
                 await _rolePermissionRepository.AssignPermissionAsync(
-                    roleId,
-                    permissionId,
-                    Guid.Empty, // TODO: 실제 사용자 ID
-                    "Permission assigned");
+                          roleId,
+                          permissionId,
+                          _principalAccessor.ConnectedId,
+                          reason: "Permission assigned",
+                          expiresAt: null, // 🚨 Argument 5: DateTime?
+                                    cancellationToken: cancellationToken); // Argument 6: CancellationToken
 
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
+                // 캐시 무효화
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
                 _logger.LogInformation($"Permission {permissionId} assigned to role {roleId}");
 
                 return ServiceResult.Success("Permission assigned successfully.");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error assigning permission {permissionId} to role {roleId}");
                 return ServiceResult.Failure(
-                    "An error occurred while assigning the permission.",
-                    RoleConstants.ErrorCodes.SystemError);
+                  "An error occurred while assigning the permission.",
+                  RoleConstants.ErrorCodes.SystemError);
             }
         }
+        // RoleService.cs (RemovePermissionAsync 메서드 내부)
 
-        /// <summary>
-        /// 권한 제거
-        /// </summary>
-        public async Task<ServiceResult> RemovePermissionAsync(Guid roleId, Guid permissionId)
+        public async Task<ServiceResult> RemovePermissionAsync(Guid roleId, Guid permissionId, CancellationToken cancellationToken = default)
         {
             try
             {
+                // ⭐️ 오류 해결: reason과 cancellationToken 사이에 누락된 DateTime? 인자(null)를 채워 넣습니다.
                 var removed = await _rolePermissionRepository.RemovePermissionAsync(
                     roleId,
                     permissionId,
-                    "Permission removed");
+                    reason: "Permission removed",
+                    cancellationToken: cancellationToken);
 
                 if (!removed)
-                {
                     return ServiceResult.Failure(
                         PermissionConstants.ValidationMessages.PERMISSION_NOT_FOUND,
                         PermissionConstants.ErrorCodes.PermissionNotFound);
-                }
 
-                await _unitOfWork.SaveChangesAsync();
-
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
                 _logger.LogInformation($"Permission {permissionId} removed from role {roleId}");
-
                 return ServiceResult.Success("Permission removed successfully.");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error removing permission {permissionId} from role {roleId}");
-                return ServiceResult.Failure(
-                    "An error occurred while removing the permission.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult.Failure("An error occurred while removing the permission.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
-        /// <summary>
-        /// 대량 권한 할당
-        /// </summary>
-        public async Task<ServiceResult<BulkPermissionAssignResponse>> AssignPermissionsBulkAsync(
-            Guid roleId,
-            List<Guid> permissionIds)
+        public async Task<ServiceResult<BulkPermissionAssignResponse>> AssignPermissionsBulkAsync(Guid roleId, List<Guid> permissionIds, CancellationToken cancellationToken = default)
         {
             var response = new BulkPermissionAssignResponse
             {
@@ -870,70 +764,52 @@ namespace AuthHive.Auth.Services.Authentication
                 Results = new List<PermissionAssignmentResult>()
             };
 
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
+
             try
             {
-                await _unitOfWork.BeginTransactionAsync();
-
                 foreach (var permissionId in permissionIds)
                 {
-                    var result = new PermissionAssignmentResult
-                    {
-                        PermissionId = permissionId
-                    };
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var result = new PermissionAssignmentResult { PermissionId = permissionId };
 
                     try
                     {
-                        var permission = await _permissionRepository.GetByIdAsync(permissionId);
+                        var permission = await _permissionRepository.GetByIdAsync(permissionId, cancellationToken);
                         if (permission == null)
                         {
-                            result.IsSuccess = false;
-                            result.Status = AssignmentStatus.PermissionNotFound;
-                            result.Reason = PermissionConstants.ValidationMessages.PERMISSION_NOT_FOUND;
-                            result.ErrorCode = PermissionConstants.ErrorCodes.PermissionNotFound;
-                            response.Summary.Failed++;
+                            result.IsSuccess = false; result.Status = AssignmentStatus.PermissionNotFound; result.Reason = PermissionConstants.ValidationMessages.PERMISSION_NOT_FOUND;
+                            result.ErrorCode = PermissionConstants.ErrorCodes.PermissionNotFound; response.Summary.Failed++;
                         }
                         else
                         {
-                            result.PermissionScope = permission.Scope;
-                            result.PermissionName = permission.Name;
+                            result.PermissionScope = permission.Scope; result.PermissionName = permission.Name;
 
-                            if (await _rolePermissionRepository.ExistsAsync(roleId, permissionId))
+                            if (await _rolePermissionRepository.ExistsAsync(roleId, permissionId, cancellationToken))
                             {
-                                result.IsSuccess = true;
-                                result.Status = AssignmentStatus.AlreadyAssigned;
-                                result.Reason = "Already assigned.";
+                                result.IsSuccess = true; result.Status = AssignmentStatus.AlreadyAssigned; result.Reason = "Already assigned.";
                                 response.Summary.AlreadyExists++;
                             }
                             else
                             {
-                                await _rolePermissionRepository.AssignPermissionAsync(
-                                    roleId,
-                                    permissionId,
-                                    Guid.Empty, // TODO: 실제 사용자 ID
-                                    "Bulk assignment");
-
-                                result.IsSuccess = true;
-                                result.Status = AssignmentStatus.Assigned;
+                                await _rolePermissionRepository.AssignPermissionAsync(roleId, permissionId, _principalAccessor.ConnectedId, "Bulk assignment", null, cancellationToken); // ⭐️ PrincipalAccessor 사용
+                                result.IsSuccess = true; result.Status = AssignmentStatus.Assigned;
                                 response.Summary.SuccessfullyAssigned++;
                             }
                         }
                     }
+                    catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
-                        result.IsSuccess = false;
-                        result.Status = AssignmentStatus.SystemError;
-                        result.Reason = ex.Message;
-                        result.ErrorCode = RoleConstants.ErrorCodes.SystemError;
-                        response.Summary.Failed++;
+                        result.IsSuccess = false; result.Status = AssignmentStatus.SystemError; result.Reason = ex.Message;
+                        result.ErrorCode = RoleConstants.ErrorCodes.SystemError; response.Summary.Failed++;
                     }
 
                     response.Results.Add(result);
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
-
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
                 response.Success = response.Summary.Failed == 0;
                 response.PartialSuccess = response.Summary.SuccessfullyAssigned > 0 && response.Summary.Failed > 0;
@@ -942,102 +818,81 @@ namespace AuthHive.Auth.Services.Authentication
 
                 return ServiceResult<BulkPermissionAssignResponse>.Success(response);
             }
+            catch (OperationCanceledException)
+            {
+                await _unitOfWork.RollbackTransactionAsync(CancellationToken.None); throw;
+            }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(CancellationToken.None);
                 _logger.LogError(ex, $"Error in bulk permission assignment for role {roleId}");
-                return ServiceResult<BulkPermissionAssignResponse>.Failure(
-                    "An error occurred during bulk permission assignment.",
-                    RoleConstants.ErrorCodes.BulkLimitExceeded); // BULK_ASSIGN_ERROR 대신 명확한 에러 코드 사용
+                return ServiceResult<BulkPermissionAssignResponse>.Failure("An error occurred during bulk permission assignment.", RoleConstants.ErrorCodes.BulkLimitExceeded);
             }
         }
+        // RoleService.cs (ReplacePermissionsAsync 메서드 내부)
 
-        /// <summary>
-        /// 권한 교체
-        /// </summary>
-        public async Task<ServiceResult<RolePermissionReplaceResult>> ReplacePermissionsAsync(
-            Guid roleId,
-            List<Guid> permissionIds)
+        public async Task<ServiceResult<RolePermissionReplaceResult>> ReplacePermissionsAsync(Guid roleId, List<Guid> permissionIds, CancellationToken cancellationToken = default)
         {
             var result = new RolePermissionReplaceResult();
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
 
             try
             {
-                await _unitOfWork.BeginTransactionAsync();
-
-                // 기존 권한 조회
-                var existingPermissions = await _rolePermissionRepository.GetByRoleAsync(roleId);
+                var existingPermissions = await _rolePermissionRepository.GetByRoleAsync(roleId, cancellationToken: cancellationToken);
                 var existingPermissionIds = existingPermissions.Select(rp => rp.PermissionId).ToHashSet();
 
-                // 추가할 권한
                 var toAdd = permissionIds.Where(id => !existingPermissionIds.Contains(id)).ToList();
-
-                // 제거할 권한
                 var toRemove = existingPermissionIds.Where(id => !permissionIds.Contains(id)).ToList();
 
-                // 권한 제거
+                // ⭐️ [오류 해결: RemovePermissionAsync] (Line 802)
                 foreach (var permissionId in toRemove)
                 {
-                    await _rolePermissionRepository.RemovePermissionAsync(roleId, permissionId, "Replace operation");
+                    await _rolePermissionRepository.RemovePermissionAsync(
+                        roleId,
+                        permissionId,
+                        reason: "Replace operation",
+                        cancellationToken: cancellationToken);
                     result.RemovedPermissionIds.Add(permissionId);
                 }
                 result.RemovedCount = toRemove.Count;
 
-                // 권한 추가
+                // ⭐️ [오류 해결: AssignPermissionAsync] (Line 862)
                 foreach (var permissionId in toAdd)
                 {
                     await _rolePermissionRepository.AssignPermissionAsync(
                         roleId,
                         permissionId,
-                        Guid.Empty, // TODO: 실제 사용자 ID
-                        "Replace operation");
+                        _principalAccessor.ConnectedId,
+                        reason: "Replace operation",
+                        expiresAt: null, // DateTime? 인자 자리에 null 명시
+                        cancellationToken: cancellationToken);
                     result.AddedPermissionIds.Add(permissionId);
                 }
                 result.AddedCount = toAdd.Count;
 
                 result.UnchangedCount = existingPermissionIds.Intersect(permissionIds).Count();
 
-                await _unitOfWork.CommitTransactionAsync();
-
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
                 result.Success = true;
-                result.ProcessedAt = DateTime.UtcNow;
+                result.ProcessedAt = _dateTimeProvider.UtcNow;
 
-                return ServiceResult<RolePermissionReplaceResult>.Success(
-                    result,
-                    $"{result.AddedCount} added, {result.RemovedCount} removed, {result.UnchangedCount} unchanged");
+                return ServiceResult<RolePermissionReplaceResult>.Success(result, $"{result.AddedCount} added, {result.RemovedCount} removed, {result.UnchangedCount} unchanged");
             }
+            catch (OperationCanceledException) { await _unitOfWork.RollbackTransactionAsync(CancellationToken.None); throw; }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(CancellationToken.None);
                 _logger.LogError(ex, $"Error replacing permissions for role {roleId}");
-                return ServiceResult<RolePermissionReplaceResult>.Failure(
-                    "An error occurred while replacing permissions.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<RolePermissionReplaceResult>.Failure("An error occurred while replacing permissions.", RoleConstants.ErrorCodes.SystemError);
             }
         }
-
-        /// <summary>
-        /// 역할의 권한 조회
-        /// </summary>
-        /// <summary>
-        /// 역할의 권한 조회
-        /// </summary>
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetPermissionsAsync(
-            Guid roleId,
-            bool includeInherited = false,
-            CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetPermissionsAsync(Guid roleId, bool includeInherited = false, CancellationToken cancellationToken = default)
         {
             try
             {
-                var rolePermissions = await _rolePermissionRepository.GetByRoleAsync(
-                    roleId,
-                    activeOnly: true,
-                    includeInherited: includeInherited,
-                    cancellationToken: cancellationToken);
-
+                var rolePermissions = await _rolePermissionRepository.GetByRoleAsync(roleId, activeOnly: true, includeInherited: includeInherited, cancellationToken: cancellationToken);
                 var permissionDtos = new List<PermissionDto>();
 
                 foreach (var rp in rolePermissions)
@@ -1055,119 +910,98 @@ namespace AuthHive.Auth.Services.Authentication
                         });
                     }
                 }
-
                 return ServiceResult<IEnumerable<PermissionDto>>.Success(permissionDtos);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error getting permissions for role {roleId}");
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
-                    "An error occurred while retrieving permissions.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<IEnumerable<PermissionDto>>.Failure("An error occurred while retrieving permissions.", RoleConstants.ErrorCodes.SystemError);
             }
         }
         #endregion
 
         #region 상태 및 유효성 검증
 
-        /// <summary>
-        /// 역할 활성/비활성 설정
-        /// </summary>
-        public async Task<ServiceResult> SetActiveStateAsync(Guid roleId, bool isActive)
+        public async Task<ServiceResult> SetActiveStateAsync(Guid roleId, bool isActive, CancellationToken cancellationToken = default)
         {
             try
             {
-                var role = await _roleRepository.GetByIdAsync(roleId);
+                var role = await _roleRepository.GetByIdAsync(roleId, cancellationToken);
                 if (role == null)
                 {
                     return ServiceResult.Failure(RoleConstants.ValidationMessages.ROLE_NOT_FOUND, RoleConstants.ErrorCodes.RoleNotFound);
                 }
 
                 role.IsActive = isActive;
-                role.UpdatedAt = DateTime.UtcNow;
+                role.UpdatedAt = _dateTimeProvider.UtcNow; // ⭐️ IDateTimeProvider 사용
 
-                await _roleRepository.UpdateAsync(role);
-                await _unitOfWork.SaveChangesAsync();
+                await _roleRepository.UpdateAsync(role, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                // 캐시 무효화
-                await InvalidateRoleCacheAsync(roleId);
+                await InvalidateRoleCacheAsync(roleId, cancellationToken);
 
                 _logger.LogInformation($"Role {roleId} active state set to {isActive}");
 
                 return ServiceResult.Success($"Role {(isActive ? "activated" : "deactivated")} successfully.");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error setting active state for role {roleId}");
-                return ServiceResult.Failure(
-                    "An error occurred while changing role status.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult.Failure("An error occurred while changing role status.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
-        /// <summary>
-        /// 역할 키 유효성 검증
-        /// </summary>
-        public async Task<ServiceResult<bool>> ValidateRoleKeyAsync(
-            Guid organizationId,
-            string roleKey,
-            Guid? excludeRoleId = null)
+        public async Task<ServiceResult<bool>> ValidateRoleKeyAsync(Guid organizationId, string roleKey, Guid? excludeRoleId = null, CancellationToken cancellationToken = default)
         {
             try
             {
-                var exists = await _roleRepository.RoleKeyExistsAsync(organizationId, roleKey);
+                var exists = await _roleRepository.RoleKeyExistsAsync(organizationId, roleKey, cancellationToken: cancellationToken);
 
                 if (excludeRoleId.HasValue && exists)
                 {
-                    var existingRole = await _roleRepository.GetByRoleKeyAsync(organizationId, roleKey);
+                    var existingRole = await _roleRepository.GetByRoleKeyAsync(organizationId, roleKey, cancellationToken);
                     if (existingRole?.Id == excludeRoleId.Value)
                     {
                         exists = false;
                     }
                 }
-
                 return ServiceResult<bool>.Success(!exists);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error validating role key {roleKey}");
-                return ServiceResult<bool>.Failure(
-                    "An error occurred while validating the role key.",
-                    RoleConstants.ErrorCodes.ValidationFailed);
+                return ServiceResult<bool>.Failure("An error occurred while validating the role key.", RoleConstants.ErrorCodes.ValidationFailed);
             }
         }
 
-        /// <summary>
-        /// 역할 삭제 가능 여부 확인
-        /// </summary>
-        public async Task<ServiceResult<bool>> CanDeleteRoleAsync(Guid roleId)
+        public async Task<ServiceResult<bool>> CanDeleteRoleAsync(Guid roleId, CancellationToken cancellationToken = default)
         {
             try
             {
-                // 하위 역할 확인
-                var childRoles = await _roleRepository.GetChildRolesAsync(roleId);
-                var hasChildRoles = childRoles.Any();
-                if (hasChildRoles)
+                // 하위 역할 확인 (CancellationToken 전달)
+                var childRoles = await _roleRepository.GetChildRolesAsync(roleId, cancellationToken: cancellationToken);
+                if (childRoles.Any())
                 {
                     return ServiceResult<bool>.Success(false, RoleConstants.ValidationMessages.HAS_CHILD_ROLES);
                 }
 
-                // 할당된 사용자 확인
-                var assignedUsers = await _connectedIdRoleRepository.GetByRoleAsync(roleId);
-                var userCount = assignedUsers.Count();
+                // 할당된 사용자 확인 (CancellationToken 전달)
+                var userCount = await _roleRepository.GetAssignedUserCountAsync(roleId, cancellationToken);
+
                 if (userCount > 0)
                 {
                     return ServiceResult<bool>.Success(false, RoleConstants.ValidationMessages.ROLE_IN_USE);
                 }
-
                 return ServiceResult<bool>.Success(true);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error checking if role {roleId} can be deleted");
-                return ServiceResult<bool>.Failure(
-                    "An error occurred while checking deletion availability.",
-                    RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<bool>.Failure("An error occurred while checking deletion availability.", RoleConstants.ErrorCodes.SystemError);
             }
         }
 
@@ -1177,6 +1011,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         private RoleResponse MapToRoleResponse(Role role)
         {
+            // ... (로직 유지)
             return new RoleResponse
             {
                 Id = role.Id,
@@ -1195,7 +1030,7 @@ namespace AuthHive.Auth.Services.Authentication
             };
         }
 
-        private async Task<RoleDetailResponse> MapToRoleDetailResponse(Role role)
+        private async Task<RoleDetailResponse> MapToRoleDetailResponse(Role role, CancellationToken cancellationToken = default)
         {
             var response = new RoleDetailResponse
             {
@@ -1212,63 +1047,45 @@ namespace AuthHive.Auth.Services.Authentication
                 ParentRoleId = role.ParentRoleId,
                 MaxAssignments = role.MaxAssignments,
                 ExpiresAt = role.ExpiresAt,
-                CreatedInfo = new AuditInfo
-                {
-                    At = role.CreatedAt
-                }
+                CreatedInfo = new AuditInfo { At = role.CreatedAt },
+                Permissions = new List<PermissionInfo>()
             };
 
-            if (role.UpdatedAt.HasValue)
-            {
-                response.UpdatedInfo = new AuditInfo
-                {
-                    At = role.UpdatedAt.Value
-                };
-            }
+            if (role.UpdatedAt.HasValue) response.UpdatedInfo = new AuditInfo { At = role.UpdatedAt.Value };
 
-            // Tags 파싱
+            // Tags/Metadata 파싱 (로직 유지)
             if (!string.IsNullOrEmpty(role.Tags))
-            {
-                try
-                {
-                    response.Tags = JsonSerializer.Deserialize<List<string>>(role.Tags) ?? new List<string>();
-                }
-                catch { }
-            }
-
-            // Metadata 파싱
+                try { response.Tags = JsonSerializer.Deserialize<List<string>>(role.Tags) ?? new List<string>(); } catch { }
             if (!string.IsNullOrEmpty(role.Metadata))
-            {
-                try
-                {
-                    response.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(role.Metadata);
-                }
-                catch { }
-            }
+                try { response.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(role.Metadata); } catch { }
 
-            // 권한 정보
+            // 권한 정보 로드 (CancellationToken 전달)
             if (role.RolePermissions?.Any() == true)
             {
                 foreach (var rp in role.RolePermissions)
                 {
-                    var permission = await _permissionRepository.GetByIdAsync(rp.PermissionId);
+                    // ⭐️ 오류 해결: IPermissionRepository.GetByIdAsync의 5개 인자 시그니처 준수
+                    var permission = await _permissionRepository.GetByIdAsync(
+                      rp.PermissionId,
+                      cancellationToken); // Argument 2: CancellationToken
+
                     if (permission != null)
-                    {
-                        response.Permissions.Add(new PermissionInfo
+                        if (permission != null)
                         {
-                            Id = permission.Id,
-                            Scope = permission.Scope,
-                            Name = permission.Name,
-                            Description = permission.Description,
-                            IsInherited = rp.InheritedFromId.HasValue,
-                            InheritedFromRoleId = rp.InheritedFromId,
-                            ExpiresAt = rp.ExpiresAt
-                        });
-                    }
+                            response.Permissions.Add(new PermissionInfo
+                            {
+                                Id = permission.Id,
+                                Scope = permission.Scope,
+                                Name = permission.Name,
+                                Description = permission.Description,
+                                IsInherited = rp.InheritedFromId.HasValue,
+                                InheritedFromRoleId = rp.InheritedFromId,
+                                ExpiresAt = rp.ExpiresAt
+                            });
+                        }
                 }
             }
 
-            // 통계
             response.Statistics = new RoleDetailStatistics
             {
                 TotalPermissions = response.Permissions.Count,
@@ -1277,102 +1094,87 @@ namespace AuthHive.Auth.Services.Authentication
                 ChildRoleCount = role.ChildRoles?.Count ?? 0
             };
 
-            // 현재 할당 수
-            var assignedUsers = await _connectedIdRoleRepository.GetByRoleAsync(role.Id);
-            response.CurrentAssignments = assignedUsers.Count();
+            // 현재 할당 수 (CancellationToken 전달)
+            response.CurrentAssignments = await _roleRepository.GetAssignedUserCountAsync(role.Id, cancellationToken);
 
             return response;
         }
 
-        private async Task<RoleListStatistics> GetRoleStatistics(Guid organizationId)
+        // RoleService.cs (GetRoleStatistics 메서드)
+
+        private async Task<RoleListStatistics> GetRoleStatistics(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var allRoles = await _roleRepository.GetByOrganizationAsync(organizationId, includeInactive: true);
+            // ⭐️ [수정된 부분]: GetByOrganizationAsync 대신 GetByOrganizationIdAsync 사용
+            var allRoles = await _roleRepository.GetByOrganizationIdAsync(
+                organizationId: organizationId,
+                startDate: null,
+                endDate: null,
+                limit: null,
+                cancellationToken: cancellationToken);
+
             var rolesList = allRoles.ToList();
+            var now = _dateTimeProvider.UtcNow;
 
             return new RoleListStatistics
             {
                 TotalRoles = rolesList.Count,
                 ActiveRoles = rolesList.Count(r => r.IsActive),
                 InactiveRoles = rolesList.Count(r => !r.IsActive),
-                ExpiredRoles = rolesList.Count(r => r.ExpiresAt.HasValue && r.ExpiresAt.Value < DateTime.UtcNow),
-                RolesByScope = rolesList.GroupBy(r => r.Scope.ToString())
-                    .ToDictionary(g => g.Key, g => g.Count()),
-                RolesByLevel = rolesList.GroupBy(r => (int)r.Level)
-                    .ToDictionary(g => g.Key, g => g.Count())
+                ExpiredRoles = rolesList.Count(r => r.ExpiresAt.HasValue && r.ExpiresAt.Value < now),
+                RolesByScope = rolesList.GroupBy(r => r.Scope.ToString()).ToDictionary(g => g.Key, g => g.Count()),
+                RolesByLevel = rolesList.GroupBy(r => (int)r.Level).ToDictionary(g => g.Key, g => g.Count())
             };
         }
 
-        private async Task<bool> IsCircularReference(Guid roleId, Guid newParentId)
+        private async Task<bool> IsCircularReference(Guid roleId, Guid newParentId, CancellationToken cancellationToken = default)
         {
             var current = newParentId;
             var visited = new HashSet<Guid>();
 
             while (current != Guid.Empty)
             {
-                if (current == roleId || visited.Contains(current))
-                    return true;
-
+                if (current == roleId || visited.Contains(current)) return true;
                 visited.Add(current);
-                var parent = await _roleRepository.GetByIdAsync(current);
+                var parent = await _roleRepository.GetByIdAsync(current, cancellationToken);
                 current = parent?.ParentRoleId ?? Guid.Empty;
             }
-
             return false;
         }
 
-        private async Task InvalidateRoleCacheAsync(Guid roleId)
+        private async Task InvalidateRoleCacheAsync(Guid roleId, CancellationToken cancellationToken = default)
         {
-            // ICacheService의 RemoveAsync 사용
-            await _cacheService.RemoveAsync($"role:detail:{roleId}");
-            await _cacheService.RemoveAsync($"role:{roleId}");
-            await _cacheService.RemoveAsync($"role:{roleId}:permissions");
+            await _cacheService.RemoveAsync($"role:detail:{roleId}", cancellationToken);
+            await _cacheService.RemoveAsync($"role:{roleId}", cancellationToken);
+            await _cacheService.RemoveAsync($"role:{roleId}:permissions", cancellationToken);
         }
 
-        private async Task InvalidateOrganizationRoleCacheAsync(Guid organizationId)
+        private async Task InvalidateOrganizationRoleCacheAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // ICacheService의 RemoveAsync 사용
-            await _cacheService.RemoveAsync($"org:{organizationId}:roles");
-            await _cacheService.RemoveAsync($"org:{organizationId}:role:stats");
+            await _cacheService.RemoveAsync($"org:{organizationId}:roles", cancellationToken);
+            await _cacheService.RemoveAsync($"org:{organizationId}:role:stats", cancellationToken);
         }
 
-        // RoleService.cs 내 Private Methods 영역에 추가된 메서드
-
-        /// <summary>
-        /// 역할 관련 활동을 감사 로그에 기록하는 헬퍼 메서드
-        /// IAuditService의 Dictionary<string, object>? metadata를 받는 오버로드를 사용합니다.
-        /// </summary>
         // Private Methods 영역에 정의된 최종 LogRoleActionAsync 헬퍼 메서드
         private async Task LogRoleActionAsync(
             Guid connectedId,
             Guid roleId,
-            string? roleKey, // ⭐️ 이 값을 사용합니다.
+            string? roleKey,
             AuditActionType actionType,
             bool success,
             string message,
-            string? errorCode = null)
+            string? errorCode = null,
+            CancellationToken cancellationToken = default)
         {
             var metadata = new Dictionary<string, object>
-    {
-        { "RoleId", roleId },
-        { "RoleKey", roleKey ?? "N/A" }, // 💡 roleKey를 참조하여 오류를 해결함
-        { "Details", message }
-    };
-
-            if (!success && errorCode != null)
             {
-                metadata.Add("ErrorCode", errorCode);
-            }
+                { "RoleId", roleId }, { "RoleKey", roleKey ?? "N/A" }, { "Details", message }
+            };
+            if (!success && errorCode != null) metadata.Add("ErrorCode", errorCode);
 
-            // IAuditService의 오버로드를 사용하여 감사 로그 기록
             await _auditService.LogActionAsync(
-                actionType: actionType,
-                action: $"{actionType.ToString()} Role",
-                connectedId: connectedId,
-                success: success,
-                errorMessage: success ? null : message,
-                resourceType: "Role",
-                resourceId: roleId.ToString(),
-                metadata: metadata
+                actionType: actionType, action: $"{actionType.ToString()} Role", connectedId: connectedId,
+                success: success, errorMessage: success ? null : message, resourceType: "Role",
+                resourceId: roleId.ToString(), metadata: metadata, cancellationToken: cancellationToken
             );
         }
 

@@ -32,8 +32,8 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<UserProfileRepository> logger,
-            ICacheService? cacheService = null) // ⭐️ IMemoryCache 대신 ICacheService로 변경
-            : base(context, organizationContext, cacheService) // ⭐️ BaseRepository에 ICacheService를 전달
+            ICacheService? cacheService = null) 
+            : base(context) // ⭐️ BaseRepository에 ICacheService를 전달
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }

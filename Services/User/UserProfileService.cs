@@ -184,7 +184,7 @@ namespace AuthHive.Auth.Services.User
                 {
                     return ServiceResult<UserProfileDto>.NotFound($"Profile not found for user: {userId}");
                 }
-                // 🚨 CS0023 해결: ServiceResult가 성공하지 못했거나, 데이터가 false인 경우 접근을 거부합니다.
+               
                 if (!isMemberResult.IsSuccess || isMemberResult.Data == false)
                 {
                     _logger.LogWarning("Forbidden access attempt: Org {requestingOrgId} tried to access user {userId} from another organization.", requestingOrgId, userId);
