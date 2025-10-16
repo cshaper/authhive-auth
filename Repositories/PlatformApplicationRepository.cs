@@ -1,126 +1,97 @@
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
+using AuthHive.Core.Entities.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Models.Common;
-using AuthHive.Core.Interfaces.Base;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
+using System.Threading;
 using System.Threading.Tasks;
-
-// 엔티티 별칭
+// 엔티티 별칭 사용
 using PlatformApplicationEntity = AuthHive.Core.Entities.PlatformApplications.PlatformApplication;
-// 인터페이스 네임스페이스 (프로젝트에 맞게 확인)
-using AuthHive.Core.Interfaces.PlatformApplication.Repository;
-using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {
+    /// <summary>
+    /// PlatformApplication 엔티티의 데이터 접근을 담당하는 리포지토리입니다. (v16 리팩토링 적용)
+    /// BaseRepository를 상속받아 공통 CRUD, 캐싱, 통계 기능을 재사용하며, PlatformApplication 고유의 조회 로직을 구현합니다.
+    /// Unit of Work 패턴을 준수하며, 데이터베이스 저장은 서비스 계층의 IUnitOfWork가 담당합니다.
+    /// </summary>
     public class PlatformApplicationRepository : BaseRepository<PlatformApplicationEntity>, IPlatformApplicationRepository
     {
-        public PlatformApplicationRepository(
-            AuthDbContext context,
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+        /// <summary>
+        /// PlatformApplicationRepository의 생성자입니다.
+        /// IOrganizationContext에 대한 의존성을 제거하고 ICacheService를 통한 캐싱을 사용합니다.
+        /// </summary>
+        /// <param name="context">데이터베이스 컨텍스트</param>
+        /// <param name="cacheService">하이브리드 캐시 서비스</param>
+        public PlatformApplicationRepository(AuthDbContext context, ICacheService? cacheService)
+            : base(context, cacheService)
         {
         }
+
+        /// <summary>
+        /// 이 리포지토리가 다루는 PlatformApplicationEntity가 조직 범위 엔티티임을 명시합니다.
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity() => true;
 
         #region IPlatformApplicationRepository 구현
 
-        // BaseRepository의 GetByIdAsync를 그대로 사용
-        // 인터페이스에서 요구하는 GetByIdAsync는 BaseRepository에서 구현됨
-
-        public async Task<PlatformApplicationEntity?> GetByIdNoTrackingAsync(Guid id)
+        public async Task<PlatformApplicationEntity?> GetByIdNoTrackingAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            return await Query().AsNoTracking().FirstOrDefaultAsync(app => app.Id == id);
+            // Query() 메서드를 사용하여 IsDeleted = false 조건을 항상 보장합니다.
+            return await Query().AsNoTracking().FirstOrDefaultAsync(app => app.Id == id, cancellationToken);
         }
 
-        public async Task<PlatformApplicationEntity?> GetByApplicationKeyAsync(string applicationKey)
+        public async Task<PlatformApplicationEntity?> GetByApplicationKeyAsync(string applicationKey, CancellationToken cancellationToken = default)
         {
-            return await Query().FirstOrDefaultAsync(app => app.ApplicationKey == applicationKey);
+            return await Query().FirstOrDefaultAsync(app => app.ApplicationKey == applicationKey, cancellationToken);
         }
 
-        // BaseRepository에서 이미 구현된 GetByOrganizationIdAsync를 override로 재정의하거나
-        // 다른 이름으로 메서드를 만들어야 함. 여기서는 BaseRepository 것을 사용하되 명시적으로 override
-        public override async Task<IEnumerable<PlatformApplicationEntity>> GetByOrganizationIdAsync(Guid organizationId)
+        public async Task<IEnumerable<PlatformApplicationEntity>> GetByOrganizationIdAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // BaseRepository의 기본 구현을 활용
-            return await base.GetByOrganizationIdAsync(organizationId);
-        }
-
-        // 추가적인 조직별 조회가 필요하다면 새로운 이름으로 메서드 생성
-        public async Task<IEnumerable<PlatformApplicationEntity>> GetApplicationsByOrganizationAsync(Guid organizationId)
-        {
-            return await Query()
-                .Where(app => app.OrganizationId == organizationId)
+            // BaseRepository의 조직 범위 쿼리 헬퍼를 활용합니다.
+            return await QueryForOrganization(organizationId)
+                .AsNoTracking()
                 .OrderBy(app => app.Name)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        // 인터페이스 요구사항: AddAsync(PlatformApplication) 구현
-        // BaseRepository의 AddAsync를 확장하여 SaveChanges까지 처리
-        async Task<PlatformApplicationEntity> IPlatformApplicationRepository.AddAsync(PlatformApplicationEntity application)
+        public async Task<bool> SoftDeleteAsync(Guid id, Guid deletedByConnectedId, CancellationToken cancellationToken = default)
         {
-            var result = await base.AddAsync(application);
-            await SaveChangesAsync();
-            return result;
-        }
-
-        // 인터페이스 요구사항: UpdateAsync(PlatformApplication) 구현
-        // BaseRepository의 UpdateAsync를 확장하여 SaveChanges까지 처리 및 반환값 추가
-        async Task<PlatformApplicationEntity> IPlatformApplicationRepository.UpdateAsync(PlatformApplicationEntity application)
-        {
-            await base.UpdateAsync(application);
-            await SaveChangesAsync();
-            return application;
-        }
-
-        // 인터페이스 요구사항: DeleteAsync(Guid) 구현
-        // BaseRepository에는 DeleteAsync(TEntity)만 있으므로 새로운 기능으로 구현
-        async Task<bool> IPlatformApplicationRepository.DeleteAsync(Guid id)
-        {
-            var entity = await GetByIdAsync(id);
-            if (entity == null) return false;
-
-            await base.DeleteAsync(entity);
-            return await SaveChangesAsync() > 0;
-        }
-
-        // 인터페이스 요구사항: SoftDeleteAsync(Guid, Guid) 구현
-        // BaseRepository에는 SoftDeleteAsync(Guid)만 있으므로 새로운 기능으로 구현
-        async Task<bool> IPlatformApplicationRepository.SoftDeleteAsync(Guid id, Guid deletedByConnectedId)
-        {
-            var entity = await GetByIdAsync(id);
-            if (entity == null) return false;
+            var entity = await _dbSet.FindAsync(new object[] { id }, cancellationToken);
+            if (entity == null || entity.IsDeleted) return false;
 
             entity.IsDeleted = true;
             entity.DeletedAt = DateTime.UtcNow;
-            // deletedByConnectedId 속성이 있다면 설정 (엔티티 구조에 따라)
-            // entity.DeletedBy = deletedByConnectedId;
 
-            await base.UpdateAsync(entity);
-            return await SaveChangesAsync() > 0;
+            // 엔티티가 AuditableEntity를 상속받는 경우, 삭제 주체를 기록합니다.
+            if (entity is AuditableEntity auditableEntity)
+            {
+                auditableEntity.DeletedByConnectedId = deletedByConnectedId;
+            }
+
+            // UpdateAsync는 내부적으로 캐시를 무효화하며, DB 변경은 UnitOfWork가 담당합니다.
+            await UpdateAsync(entity, cancellationToken);
+            return true;
         }
 
-        // BaseRepository의 FindAsync를 그대로 사용
-        // 인터페이스에서 요구하는 FindAsync는 BaseRepository에서 구현됨
-
-        public async Task<PlatformApplicationEntity?> FindSingleAsync(Expression<Func<PlatformApplicationEntity, bool>> predicate)
+        public async Task<PlatformApplicationEntity?> FindSingleAsync(Expression<Func<PlatformApplicationEntity, bool>> predicate, CancellationToken cancellationToken = default)
         {
-            return await Query().FirstOrDefaultAsync(predicate);
+            return await Query().AsNoTracking().FirstOrDefaultAsync(predicate, cancellationToken);
         }
 
-        // 인터페이스 요구사항: GetPagedAsync with includes 구현
-        // BaseRepository의 GetPagedAsync와 다른 시그니처이므로 새로운 기능으로 구현
-        async Task<PaginationResponse<PlatformApplicationEntity>> IPlatformApplicationRepository.GetPagedAsync(
+        public async Task<PaginationResponse<PlatformApplicationEntity>> GetPagedAsync(
             Expression<Func<PlatformApplicationEntity, bool>>? predicate,
             PaginationRequest pagination,
+            CancellationToken cancellationToken = default,
             params Expression<Func<PlatformApplicationEntity, object>>[] includes)
         {
-            var query = Query();
+            var query = Query().AsNoTracking();
 
             if (predicate != null)
             {
@@ -132,147 +103,65 @@ namespace AuthHive.Auth.Repositories
                 query = query.Include(include);
             }
 
-            var totalCount = await query.CountAsync();
+            var totalCount = await query.CountAsync(cancellationToken);
             var items = await query
+                .OrderBy(app => app.Name) // 기본 정렬 기준 추가
                 .Skip((pagination.PageNumber - 1) * pagination.PageSize)
                 .Take(pagination.PageSize)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
-            // PaginationResponse.Create 메서드가 없다면 생성자 사용
             return PaginationResponse<PlatformApplicationEntity>.Create(items, totalCount, pagination.PageNumber, pagination.PageSize);
         }
 
-        public IQueryable<PlatformApplicationEntity> GetQueryable()
-        {
-            return Query();
-        }
-
-        // BaseRepository의 ExistsAsync(Guid)를 그대로 사용
-        // 인터페이스에서 요구하는 ExistsAsync는 BaseRepository에서 구현됨
-
-        public async Task<bool> ExistsByApplicationKeyAsync(string applicationKey, Guid? excludeId = null)
+        public async Task<bool> ExistsByApplicationKeyAsync(string applicationKey, Guid? excludeId = null, CancellationToken cancellationToken = default)
         {
             var query = Query().Where(app => app.ApplicationKey == applicationKey);
             if (excludeId.HasValue)
             {
                 query = query.Where(app => app.Id != excludeId.Value);
             }
-            return await query.AnyAsync();
+            return await query.AnyAsync(cancellationToken);
         }
 
-        public async Task<bool> IsDuplicateNameAsync(Guid organizationId, string name, Guid? excludeId = null)
+        public async Task<bool> IsDuplicateNameAsync(Guid organizationId, string name, Guid? excludeId = null, CancellationToken cancellationToken = default)
         {
-            var query = Query().Where(app => app.OrganizationId == organizationId && app.Name == name);
+            var query = QueryForOrganization(organizationId).Where(app => app.Name == name);
             if (excludeId.HasValue)
             {
                 query = query.Where(app => app.Id != excludeId.Value);
             }
-            return await query.AnyAsync();
+            return await query.AnyAsync(cancellationToken);
         }
 
-        // 인터페이스 요구사항: AddRangeAsync 구현
-        // BaseRepository의 AddRangeAsync를 확장하여 SaveChanges까지 처리 및 반환값 추가
-        async Task<IEnumerable<PlatformApplicationEntity>> IPlatformApplicationRepository.AddRangeAsync(IEnumerable<PlatformApplicationEntity> applications)
+        public async Task<bool> DeleteRangeAsync(IEnumerable<Guid> ids, CancellationToken cancellationToken = default)
         {
-            await base.AddRangeAsync(applications);
-            await SaveChangesAsync();
-            return applications;
-        }
-
-        // 인터페이스 요구사항: UpdateRangeAsync 구현  
-        // BaseRepository의 UpdateRangeAsync를 확장하여 SaveChanges까지 처리 및 반환값 추가
-        async Task<IEnumerable<PlatformApplicationEntity>> IPlatformApplicationRepository.UpdateRangeAsync(IEnumerable<PlatformApplicationEntity> applications)
-        {
-            await base.UpdateRangeAsync(applications);
-            await SaveChangesAsync();
-            return applications;
-        }
-
-        // 인터페이스 요구사항: DeleteRangeAsync(IEnumerable<Guid>) 구현
-        // BaseRepository에는 DeleteRangeAsync(IEnumerable<TEntity>)만 있으므로 새로운 기능으로 구현
-        async Task<bool> IPlatformApplicationRepository.DeleteRangeAsync(IEnumerable<Guid> ids)
-        {
-            var entities = await Query().Where(e => ids.Contains(e.Id)).ToListAsync();
+            var entities = await _dbSet.Where(e => ids.Contains(e.Id) && !e.IsDeleted).ToListAsync(cancellationToken);
             if (!entities.Any()) return false;
-
-            await base.DeleteRangeAsync(entities);
-            return await SaveChangesAsync() > 0;
+            
+            // BaseRepository의 DeleteRangeAsync(IEnumerable<TEntity>)를 호출하여 로직을 재사용합니다.
+            await base.DeleteRangeAsync(entities, cancellationToken); 
+            return true;
         }
 
-        public async Task<int> GetCountByOrganizationAsync(Guid organizationId)
+        public async Task<int> GetCountByOrganizationAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // BaseRepository의 CountByOrganizationAsync가 있다면 활용
-            return await CountByOrganizationAsync(organizationId);
+            return await CountAsync(app => EF.Property<Guid>(app, "OrganizationId") == organizationId, cancellationToken);
         }
 
-        public async Task<int> GetActiveCountByOrganizationAsync(Guid organizationId)
+        public async Task<int> GetActiveCountByOrganizationAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            return await CountByOrganizationAsync(organizationId, app => app.IsActive);
+            // PlatformApplicationEntity에 IsActive 속성이 있다고 가정합니다.
+            return await CountAsync(app => EF.Property<Guid>(app, "OrganizationId") == organizationId && app.IsActive, cancellationToken);
         }
 
-        public async Task<Dictionary<string, int>> GetCountByTypeAsync(Guid organizationId)
+        public async Task<Dictionary<string, int>> GetCountByTypeAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // BaseRepository의 GetGroupCountAsync 활용
+            // PlatformApplicationEntity에 ApplicationType 속성이 있다고 가정합니다.
+            // .NET 8 / EF Core 8 환경에서는 Enum.ToString() 변환을 지원합니다.
             return await GetGroupCountAsync(
                 app => app.ApplicationType.ToString(),
-                app => app.OrganizationId == organizationId);
-        }
-
-        public async Task<int> SaveChangesAsync()
-        {
-            return await _context.SaveChangesAsync();
-        }
-
-        #endregion
-
-        #region BaseRepository 메서드 활용 예시
-
-        /// <summary>
-        /// BaseRepository의 페이징 기능을 활용한 조직별 애플리케이션 조회
-        /// </summary>
-        public async Task<(IEnumerable<PlatformApplicationEntity> Items, int TotalCount)> GetPagedByOrganizationAsync(
-            Guid organizationId,
-            int pageNumber = 1,
-            int pageSize = 10,
-            bool activeOnly = false)
-        {
-            Expression<Func<PlatformApplicationEntity, bool>> predicate = app => app.OrganizationId == organizationId;
-
-            if (activeOnly)
-            {
-                predicate = app => app.OrganizationId == organizationId && app.IsActive;
-            }
-
-            return await GetPagedAsync(
-                pageNumber,
-                pageSize,
-                predicate,
-                app => app.Name); // 이름순 정렬
-        }
-
-        /// <summary>
-        /// BaseRepository의 통계 기능을 활용한 애플리케이션 상태별 통계
-        /// </summary>
-        public async Task<Dictionary<bool, int>> GetStatusStatisticsAsync(Guid organizationId)
-        {
-            return await GetGroupCountAsync(
-                app => app.IsActive,
-                app => app.OrganizationId == organizationId);
-        }
-
-        /// <summary>
-        /// BaseRepository의 날짜별 통계 기능 활용
-        /// </summary>
-        public async Task<Dictionary<DateTime, int>> GetDailyCreationStatsAsync(
-            Guid organizationId,
-            DateTime startDate,
-            DateTime endDate)
-        {
-            return await GetDailyCountAsync(
-                app => app.CreatedAt,
-                startDate,
-                endDate,
-                app => app.OrganizationId == organizationId);
+                app => EF.Property<Guid>(app, "OrganizationId") == organizationId,
+                cancellationToken);
         }
 
         #endregion
