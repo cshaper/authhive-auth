@@ -1,52 +1,42 @@
+// AuthHive.Auth.Services.Handlers.PermissionChangeEventHandler.cs
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json; // ✅ FIX: Newtonsoft.Json 대신 System.Text.Json 사용
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Distributed;
-using Microsoft.Extensions.Caching.Memory;
-using AuthHive.Core.Interfaces.Auth.Handler;
-using AuthHive.Core.Interfaces.Auth.Repository;
-using AuthHive.Core.Interfaces.Auth.Service;
-using AuthHive.Core.Interfaces.Audit;
-using AuthHive.Core.Interfaces.Infra.UserExperience;
-using AuthHive.Core.Interfaces.Infra.Monitoring;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Models.Auth.Events;
-using AuthHive.Core.Models.Common;
-using AuthHive.Core.Entities.Auth;
-using AuthHive.Core.Entities.Infra.Monitoring;
-using AuthHive.Core.Enums.Audit;
-using AuthHive.Core.Enums.Infra.Monitoring;
 using AuthHive.Core.Constants.Auth;
-using Newtonsoft.Json;
-using static AuthHive.Core.Enums.Auth.PermissionEnums;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Enums.Audit;
+using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.Auth.Handler;
+using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache; // ✅ FIX: ICacheService 인터페이스 사용
+using AuthHive.Core.Models.Auth.Events;
+using AuthHive.Core.Models.Auth.Permissions.Events;
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Enums.Infra.Security;
+using AuthHive.Core.Models.Infra.Events.Permissions;
+
 
 namespace AuthHive.Auth.Services.Handlers
 {
     /// <summary>
-    /// 권한 변경 이벤트 핸들러 구현체 - AuthHive v15 최종본
-    /// 권한 관련 모든 변경사항을 처리하고 감사 로그를 생성하며 관련자에게 알림을 발송
+    /// 권한 변경 이벤트 핸들러 구현체 - AuthHive v16 최종본
+    /// 권한 관련 핵심 변경사항(감사, 캐시 무효화)을 트랜잭션으로 처리하고,
+    /// IEventBus를 통해 관련 시스템에 이벤트를 전파하여 후속 조치(알림, 보안 분석 등)를 위임합니다.
     /// </summary>
     public class PermissionChangeEventHandler : IPermissionChangeEventHandler
     {
         #region Fields
-        
+
         private readonly ILogger<PermissionChangeEventHandler> _logger;
         private readonly IAuditService _auditService;
-        private readonly INotificationService _notificationService;
-        private readonly IPermissionValidationLogRepository _permissionValidationLogRepository;
-        private readonly IConnectedIdRepository _connectedIdRepository;
-        private readonly IUserRepository _userRepository;
-        private readonly IDistributedCache _distributedCache;
-        private readonly IMemoryCache _memoryCache;
-        private readonly IUnitOfWork _unitOfWork;
-        private readonly ISecurityEventService _securityEventService;
         private readonly IPermissionService _permissionService;
-        
+        private readonly ICacheService _cacheService; // ✅ FIX: IMemoryCache, IDistributedCache 대신 통합 ICacheService 주입
+        private readonly IEventBus _eventBus; // ✅ FIX: 알림, 보안 이벤트 등 후속 처리를 위한 이벤트 버스 주입
+        private readonly IUnitOfWork _unitOfWork;
+
         #endregion
 
         #region Constructor
@@ -54,27 +44,17 @@ namespace AuthHive.Auth.Services.Handlers
         public PermissionChangeEventHandler(
             ILogger<PermissionChangeEventHandler> logger,
             IAuditService auditService,
-            INotificationService notificationService,
-            IPermissionValidationLogRepository permissionValidationLogRepository,
-            IConnectedIdRepository connectedIdRepository,
-            IUserRepository userRepository,
-            IDistributedCache distributedCache,
-            IMemoryCache memoryCache,
-            IUnitOfWork unitOfWork,
-            ISecurityEventService securityEventService,
-            IPermissionService permissionService)
+            IPermissionService permissionService,
+            ICacheService cacheService,
+            IEventBus eventBus,
+            IUnitOfWork unitOfWork)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _auditService = auditService ?? throw new ArgumentNullException(nameof(auditService));
-            _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
-            _permissionValidationLogRepository = permissionValidationLogRepository ?? throw new ArgumentNullException(nameof(permissionValidationLogRepository));
-            _connectedIdRepository = connectedIdRepository ?? throw new ArgumentNullException(nameof(connectedIdRepository));
-            _userRepository = userRepository ?? throw new ArgumentNullException(nameof(userRepository));
-            _distributedCache = distributedCache ?? throw new ArgumentNullException(nameof(distributedCache));
-            _memoryCache = memoryCache ?? throw new ArgumentNullException(nameof(memoryCache));
-            _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
-            _securityEventService = securityEventService ?? throw new ArgumentNullException(nameof(securityEventService));
             _permissionService = permissionService ?? throw new ArgumentNullException(nameof(permissionService));
+            _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService));
+            _eventBus = eventBus ?? throw new ArgumentNullException(nameof(eventBus));
+            _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
         }
 
         #endregion
@@ -82,780 +62,473 @@ namespace AuthHive.Auth.Services.Handlers
         #region IPermissionChangeEventHandler Implementation
 
         /// <summary>
-        /// 권한 부여 이벤트 처리
+        /// 권한 만료 이벤트를 처리합니다.
+        /// 트랜잭션 내에서 만료된 각 권한의 캐시를 무효화하고, 감사 로그를 기록한 후,
+        /// 통합 이벤트를 발행하여 후속 조치를 위임합니다.
         /// </summary>
-        public async Task HandlePermissionGrantedAsync(PermissionGrantedEvent eventData)
+        public async Task HandlePermissionExpiredAsync(PermissionExpiredEvent eventData, CancellationToken cancellationToken = default)
         {
             if (eventData == null)
             {
-                _logger.LogWarning("Received null PermissionGrantedEvent");
+                _logger.LogWarning("Received null PermissionExpiredEvent.");
                 return;
             }
 
+            if (eventData.ExpiredPermissions == null || !eventData.ExpiredPermissions.Any())
+            {
+                _logger.LogWarning("PermissionExpiredEvent for User {UserId} contained no expired permissions.", eventData.UserId);
+                return;
+            }
+
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                _logger.LogInformation(
-                    "Processing permission granted event: User {UserId} granted permission {Scope} by {GrantedBy}",
-                    eventData.UserId, eventData.PermissionScope, eventData.GrantedByUserId);
+                _logger.LogInformation("Processing PermissionExpiredEvent for User {UserId}, GrantId {GrantId}", eventData.UserId, eventData.AggregateId);
 
-                // 1. 권한 정보 조회
-                var permissionResult = await _permissionService.GetByScopeAsync(eventData.PermissionScope);
-                if (!permissionResult.IsSuccess || permissionResult.Data == null)
-                {
-                    _logger.LogWarning("Permission {Scope} not found in system", eventData.PermissionScope);
-                    return;
-                }
+                // 1. 만료된 모든 권한에 대한 캐시 무효화
+                var invalidationTasks = eventData.ExpiredPermissions
+                    .Select(scope => InvalidatePermissionCacheAsync(eventData.UserId, scope, cancellationToken));
+                await Task.WhenAll(invalidationTasks);
 
-                var permission = permissionResult.Data;
-
-                // 2. 캐시 무효화
-                await InvalidatePermissionCacheAsync(eventData.UserId, eventData.PermissionScope);
-
-                // 3. 감사 로그 생성
+                // 2. 감사 로그 기록 (✅ FIX: eventData의 실제 속성 사용)
                 await _auditService.LogActionAsync(
-                    eventData.GrantedByUserId,
-                    $"Granted permission '{permission.Name}' to user",
-                    AuditActionType.Create,
-                    "Permission",
-                    eventData.PermissionScope,
-                    true,
-                    JsonConvert.SerializeObject(new
+                    actionType: AuditActionType.Update, // 시스템에 의한 자동 상태 변경
+                    action: $"Permission(s) expired for user",
+                    // 만료는 시스템(TriggeredBy = null) 또는 수동으로 발생할 수 있음
+                    connectedId: eventData.TriggeredBy ?? eventData.UserId,
+                    success: true,
+                    resourceType: "PermissionGrant",
+                    resourceId: eventData.AggregateId.ToString(), // 만료된 권한 부여(Grant)가 이벤트의 주체
+                    metadata: new Dictionary<string, object>
                     {
-                        TargetUserId = eventData.UserId,
-                        ConnectedId = eventData.ConnectedId,
-                        PermissionScope = eventData.PermissionScope,
-                        PermissionName = permission.Name,
-                        ExpiresAt = eventData.ExpiresAt,
-                        Reason = eventData.Reason,
-                        GrantedAt = eventData.GrantedAt
-                    }));
+                { "TargetUserId", eventData.UserId },
+                { "ExpiredPermissions", eventData.ExpiredPermissions },
+                { "ExpirationType", eventData.ExpirationType.ToString() },
+                { "OriginallyGrantedBy", eventData.OriginallyGrantedBy }
+                    },
+                    cancellationToken: cancellationToken);
 
-                // 4. 권한 변경 로그
-                await _auditService.LogPermissionChangeAsync(
-                    "User",
-                    eventData.UserId.ToString(),
-                    eventData.PermissionScope,
-                    "GRANT",
-                    eventData.ConnectedId ?? eventData.UserId,
-                    eventData.GrantedByUserId);
-
-                // 5. 보안 이벤트 기록
-                var securityEvent = new SecurityEvent
+                // 3. 만료된 각 권한에 대해 별도의 통합 이벤트 발행
+                var eventTasks = eventData.ExpiredPermissions.Select(scope =>
                 {
-                    EventType = SecurityEventType.PermissionGranted,
-                    Severity = SecuritySeverityLevel.Info,
-                    TriggeringConnectedId = eventData.ConnectedId,
-                    TargetConnectedId = eventData.ConnectedId,
-                    EventDescription = $"Permission {eventData.PermissionScope} granted to user {eventData.UserId}",
-                    ResourceType = "Permission",
-                    ResourceId = permission.Id,
-                    AttemptedAction = "GRANT",
-                    OccurredAt = DateTime.UtcNow,
-                    AdditionalContext = JsonConvert.SerializeObject(new Dictionary<string, object>
-                    {
-                        ["permissionScope"] = eventData.PermissionScope,
-                        ["grantedBy"] = eventData.GrantedByUserId,
-                        ["expiresAt"] = eventData.ExpiresAt?.ToString() ?? "Never",
-                        ["reason"] = eventData.Reason ?? "No reason provided"
-                    })
-                };
+                    var integrationEvent = new PermissionChangedIntegrationEvent(
+                        changeType: "EXPIRED",
+                        userId: eventData.UserId,
+                        permissionScope: scope,
+                        triggeredByUserId: eventData.TriggeredBy ?? Guid.Empty, // 시스템에 의해 발생했음을 의미
+                        reason: $"Permission has expired ({eventData.ExpirationType})."
+                    );
+                    return _eventBus.PublishAsync(integrationEvent, cancellationToken);
+                });
+                await Task.WhenAll(eventTasks);
 
-                await _securityEventService.RecordEventAsync(securityEvent);
-
-                // 6. 권한 검증 로그 생성 (기존 PermissionValidationResult enum 사용)
-                var validationLog = new PermissionValidationLog
-                {
-                    ConnectedId = eventData.ConnectedId ?? eventData.UserId,
-                    RequestedScope = eventData.PermissionScope,
-                    IsAllowed = true,
-                    ValidationResult = PermissionValidationResult.Granted,
-                    Timestamp = DateTime.UtcNow,
-                    RequestContext = JsonConvert.SerializeObject(new { EventType = "PermissionGranted" })
-                };
-
-                await _permissionValidationLogRepository.AddAsync(validationLog);
-                await _unitOfWork.SaveChangesAsync();
-
-                // 7. 사용자 알림
-                await _notificationService.SendSecurityAlertAsync(
-                    eventData.UserId,
-                    "새로운 권한이 부여되었습니다",
-                    GenerateGrantNotificationMessage(permission.Name, eventData.Reason, eventData.ExpiresAt));
-
-                _logger.LogInformation(
-                    "Successfully processed permission granted event for user {UserId}, permission {Scope}",
-                    eventData.UserId, eventData.PermissionScope);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                _logger.LogInformation("Successfully processed PermissionExpiredEvent for User {UserId}", eventData.UserId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Error processing permission granted event for user {UserId}, permission {Scope}",
-                    eventData.UserId, eventData.PermissionScope);
-
-                await LogFailureAsync(
-                    "PERMISSION_GRANT_FAILED",
-                    eventData.GrantedByUserId,
-                    ex.Message,
-                    eventData);
-
+                _logger.LogError(ex, "Error processing PermissionExpiredEvent for User {UserId}", eventData.UserId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 throw;
             }
         }
 
         /// <summary>
-        /// 권한 취소 이벤트 처리
+        /// 권한 부여 이벤트를 처리합니다.
+        /// 감사 로그 기록 및 캐시 무효화를 수행한 후, 통합 이벤트를 발행합니다.
         /// </summary>
-        public async Task HandlePermissionRevokedAsync(PermissionRevokedEvent eventData)
+        public async Task HandlePermissionGrantedAsync(PermissionGrantedEvent eventData, CancellationToken cancellationToken = default)
         {
             if (eventData == null)
             {
-                _logger.LogWarning("Received null PermissionRevokedEvent");
+                _logger.LogWarning("Received null PermissionGrantedEvent.");
                 return;
             }
 
+            await _unitOfWork.BeginTransactionAsync(cancellationToken); // ✅ FIX: 트랜잭션 시작
             try
             {
-                _logger.LogInformation(
-                    "Processing permission revoked event: User {UserId} permission {Scope} revoked by {RevokedBy}",
-                    eventData.UserId, eventData.PermissionScope, eventData.RevokedByUserId);
-
-                // 1. 권한 정보 조회
-                var permissionResult = await _permissionService.GetByScopeAsync(eventData.PermissionScope);
-                var permissionName = permissionResult.IsSuccess && permissionResult.Data != null
-                    ? permissionResult.Data.Name
-                    : eventData.PermissionScope;
-
-                // 2. 캐시 무효화
-                await InvalidatePermissionCacheAsync(eventData.UserId, eventData.PermissionScope);
-
-                // 3. 감사 로그
-                await _auditService.LogActionAsync(
-                    eventData.RevokedByUserId,
-                    $"Revoked permission '{permissionName}' from user",
-                    AuditActionType.Delete,
-                    "Permission",
-                    eventData.PermissionScope,
-                    true,
-                    JsonConvert.SerializeObject(new
-                    {
-                        TargetUserId = eventData.UserId,
-                        ConnectedId = eventData.ConnectedId,
-                        PermissionScope = eventData.PermissionScope,
-                        Reason = eventData.Reason,
-                        RevokedAt = eventData.RevokedAt
-                    }));
-
-                // 4. 권한 변경 로그
-                await _auditService.LogPermissionChangeAsync(
-                    "User",
-                    eventData.UserId.ToString(),
-                    eventData.PermissionScope,
-                    "REVOKE",
-                    eventData.ConnectedId ?? eventData.UserId,
-                    eventData.RevokedByUserId);
-
-                // 5. 보안 이벤트 기록
-                var securityEvent = new SecurityEvent
-                {
-                    EventType = SecurityEventType.PermissionRevoked,
-                    Severity = SecuritySeverityLevel.Warning,
-                    TriggeringConnectedId = eventData.ConnectedId,
-                    TargetConnectedId = eventData.ConnectedId,
-                    EventDescription = $"Permission {eventData.PermissionScope} revoked from user {eventData.UserId}",
-                    ResourceType = "Permission",
-                    AttemptedAction = "REVOKE",
-                    OccurredAt = DateTime.UtcNow,
-                    AdditionalContext = JsonConvert.SerializeObject(new Dictionary<string, object>
-                    {
-                        ["permissionScope"] = eventData.PermissionScope,
-                        ["revokedBy"] = eventData.RevokedByUserId,
-                        ["reason"] = eventData.Reason ?? "No reason provided"
-                    })
-                };
-
-                await _securityEventService.RecordEventAsync(securityEvent);
-
-                // 6. 사용자 알림
-                await _notificationService.SendSecurityAlertAsync(
-                    eventData.UserId,
-                    "권한이 취소되었습니다",
-                    GenerateRevokeNotificationMessage(permissionName, eventData.Reason));
-
-                _logger.LogInformation(
-                    "Successfully processed permission revoked event for user {UserId}",
-                    eventData.UserId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex,
-                    "Error processing permission revoked event for user {UserId}, permission {Scope}",
-                    eventData.UserId, eventData.PermissionScope);
-
-                await LogFailureAsync(
-                    "PERMISSION_REVOKE_FAILED",
-                    eventData.RevokedByUserId,
-                    ex.Message,
-                    eventData);
-
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 권한 변경 이벤트 처리
-        /// </summary>
-        public async Task HandlePermissionModifiedAsync(PermissionModifiedEvent eventData)
-        {
-            if (eventData == null)
-            {
-                _logger.LogWarning("Received null PermissionModifiedEvent");
-                return;
-            }
-
-            try
-            {
-                _logger.LogInformation(
-                    "Processing permission modified event: Permission {PermissionId} modified by {ModifiedBy}",
-                    eventData.PermissionId, eventData.ModifiedByUserId);
-
-                // 1. 변경 내역 생성
-                var changes = BuildChangeList(eventData.OldValues, eventData.NewValues);
-
-                // 2. 감사 로그
-                await _auditService.LogActionAsync(
-                    eventData.ModifiedByUserId,
-                    $"Modified permission '{eventData.PermissionScope}'",
-                    AuditActionType.Update,
-                    "Permission",
-                    eventData.PermissionId.ToString(),
-                    true,
-                    JsonConvert.SerializeObject(new
-                    {
-                        PermissionScope = eventData.PermissionScope,
-                        Changes = changes,
-                        ModifiedAt = eventData.ModifiedAt,
-                        AffectedUserCount = eventData.AffectedUserIds?.Count ?? 0
-                    }));
-
-                // 3. 영향받는 사용자들의 캐시 무효화 및 알림
-                if (eventData.AffectedUserIds != null && eventData.AffectedUserIds.Any())
-                {
-                    var tasks = new List<Task>();
-
-                    foreach (var userId in eventData.AffectedUserIds)
-                    {
-                        tasks.Add(InvalidatePermissionCacheAsync(userId, eventData.PermissionScope));
-                        tasks.Add(_notificationService.SendSecurityAlertAsync(
-                            userId,
-                            "권한이 변경되었습니다",
-                            $"'{eventData.PermissionScope}' 권한이 변경되었습니다.\n변경 사항: {string.Join(", ", changes)}"));
-                    }
-
-                    await Task.WhenAll(tasks);
-                }
-
-                // 4. 보안 이벤트 기록
-                var securityEvent = new SecurityEvent
-                {
-                    EventType = SecurityEventType.PermissionModified,
-                    Severity = SecuritySeverityLevel.Info,
-                    TriggeringConnectedId = eventData.ModifiedByConnectedId,
-                    EventDescription = $"Permission {eventData.PermissionScope} modified",
-                    ResourceType = "Permission",
-                    ResourceId = eventData.PermissionId,
-                    AttemptedAction = "MODIFY",
-                    OccurredAt = DateTime.UtcNow,
-                    AdditionalContext = JsonConvert.SerializeObject(new Dictionary<string, object>
-                    {
-                        ["changes"] = changes,
-                        ["affectedUserCount"] = eventData.AffectedUserIds?.Count ?? 0
-                    })
-                };
-
-                await _securityEventService.RecordEventAsync(securityEvent);
-
-                _logger.LogInformation(
-                    "Successfully processed permission modified event for permission {PermissionId}",
-                    eventData.PermissionId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex,
-                    "Error processing permission modified event for permission {PermissionId}",
-                    eventData.PermissionId);
-
-                await LogFailureAsync(
-                    "PERMISSION_MODIFY_FAILED",
-                    eventData.ModifiedByUserId,
-                    ex.Message,
-                    eventData);
-
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 권한 만료 이벤트 처리
-        /// </summary>
-        public async Task HandlePermissionExpiredAsync(PermissionExpiredEvent eventData)
-        {
-            if (eventData == null)
-            {
-                _logger.LogWarning("Received null PermissionExpiredEvent");
-                return;
-            }
-
-            try
-            {
-                // 단일 권한 만료 처리
-                var permissionScope = !string.IsNullOrEmpty(eventData.PermissionScope) 
-                    ? eventData.PermissionScope 
-                    : eventData.ExpiredPermissions?.FirstOrDefault() ?? string.Empty;
-
-                _logger.LogInformation(
-                    "Processing permission expired event: User {UserId} permission {Scope} expired",
-                    eventData.UserId, permissionScope);
+                _logger.LogInformation("Processing PermissionGrantedEvent for User {UserId}, Scope {Scope}", eventData.UserId, eventData.PermissionScope);
 
                 // 1. 캐시 무효화
-                if (!string.IsNullOrEmpty(permissionScope))
-                {
-                    await InvalidatePermissionCacheAsync(eventData.UserId, permissionScope);
-                }
+                await InvalidatePermissionCacheAsync(eventData.UserId, eventData.PermissionScope, cancellationToken);
 
-                // 다중 권한 만료 처리
-                if (eventData.ExpiredPermissions != null && eventData.ExpiredPermissions.Any())
-                {
-                    foreach (var expiredPermission in eventData.ExpiredPermissions)
-                    {
-                        await InvalidatePermissionCacheAsync(eventData.UserId, expiredPermission);
-                    }
-                }
+                // 2. 감사 로그 생성 (이 핸들러의 핵심 책임)
+                var permissionResult = await _permissionService.GetByScopeAsync(eventData.PermissionScope, cancellationToken);
+                var permissionName = permissionResult.IsSuccess ? permissionResult.Data?.Name : eventData.PermissionScope;
 
-                // 2. 감사 로그
+                // 2. 감사 로그 생성 (✅ FIX: 명명된 인수를 사용하여 올바르게 호출)
                 await _auditService.LogActionAsync(
-                    eventData.UserId,
-                    $"Permission(s) expired",
-                    AuditActionType.Update,
-                    "Permission",
-                    permissionScope,
-                    true,
-                    JsonConvert.SerializeObject(new
+                    actionType: AuditActionType.Create,
+                    action: $"Granted permission '{permissionName}' to user",
+                    connectedId: eventData.GrantedByUserId, // 감사 로그를 기록하는 주체
+                    success: true,
+                    resourceType: "Permission",
+                    resourceId: eventData.PermissionScope,
+                    metadata: new Dictionary<string, object>
                     {
-                        UserId = eventData.UserId,
-                        ConnectedId = eventData.ConnectedId,
-                        ExpiredPermissions = eventData.ExpiredPermissions ?? new List<string> { permissionScope },
-                        ExpiredAt = eventData.ExpiredAt,
-                        OriginallyGrantedAt = eventData.OriginallyGrantedAt,
-                        OriginallyGrantedBy = eventData.OriginallyGrantedBy,
-                        IsAutoExpired = eventData.IsAutoExpired
-                    }));
+                        { "TargetUserId", eventData.UserId },
+                        { "ConnectedId", eventData.ConnectedId ?? Guid.Empty },
+                        { "PermissionScope", eventData.PermissionScope },
+                        { "PermissionName", permissionName ?? "N/A"},
+                        { "ExpiresAt", eventData.ExpiresAt?.ToString("o") ?? "Never" },
+                        { "Reason", eventData.Reason ?? "N/A" }
+                    },
+                    cancellationToken: cancellationToken);
 
-                // 3. 보안 이벤트
-                var securityEvent = new SecurityEvent
-                {
-                    EventType = SecurityEventType.PermissionExpired,
-                    Severity = SecuritySeverityLevel.Info,
-                    TriggeringConnectedId = eventData.ConnectedId,
-                    TargetConnectedId = eventData.ConnectedId,
-                    EventDescription = $"Permission(s) expired for user {eventData.UserId}",
-                    ResourceType = "Permission",
-                    AttemptedAction = "EXPIRE",
-                    OccurredAt = eventData.ExpiredAt,
-                    AdditionalContext = JsonConvert.SerializeObject(new Dictionary<string, object>
-                    {
-                        ["expiredPermissions"] = eventData.ExpiredPermissions ?? new List<string> { permissionScope },
-                        ["expiredAt"] = eventData.ExpiredAt,
-                        ["isAutoExpired"] = eventData.IsAutoExpired
-                    })
-                };
+                // 3. FIX: IEventBus를 통해 통합 이벤트 발행 (알림, 보안 분석 등 후속 처리는 다른 핸들러에 위임)
+                var integrationEvent = new PermissionChangedIntegrationEvent(
+                  changeType: "GRANTED", // ✅ FIX: 'C'를 소문자 'c'로 수정
+                  userId: eventData.UserId,
+                  permissionScope: eventData.PermissionScope,
+                  triggeredByUserId: eventData.GrantedByUserId,
+                  reason: eventData.Reason,
+                  expiresAt: eventData.ExpiresAt
+              );
+                await _eventBus.PublishAsync(integrationEvent, cancellationToken);
 
-                await _securityEventService.RecordEventAsync(securityEvent);
-
-                // 4. 사용자 알림
-                var permissionsList = eventData.ExpiredPermissions?.Any() == true
-                    ? string.Join(", ", eventData.ExpiredPermissions)
-                    : permissionScope;
-
-                await _notificationService.SendSecurityAlertAsync(
-                    eventData.UserId,
-                    "권한이 만료되었습니다",
-                    $"'{permissionsList}' 권한이 {eventData.ExpiredAt:yyyy-MM-dd HH:mm}에 만료되었습니다.");
-
-                _logger.LogInformation(
-                    "Successfully processed permission expired event for user {UserId}",
-                    eventData.UserId);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken); // ✅ FIX: 트랜잭션 커밋
+                _logger.LogInformation("Successfully processed PermissionGrantedEvent for User {UserId}", eventData.UserId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Error processing permission expired event for user {UserId}",
-                    eventData.UserId);
-
-                await LogFailureAsync(
-                    "PERMISSION_EXPIRY_FAILED",
-                    eventData.UserId,
-                    ex.Message,
-                    eventData);
-
+                _logger.LogError(ex, "Error processing PermissionGrantedEvent for User {UserId}", eventData.UserId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken); // ✅ FIX: 오류 발생 시 롤백
                 throw;
             }
         }
 
         /// <summary>
-        /// 권한 상속 이벤트 처리
+        /// 권한 취소 이벤트를 처리합니다.
         /// </summary>
-        public async Task HandlePermissionInheritedAsync(PermissionInheritedEvent eventData)
+        public async Task HandlePermissionRevokedAsync(PermissionRevokedEvent eventData, CancellationToken cancellationToken = default)
         {
             if (eventData == null)
             {
-                _logger.LogWarning("Received null PermissionInheritedEvent");
+                _logger.LogWarning("Received null PermissionRevokedEvent.");
                 return;
             }
 
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                _logger.LogInformation(
-                    "Processing permission inherited event: User {UserId} inherited permission {Scope} from {Source}",
-                    eventData.UserId, eventData.PermissionScope, eventData.InheritedFrom);
+                _logger.LogInformation("Processing PermissionRevokedEvent for User {UserId}, Scope {Scope}", eventData.UserId, eventData.PermissionScope);
 
-                // 1. 캐시 업데이트
-                await InvalidatePermissionCacheAsync(eventData.UserId, eventData.PermissionScope);
+                await InvalidatePermissionCacheAsync(eventData.UserId, eventData.PermissionScope, cancellationToken);
 
-                // 2. 감사 로그
+                var permissionResult = await _permissionService.GetByScopeAsync(eventData.PermissionScope, cancellationToken);
+                var permissionName = permissionResult.IsSuccess ? permissionResult.Data?.Name : eventData.PermissionScope;
+
+                // 3. 감사 로그 (✅ FIX: 명명된 인수를 사용하여 올바르게 호출)
                 await _auditService.LogActionAsync(
-                    eventData.UserId,
-                    $"Inherited permission '{eventData.PermissionScope}' from {eventData.InheritedFrom}",
-                    AuditActionType.Create,
-                    "Permission",
-                    eventData.PermissionScope,
-                    true,
-                    JsonConvert.SerializeObject(new
+                    actionType: AuditActionType.Delete,
+                    action: $"Revoked permission '{permissionName}' from user",
+                    connectedId: eventData.RevokedByUserId, // 작업을 수행한 주체
+                    success: true,
+                    resourceType: "Permission",
+                    resourceId: eventData.PermissionScope,
+                    metadata: new Dictionary<string, object>
                     {
-                        UserId = eventData.UserId,
-                        ConnectedId = eventData.ConnectedId,
-                        PermissionScope = eventData.PermissionScope,
-                        InheritedFrom = eventData.InheritedFrom,
-                        InheritedFromId = eventData.InheritedFromId,
-                        InheritedFromName = eventData.InheritedFromName,
-                        InheritedAt = eventData.InheritedAt,
-                        InheritanceChain = eventData.InheritanceChain,
-                        IsDirectInheritance = eventData.IsDirectInheritance
-                    }));
+                        { "TargetUserId", eventData.UserId },
+                        { "ConnectedId", eventData.ConnectedId ?? Guid.Empty },
+                        { "PermissionScope", eventData.PermissionScope },
+                        { "Reason", eventData.Reason ?? "No reason provided" }
+                    },
+                    cancellationToken: cancellationToken);
 
-                // 3. 보안 이벤트
-                var securityEvent = new SecurityEvent
-                {
-                    EventType = SecurityEventType.PermissionInherited,
-                    Severity = SecuritySeverityLevel.Info,
-                    TriggeringConnectedId = eventData.ConnectedId,
-                    TargetConnectedId = eventData.ConnectedId,
-                    EventDescription = $"Permission {eventData.PermissionScope} inherited from {eventData.InheritedFrom}",
-                    ResourceType = "Permission",
-                    ResourceId = eventData.InheritedFromId,
-                    AttemptedAction = "INHERIT",
-                    OccurredAt = eventData.InheritedAt,
-                    AdditionalContext = JsonConvert.SerializeObject(new Dictionary<string, object>
-                    {
-                        ["permissionScope"] = eventData.PermissionScope,
-                        ["inheritedFrom"] = eventData.InheritedFrom,
-                        ["inheritedFromName"] = eventData.InheritedFromName,
-                        ["isDirectInheritance"] = eventData.IsDirectInheritance
-                    })
-                };
 
-                await _securityEventService.RecordEventAsync(securityEvent);
+                var integrationEvent = new PermissionChangedIntegrationEvent(
+    changeType: "REVOKED", // ✅ FIX: 'C'를 소문자 'c'로 수정
+    userId: eventData.UserId,
+    permissionScope: eventData.PermissionScope,
+    triggeredByUserId: eventData.RevokedByUserId,
+    reason: eventData.Reason,
+    expiresAt: eventData.ExpiresAt
+);
+                await _eventBus.PublishAsync(integrationEvent, cancellationToken);
 
-                // 4. 사용자 알림
-                await _notificationService.SendSecurityAlertAsync(
-                    eventData.UserId,
-                    "새로운 권한이 상속되었습니다",
-                    $"'{eventData.PermissionScope}' 권한이 {eventData.InheritedFromName}({eventData.InheritedFrom})로부터 상속되었습니다.");
-
-                _logger.LogInformation(
-                    "Successfully processed permission inherited event for user {UserId}",
-                    eventData.UserId);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                _logger.LogInformation("Successfully processed PermissionRevokedEvent for User {UserId}", eventData.UserId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Error processing permission inherited event for user {UserId}, permission {Scope}",
-                    eventData.UserId, eventData.PermissionScope);
-
-                await LogFailureAsync(
-                    "PERMISSION_INHERIT_FAILED",
-                    eventData.UserId,
-                    ex.Message,
-                    eventData);
-
+                _logger.LogError(ex, "Error processing PermissionRevokedEvent for User {UserId}", eventData.UserId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 throw;
             }
         }
-
         /// <summary>
-        /// 권한 위임 이벤트 처리
+        /// 권한 정의 수정 이벤트를 처리합니다.
+        /// 트랜잭션 내에서 감사 로그를 기록하고, 관련된 캐시를 무효화한 후,
+        /// 통합 이벤트를 발행하여 다른 시스템에 변경 사항을 알립니다.
         /// </summary>
-        public async Task HandlePermissionDelegatedAsync(PermissionDelegatedEvent eventData)
+        public async Task HandlePermissionModifiedAsync(PermissionModifiedEvent eventData, CancellationToken cancellationToken = default)
         {
             if (eventData == null)
             {
-                _logger.LogWarning("Received null PermissionDelegatedEvent");
+                _logger.LogWarning("Received null PermissionModifiedEvent.");
                 return;
             }
 
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                _logger.LogInformation(
-                    "Processing permission delegated event: User {DelegatorId} delegated permission {Scope} to {DelegateId}",
-                    eventData.DelegatorUserId, eventData.PermissionScope, eventData.DelegateUserId);
+                _logger.LogInformation("Processing PermissionModifiedEvent for PermissionId {PermissionId}", eventData.AggregateId);
 
-                // 1. 양쪽 사용자의 캐시 업데이트
-                await InvalidatePermissionCacheAsync(eventData.DelegatorUserId, eventData.PermissionScope);
-                await InvalidatePermissionCacheAsync(eventData.DelegateUserId, eventData.PermissionScope);
+                // 1. 변경된 권한 정의에 대한 캐시 무효화 (사용자별 캐시가 아님)
+                await InvalidatePermissionDefinitionCacheAsync(eventData.PermissionScope, cancellationToken);
 
-                // 2. 감사 로그
+                // 2. 감사 로그 기록 (eventData의 실제 속성 사용)
+                var changes = BuildChangeList(eventData.OldValues, eventData.NewValues);
                 await _auditService.LogActionAsync(
-                    eventData.DelegatorUserId,
-                    $"Delegated permission '{eventData.PermissionScope}' to another user",
-                    AuditActionType.Update,
-                    "Permission",
-                    eventData.PermissionScope,
-                    true,
-                    JsonConvert.SerializeObject(new
+                    actionType: AuditActionType.Update,
+                    action: $"Modified permission definition for '{eventData.PermissionScope}'",
+                    connectedId: eventData.ModifiedByUserId,
+                    success: true,
+                    resourceType: "PermissionDefinition",
+                    resourceId: eventData.AggregateId.ToString(),
+                    metadata: new Dictionary<string, object>
                     {
-                        DelegatorUserId = eventData.DelegatorUserId,
-                        DelegateUserId = eventData.DelegateUserId,
-                        PermissionScope = eventData.PermissionScope,
-                        DelegatedAt = eventData.DelegatedAt,
-                        ExpiresAt = eventData.ExpiresAt,
-                        CanSubDelegate = eventData.CanSubDelegate,
-                        DelegationLevel = eventData.DelegationLevel
-                    }));
+                { "PermissionScope", eventData.PermissionScope },
+                { "Changes", changes },
+                { "Reason", eventData.Reason ?? "No reason provided" }
+                    },
+                    cancellationToken: cancellationToken);
 
-                // 3. 권한 변경 로그
-                await _auditService.LogPermissionChangeAsync(
-                    "User",
-                    eventData.DelegateUserId.ToString(),
-                    eventData.PermissionScope,
-                    "DELEGATE",
-                    eventData.DelegateConnectedId ?? eventData.DelegateUserId,
-                    eventData.DelegatorUserId);
+                // 3. 통합 이벤트 발행 (영향받는 사용자 ID 목록 없이 발행)
+                // 후속 처리(예: 모든 관련 사용자에게 알림)는 이 이벤트를 구독하는 다른 서비스의 책임입니다.
+                var integrationEvent = new PermissionChangedIntegrationEvent(
+                    changeType: "DEFINITION_MODIFIED",
+                    userId: Guid.Empty, // 특정 사용자가 아닌 권한 자체의 변경이므로 Empty
+                    permissionScope: eventData.PermissionScope,
+                    triggeredByUserId: eventData.ModifiedByUserId,
+                    reason: eventData.Reason ?? $"Changes: {string.Join(", ", changes)}"
+                );
+                await _eventBus.PublishAsync(integrationEvent, cancellationToken);
 
-                // 4. 보안 이벤트
-                var securityEvent = new SecurityEvent
-                {
-                    EventType = SecurityEventType.PermissionDelegated,
-                    Severity = SecuritySeverityLevel.Warning,
-                    TriggeringConnectedId = eventData.DelegatorConnectedId,
-                    TargetConnectedId = eventData.DelegateConnectedId,
-                    EventDescription = $"Permission {eventData.PermissionScope} delegated from user {eventData.DelegatorUserId} to {eventData.DelegateUserId}",
-                    ResourceType = "Permission",
-                    AttemptedAction = "DELEGATE",
-                    OccurredAt = eventData.DelegatedAt,
-                    AdditionalContext = JsonConvert.SerializeObject(new Dictionary<string, object>
-                    {
-                        ["delegatorUserId"] = eventData.DelegatorUserId,
-                        ["delegateUserId"] = eventData.DelegateUserId,
-                        ["permissionScope"] = eventData.PermissionScope,
-                        ["expiresAt"] = eventData.ExpiresAt?.ToString() ?? "Never",
-                        ["canSubDelegate"] = eventData.CanSubDelegate
-                    })
-                };
-
-                await _securityEventService.RecordEventAsync(securityEvent);
-
-                // 5. 양쪽 사용자에게 알림
-                await _notificationService.SendSecurityAlertAsync(
-                    eventData.DelegateUserId,
-                    "권한이 위임되었습니다",
-                    GenerateDelegationNotificationForDelegate(
-                        eventData.PermissionScope,
-                        eventData.DelegatorUserId,
-                        eventData.ExpiresAt,
-                        eventData.CanSubDelegate));
-
-                await _notificationService.SendSecurityAlertAsync(
-                    eventData.DelegatorUserId,
-                    "권한을 위임했습니다",
-                    GenerateDelegationNotificationForDelegator(
-                        eventData.PermissionScope,
-                        eventData.DelegateUserId,
-                        eventData.ExpiresAt));
-
-                _logger.LogInformation(
-                    "Successfully processed permission delegated event from user {DelegatorId} to {DelegateId}",
-                    eventData.DelegatorUserId, eventData.DelegateUserId);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                _logger.LogInformation("Successfully processed PermissionModifiedEvent for PermissionId {PermissionId}", eventData.AggregateId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Error processing permission delegated event from user {DelegatorId} to {DelegateId}",
-                    eventData.DelegatorUserId, eventData.DelegateUserId);
-
-                await LogFailureAsync(
-                    "PERMISSION_DELEGATE_FAILED",
-                    eventData.DelegatorUserId,
-                    ex.Message,
-                    eventData);
-
+                _logger.LogError(ex, "Error processing PermissionModifiedEvent for PermissionId {PermissionId}", eventData.AggregateId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 throw;
             }
         }
+        /// <summary>
+        /// 권한 위임 이벤트를 처리합니다.
+        /// 트랜잭션 내에서 위임된 각 권한의 캐시를 무효화하고, 단일 감사 로그를 기록한 후,
+        /// 각 권한에 대한 통합 이벤트를 발행하여 후속 조치를 위임합니다.
+        /// </summary>
+        public async Task HandlePermissionDelegatedAsync(PermissionDelegatedEvent eventData, CancellationToken cancellationToken = default)
+        {
+            if (eventData == null)
+            {
+                _logger.LogWarning("Received null PermissionDelegatedEvent.");
+                return;
+            }
 
+            if (eventData.DelegatedPermissions == null || !eventData.DelegatedPermissions.Any())
+            {
+                _logger.LogWarning("PermissionDelegatedEvent from Delegator {DelegatorId} contained no permissions to delegate.", eventData.DelegatorUserId);
+                return;
+            }
+
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                _logger.LogInformation(
+                    "Processing PermissionDelegatedEvent: {DelegatorId} -> {DelegateId} for {PermissionCount} permissions.",
+                    eventData.DelegatorUserId, eventData.DelegateUserId, eventData.DelegatedPermissions.Count);
+
+                // 1. 위임자와 수임자 모두에 대해 위임된 모든 권한의 캐시를 무효화합니다.
+                var invalidationTasks = new List<Task>();
+                foreach (var scope in eventData.DelegatedPermissions)
+                {
+                    invalidationTasks.Add(InvalidatePermissionCacheAsync(eventData.DelegatorUserId, scope, cancellationToken));
+                    invalidationTasks.Add(InvalidatePermissionCacheAsync(eventData.DelegateUserId, scope, cancellationToken));
+                }
+                await Task.WhenAll(invalidationTasks);
+
+                // 2. 단일 감사 로그를 기록합니다. (✅ FIX: eventData의 실제 속성 사용)
+                await _auditService.LogActionAsync(
+                    actionType: AuditActionType.Update, // 위임은 기존 권한에 대한 상태 변경
+                    action: $"User delegated {eventData.DelegatedPermissions.Count} permission(s) to another user",
+                    connectedId: eventData.DelegatorUserId, // 위임한 사람이 작업의 주체
+                    success: true,
+                    resourceType: "PermissionDelegation",
+                    resourceId: eventData.AggregateId.ToString(), // 위임 행위 자체가 이벤트의 주체
+                    metadata: new Dictionary<string, object>
+                    {
+                { "DelegatorUserId", eventData.DelegatorUserId },
+                { "DelegateUserId", eventData.DelegateUserId },
+                { "DelegatedPermissions", eventData.DelegatedPermissions },
+                { "DelegationType", eventData.DelegationType.ToString() },
+                { "DelegationScope", eventData.DelegationScope.ToString() },
+                { "CanSubDelegate", eventData.CanSubDelegate },
+                { "ExpiresAt", eventData.ExpiresAt?.ToString() ?? "Never" },
+                { "Reason", eventData.Reason ?? "No reason provided" }
+                    },
+                    cancellationToken: cancellationToken);
+
+                // 3. 위임된 각 권한에 대해 별도의 통합 이벤트를 발행합니다.
+                var eventTasks = eventData.DelegatedPermissions.Select(scope =>
+                {
+                    var integrationEvent = new PermissionChangedIntegrationEvent(
+                        changeType: "DELEGATED",
+                        userId: eventData.DelegateUserId, // 위임 받은 사람이 이벤트의 주체
+                        permissionScope: scope,
+                        triggeredByUserId: eventData.DelegatorUserId,
+                        reason: eventData.Reason ?? $"Delegated by user {eventData.DelegatorUserId}",
+                        expiresAt: eventData.ExpiresAt
+                    );
+                    return _eventBus.PublishAsync(integrationEvent, cancellationToken);
+                });
+                await Task.WhenAll(eventTasks);
+
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                _logger.LogInformation("Successfully processed PermissionDelegatedEvent from {DelegatorId} to {DelegateId}", eventData.DelegatorUserId, eventData.DelegateUserId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing PermissionDelegatedEvent from {DelegatorId}", eventData.DelegatorUserId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        }
+        /// <summary>
+        /// 권한 정의와 관련된 일반 캐시를 무효화합니다.
+        /// </summary>
+        private async Task InvalidatePermissionDefinitionCacheAsync(string permissionScope, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // 권한 정의 자체에 대한 캐시 키 (사용자 ID와 무관)
+                var cacheKey = $"{AuthConstants.CacheKeys.PermissionPrefix}definition:{permissionScope}";
+
+                // ICacheService를 사용하여 캐시 제거
+                await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+
+                _logger.LogDebug("Invalidated permission definition cache for Scope {Scope}", permissionScope);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to invalidate permission definition cache for scope {Scope}", permissionScope);
+            }
+        }
+
+        // BuildChangeList 헬퍼 메서드는 그대로 유지됩니다.
+        private List<string> BuildChangeList(Dictionary<string, object?> oldValues, Dictionary<string, object?> newValues)
+        {
+            var changes = new List<string>();
+            if (newValues == null) return changes;
+
+            foreach (var key in newValues.Keys)
+            {
+                var newValue = newValues[key];
+                if (oldValues == null || !oldValues.TryGetValue(key, out var oldValue))
+                {
+                    changes.Add($"{key}: set to '{newValue}'");
+                }
+                else if (!Equals(oldValue, newValue))
+                {
+                    changes.Add($"{key}: changed from '{oldValue}' to '{newValue}'");
+                }
+            }
+            return changes;
+        }
+        /// <summary>
+        /// 권한 상속 이벤트를 처리합니다.
+        /// </summary>
+        public async Task HandlePermissionInheritedAsync(PermissionInheritedEvent eventData, CancellationToken cancellationToken = default)
+        {
+            if (eventData == null)
+            {
+                _logger.LogWarning("Received null PermissionInheritedEvent.");
+                return;
+            }
+
+            // ✅ FIX: 트랜잭션으로 데이터 정합성 보장
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                _logger.LogInformation(
+                    "Processing PermissionInheritedEvent for User {UserId}, Scope {Scope} from {InheritedFromType}",
+                    eventData.UserId, eventData.PermissionScope, eventData.InheritanceType);
+
+                // 1. 캐시 무효화
+                await InvalidatePermissionCacheAsync(eventData.UserId, eventData.PermissionScope, cancellationToken);
+
+                // 2. 감사 로그 기록 (✅ FIX: eventData의 실제 속성 사용)
+                await _auditService.LogActionAsync(
+                    actionType: AuditActionType.Create,
+                    action: $"User inherited permission '{eventData.PermissionScope}' from {eventData.InheritanceType}: {eventData.InheritedFromName}",
+                    connectedId: eventData.ConnectedId ?? eventData.UserId, // 작업을 유발한 주체 (시스템일 경우 대상 사용자로 대체)
+                    success: true,
+                    resourceType: "PermissionInheritance",
+                    resourceId: eventData.AggregateId.ToString(), // 이벤트의 주체는 '상속 관계' 그 자체
+                    metadata: new Dictionary<string, object>
+                    {
+                { "TargetUserId", eventData.UserId },
+                { "PermissionScope", eventData.PermissionScope },
+                { "InheritanceType", eventData.InheritanceType.ToString() },
+                { "InheritedFromId", eventData.InheritedFromId },
+                { "InheritedFromName", eventData.InheritedFromName },
+                { "InheritanceDepth", eventData.InheritanceDepth }
+                    },
+                    cancellationToken: cancellationToken);
+
+                // 3. 통합 이벤트 발행 (✅ FIX: eventData의 실제 속성 사용)
+                var integrationEvent = new PermissionChangedIntegrationEvent(
+                    changeType: "INHERITED",
+                    userId: eventData.UserId,
+                    permissionScope: eventData.PermissionScope,
+                    triggeredByUserId: Guid.Empty, // 상속은 시스템 규칙에 의해 발생
+                    reason: $"Inherited from {eventData.InheritanceType}: {eventData.InheritedFromName}"
+                );
+                await _eventBus.PublishAsync(integrationEvent, cancellationToken);
+
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                _logger.LogInformation("Successfully processed PermissionInheritedEvent for User {UserId}", eventData.UserId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing PermissionInheritedEvent for User {UserId}", eventData.UserId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        }
         #endregion
 
         #region Helper Methods
 
-        private async Task InvalidatePermissionCacheAsync(Guid userId, string permissionScope)
+        /// <summary>
+        /// 지정된 사용자와 권한에 대한 모든 관련 캐시를 무효화합니다.
+        /// ICacheService를 사용하여 분산 캐시와 인-메모리 캐시를 모두 처리합니다.
+        /// </summary>
+        private async Task InvalidatePermissionCacheAsync(Guid userId, string permissionScope, CancellationToken cancellationToken)
         {
             try
             {
-                var cacheKeys = new[]
+                // 여러 캐시 키를 한 번에 제거하기 위한 패턴 또는 개별 키 목록
+                var cacheKeysToRemove = new[]
                 {
                     $"{AuthConstants.CacheKeys.PermissionPrefix}{userId}",
                     $"{AuthConstants.CacheKeys.PermissionPrefix}{userId}:{permissionScope}",
                     $"{AuthConstants.CacheKeys.UserPrefix}permissions:{userId}"
                 };
 
-                foreach (var key in cacheKeys)
-                {
-                    await _distributedCache.RemoveAsync(key);
-                }
+                // ✅ FIX: ICacheService의 RemoveMultipleAsync 또는 패턴 기반 제거 사용
+                await _cacheService.RemoveMultipleAsync(cacheKeysToRemove, cancellationToken);
 
-                _memoryCache.Remove($"user_permissions:{userId}");
-                _memoryCache.Remove($"permission:{permissionScope}");
+                _logger.LogDebug("Invalidated permission caches for User {UserId} and Scope {Scope}", userId, permissionScope);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to invalidate permission cache for user {UserId}", userId);
+                // 캐시 무효화 실패는 트랜잭션을 롤백할 만큼 치명적이지 않으므로 경고만 기록하고 계속 진행합니다.
             }
-        }
-
-        private async Task LogFailureAsync(string eventType, Guid userId, string errorMessage, object eventData)
-        {
-            try
-            {
-                await _auditService.LogSecurityEventAsync(
-                    eventType,
-                    AuditEventSeverity.Error,
-                    errorMessage,
-                    userId,
-                    new Dictionary<string, object>
-                    {
-                        ["errorMessage"] = errorMessage,
-                        ["eventData"] = JsonConvert.SerializeObject(eventData),
-                        ["timestamp"] = DateTime.UtcNow
-                    });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to log failure audit for event type {EventType}", eventType);
-            }
-        }
-
-        private string GenerateGrantNotificationMessage(string permissionName, string? reason, DateTime? expiresAt)
-        {
-            var message = $"'{permissionName}' 권한이 부여되었습니다.";
-
-            if (!string.IsNullOrWhiteSpace(reason))
-            {
-                message += $"\n사유: {reason}";
-            }
-
-            if (expiresAt.HasValue)
-            {
-                message += $"\n만료일: {expiresAt.Value:yyyy-MM-dd HH:mm}";
-            }
-            else
-            {
-                message += "\n만료일: 무기한";
-            }
-
-            return message;
-        }
-
-        private string GenerateRevokeNotificationMessage(string permissionName, string? reason)
-        {
-            var message = $"'{permissionName}' 권한이 취소되었습니다.";
-
-            if (!string.IsNullOrWhiteSpace(reason))
-            {
-                message += $"\n사유: {reason}";
-            }
-
-            return message;
-        }
-
-        private string GenerateDelegationNotificationForDelegate(
-            string permissionScope,
-            Guid delegatorUserId,
-            DateTime? expiresAt,
-            bool canSubDelegate)
-        {
-            var message = $"사용자 {delegatorUserId}로부터 '{permissionScope}' 권한을 위임받았습니다.";
-
-            if (expiresAt.HasValue)
-            {
-                message += $"\n위임 만료일: {expiresAt.Value:yyyy-MM-dd HH:mm}";
-            }
-
-            if (canSubDelegate)
-            {
-                message += "\n이 권한을 다른 사용자에게 재위임할 수 있습니다.";
-            }
-            else
-            {
-                message += "\n이 권한은 재위임할 수 없습니다.";
-            }
-
-            return message;
-        }
-
-        private string GenerateDelegationNotificationForDelegator(
-            string permissionScope,
-            Guid delegateUserId,
-            DateTime? expiresAt)
-        {
-            var message = $"'{permissionScope}' 권한을 사용자 {delegateUserId}에게 위임했습니다.";
-
-            if (expiresAt.HasValue)
-            {
-                message += $"\n위임 만료일: {expiresAt.Value:yyyy-MM-dd HH:mm}";
-                message += "\n만료 시점에 자동으로 위임이 해제됩니다.";
-            }
-
-            return message;
-        }
-
-        private List<string> BuildChangeList(Dictionary<string, object>? oldValues, Dictionary<string, object>? newValues)
-        {
-            var changes = new List<string>();
-
-            if (oldValues == null || newValues == null)
-            {
-                return changes;
-            }
-
-            foreach (var key in newValues.Keys)
-            {
-                if (!oldValues.ContainsKey(key))
-                {
-                    changes.Add($"{key}: 추가됨 ('{newValues[key]}')");
-                }
-                else if (!Equals(oldValues[key], newValues[key]))
-                {
-                    changes.Add($"{key}: '{oldValues[key]}' → '{newValues[key]}'");
-                }
-            }
-
-            foreach (var key in oldValues.Keys)
-            {
-                if (!newValues.ContainsKey(key))
-                {
-                    changes.Add($"{key}: 제거됨 (이전 값: '{oldValues[key]}')");
-                }
-            }
-
-            return changes;
         }
 
         #endregion
