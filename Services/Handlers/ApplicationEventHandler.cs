@@ -7,9 +7,9 @@ using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Application.Service;
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Core.Handlers;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.PlatformApplication.Handler;
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Models.PlatformApplication.Events;
 using Microsoft.EntityFrameworkCore;
@@ -26,7 +26,7 @@ namespace AuthHive.Auth.Handlers
         private readonly IAuditService _auditService;
         private readonly ICacheService _cacheService;
         private readonly IPlatformApplicationRepository _applicationRepository;
-        private readonly IApplicationService _applicationService;
+        private readonly IPlatformApplicationService _applicationService;
         private readonly IDateTimeProvider _dateTimeProvider;
         private readonly ILogger<ApplicationEventHandler> _logger;
         private readonly IEventBus _eventBus;
@@ -45,7 +45,7 @@ namespace AuthHive.Auth.Handlers
             IAuditService auditService,
             ICacheService cacheService,
             IPlatformApplicationRepository applicationRepository,
-            IApplicationService applicationService,
+            IPlatformApplicationService applicationService,
             IDateTimeProvider dateTimeProvider,
             ILogger<ApplicationEventHandler> logger,
             IEventBus eventBus,

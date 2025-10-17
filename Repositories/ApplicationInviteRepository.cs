@@ -2,9 +2,8 @@ using AuthHive.Core.Entities.PlatformApplications;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Interfaces.Base;
-// using Microsoft.Extensions.Caching.Memory; // 🚫 ICacheService를 사용하므로 이 using은 제거되거나 불필요해집니다.
 using AuthHive.Core.Interfaces.Organization.Service;
-using AuthHive.Core.Interfaces.Infra.Cache; // 💡 ICacheService의 네임스페이스가 필요합니다.
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Repositories.PlatformApplication
 {
