@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Caching.Distributed;
@@ -29,6 +30,9 @@ using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Auth.Services.Authentication;
 using AuthHive.Core.Models.Auth.Session.Common;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Models.Auth.Authentication.Events;
+using AuthHive.Core.Models.User.Events;
+using AuthHive.Core.Models.Auth.Session.Events;
 
 namespace AuthHive.Auth.Services.Handlers
 {
@@ -128,25 +132,28 @@ namespace AuthHive.Auth.Services.Handlers
                     eventData.Username, eventData.LoginMethod, eventData.IpAddress);
 
                 // 1. AuthenticationAttemptService를 통한 IP 위협 평가
-                var ipRiskAssessment = await _authAttemptService.AssessIpRiskAsync(eventData.IpAddress);
+                var ipRiskAssessment = await _authAttemptService.AssessIpRiskAsync(eventData.IpAddress, cancellationToken);
                 if (ipRiskAssessment.IsSuccess && ipRiskAssessment.Data?.RiskScore >= 0.8)
                 {
                     _logger.LogWarning("High risk IP detected: {IpAddress}", eventData.IpAddress);
-                    await RecordBlockedAttemptAsync(eventData);
+                    await RecordBlockedAttemptAsync(eventData, cancellationToken);
                     return;
                 }
 
                 // 2. 무차별 대입 공격 감지
                 var bruteForceDetected = await _authAttemptService.DetectBruteForceAttackAsync(
                     eventData.Username,
-                    eventData.IpAddress);
+                    eventData.IpAddress,
+                    cancellationToken);
                 if (bruteForceDetected.IsSuccess && bruteForceDetected.Data == true)
                 {
                     _logger.LogWarning("Brute force attack detected from {IpAddress}", eventData.IpAddress);
                     await _authAttemptService.BlockIpAddressAsync(
-                        eventData.IpAddress,
-                        TimeSpan.FromHours(1),
-                        "Brute force attack detected");
+        ipAddress: eventData.IpAddress,
+        duration: TimeSpan.FromHours(1),
+        reason: "Brute force attack detected",
+        organizationId: null,
+        cancellationToken: cancellationToken);
                     return;
                 }
 
@@ -162,7 +169,7 @@ namespace AuthHive.Auth.Services.Handlers
                         : null
                 };
 
-                await _authAttemptService.LogAuthenticationAttemptAsync(authRequest);
+                await _authAttemptService.LogAuthenticationAttemptAsync(authRequest, cancellationToken);
 
                 // 4. 감사 로그
                 await LogAuditAsync(
@@ -177,9 +184,13 @@ namespace AuthHive.Auth.Services.Handlers
                         ["LoginMethod"] = eventData.LoginMethod,
                         ["IpAddress"] = eventData.IpAddress,
                         ["UserAgent"] = eventData.UserAgent ?? "Unknown"
-                    });
+                    },
+                    cancellationToken);
 
                 // 5. 메트릭 기록
+                // Specify which parameter gets which value
+                // Pass '1' for the value, then the cancellationToken
+                // This matches the interface definition you provided.
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.attempt.{eventData.LoginMethod.ToLower()}");
             }
             catch (Exception ex)
@@ -198,15 +209,15 @@ namespace AuthHive.Auth.Services.Handlers
                     eventData.UserId, eventData.SessionId, eventData.LoginMethod, eventData.IpAddress);
 
                 // 1. 사용자 정보 업데이트
-                var user = await _userRepository.GetByIdAsync(eventData.UserId);
+                var user = await _userRepository.GetByIdAsync(eventData.UserId, cancellationToken);
                 if (user != null)
                 {
-                    user.LastLoginAt = eventData.LoginAt;
+                    user.LastLoginAt = eventData.OccurredAt;
                     user.LastLoginIp = eventData.IpAddress;
                     user.LoginCount = (user.LoginCount ?? 0) + 1;
                     user.UpdatedAt = _dateTimeProvider.UtcNow;
 
-                    await _userRepository.UpdateAsync(user);
+                    await _userRepository.UpdateAsync(user, cancellationToken);
                 }
 
                 // 2. AuthenticationAttemptService를 통한 성공 기록
@@ -215,7 +226,8 @@ namespace AuthHive.Auth.Services.Handlers
                     eventData.ConnectedId,
                     ParseAuthenticationMethod(eventData.LoginMethod),
                     eventData.IpAddress,
-                    eventData.Device);
+                    eventData.Device,
+                    cancellationToken);
 
                 // 3. SessionService를 통한 세션 생성
                 if (eventData.ConnectedId.HasValue)
@@ -226,7 +238,7 @@ namespace AuthHive.Auth.Services.Handlers
                         OrganizationId = user?.OrganizationId ?? Guid.Empty,
                         SessionType = SessionType.Web,
                         IpAddress = eventData.IpAddress,
-                        UserAgent = eventData.Device,
+                        UserAgent = eventData.Device ?? string.Empty,
                         InitialStatus = SessionStatus.Active,
                         ExpiresAt = DateTime.UtcNow.AddMinutes(AuthConstants.Session.GlobalSessionTimeoutMinutes),
                         InitialRiskScore = 0,
@@ -235,7 +247,7 @@ namespace AuthHive.Auth.Services.Handlers
                         EnablePermissionCache = true
                     };
 
-                    var sessionResult = await _sessionService.CreateSessionAsync(createSessionRequest);
+                    var sessionResult = await _sessionService.CreateSessionAsync(createSessionRequest, cancellationToken);
                     if (sessionResult.IsSuccess && sessionResult.Data != null)
                     {
                         eventData.SessionId = sessionResult.Data.SessionId ?? Guid.NewGuid();
@@ -254,14 +266,16 @@ namespace AuthHive.Auth.Services.Handlers
                         IpAddress = eventData.IpAddress,
                         Location = eventData.Location,
                         Device = eventData.Device
-                    });
+                    },
+                    cancellationToken);
 
                 // 5. 보안 분석
                 var anomalyResult = await _securityAnalyzer.DetectLoginAnomalyAsync(
                     eventData.UserId,
                     eventData.IpAddress,
                     eventData.Device ?? "Unknown",
-                    eventData.LoginAt);
+                    eventData.OccurredAt,
+                    cancellationToken);
 
                 double anomalyScore = anomalyResult.AnomalyScore;
                 bool anomalyDetected = anomalyResult.AnomalyDetected;
@@ -269,7 +283,7 @@ namespace AuthHive.Auth.Services.Handlers
 
                 if (anomalyDetected && anomalyScore > 0.7)
                 {
-                    await HandleSuspiciousLoginAsync(eventData, anomalyScore, requireAdditionalVerification);
+                    await HandleSuspiciousLoginAsync(eventData, anomalyScore, requireAdditionalVerification, cancellationToken);
                 }
 
                 // 6. 지리적 이상 징후 탐지 (AuthenticationAttemptService 활용)
@@ -277,11 +291,12 @@ namespace AuthHive.Auth.Services.Handlers
                 {
                     var geoAnomalyDetected = await _authAttemptService.DetectGeographicalAnomalyAsync(
                         eventData.UserId,
-                        eventData.Location);
+                        eventData.Location,
+                        cancellationToken);
 
                     if (geoAnomalyDetected.IsSuccess && geoAnomalyDetected.Data == true)
                     {
-                        await SendNewLocationAlertAsync(eventData);
+                        await SendNewLocationAlertAsync(eventData, cancellationToken);
                     }
                 }
 
@@ -294,19 +309,20 @@ namespace AuthHive.Auth.Services.Handlers
                     AuditEventSeverity.Info,
                     new Dictionary<string, object>
                     {
-                        ["SessionId"] = eventData.SessionId,
+                        ["SessionId"] = eventData.SessionId?.ToString() ?? "N/A",
                         ["LoginMethod"] = eventData.LoginMethod,
                         ["IpAddress"] = eventData.IpAddress,
                         ["Location"] = eventData.Location ?? "Unknown",
                         ["Device"] = eventData.Device ?? "Unknown",
                         ["AnomalyScore"] = anomalyScore
-                    });
+                    },
+                    cancellationToken);
 
                 // 8. 메트릭 기록 (수정된 부분)
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.success.{eventData.LoginMethod.ToLower()}");
-                await _metricsService.RecordHistogramAsync($"{METRICS_PREFIX}.anomaly_score", anomalyScore);
+                await _metricsService.RecordHistogramAsync($"{METRICS_PREFIX}.anomaly_score", anomalyScore, cancellationToken);
 
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             catch (Exception ex)
             {
@@ -326,20 +342,22 @@ namespace AuthHive.Auth.Services.Handlers
 
                 // 1. AuthenticationAttemptService를 통한 실패 기록
                 await _authAttemptService.LogFailedAuthenticationAsync(
-                    eventData.Username,
-                    ParseAuthenticationMethod(eventData.LoginMethod),
-                    ParseAuthenticationResult(eventData.FailureReason),
-                    eventData.IpAddress);
+                    identifier: eventData.Username,
+                    method: ParseAuthenticationMethod(eventData.LoginMethod),
+                    reason: ParseAuthenticationResult(eventData.FailureReason),
+                    ipAddress: eventData.IpAddress,
+                    userAgent: eventData.UserAgent,
+                    cancellationToken: cancellationToken);
 
                 // 2. 계정 잠금 확인 및 처리
-                var user = await _userRepository.GetByUsernameAsync(eventData.Username);
+                var user = await _userRepository.GetByUsernameAsync(eventData.Username, includeDeleted: false, cancellationToken);
                 if (user != null)
                 {
-                    var lockStatus = await _authAttemptService.CheckAccountLockStatusAsync(user.Id);
+                    var lockStatus = await _authAttemptService.CheckAccountLockStatusAsync(user.Id, cancellationToken);
                     if (lockStatus.IsSuccess && lockStatus.Data?.IsLocked == true)
                     {
                         eventData.IsAccountLocked = true;
-                        await HandleAccountLockAsync(user.Id, eventData.FailureReason);
+                        await HandleAccountLockAsync(user.Id, eventData.FailureReason, cancellationToken);
                     }
                 }
 
@@ -348,7 +366,8 @@ namespace AuthHive.Auth.Services.Handlers
                 {
                     await _authAttemptService.NotifySuspiciousActivityAsync(
                         user.Id,
-                        $"Multiple failed login attempts: {eventData.FailedAttempts}");
+                        $"Multiple failed login attempts: {eventData.FailedAttempts}",
+                        cancellationToken);
                 }
 
                 // 4. 감사 로그
@@ -366,12 +385,13 @@ namespace AuthHive.Auth.Services.Handlers
                         ["FailureReason"] = eventData.FailureReason,
                         ["FailedAttempts"] = eventData.FailedAttempts,
                         ["IsAccountLocked"] = eventData.IsAccountLocked
-                    });
+                    },
+                    cancellationToken);
 
                 // 5. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.failure.{eventData.LoginMethod.ToLower()}");
 
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             catch (Exception ex)
             {
@@ -389,12 +409,12 @@ namespace AuthHive.Auth.Services.Handlers
                     eventData.UserId, eventData.Username, eventData.RegistrationSource);
 
                 // 1. 사용자 정보 업데이트
-                var user = await _userRepository.GetByIdAsync(eventData.UserId);
+                var user = await _userRepository.GetByIdAsync(eventData.UserId, cancellationToken);
                 if (user != null && !user.FirstLoginAt.HasValue)
                 {
-                    user.FirstLoginAt = eventData.FirstLoginAt;
+                    user.FirstLoginAt = eventData.OccurredAt;
                     user.UpdatedAt = _dateTimeProvider.UtcNow;
-                    await _userRepository.UpdateAsync(user);
+                    await _userRepository.UpdateAsync(user, cancellationToken);
                 }
 
                 // 2. 활동 로그 기록
@@ -406,10 +426,11 @@ namespace AuthHive.Auth.Services.Handlers
                     {
                         Username = eventData.Username,
                         RegistrationSource = eventData.RegistrationSource
-                    });
+                    },
+                    cancellationToken);
 
                 // 3. 환영 이메일 발송
-                await SendWelcomeEmailAsync(eventData.UserId, eventData.Username);
+                await SendWelcomeEmailAsync(eventData.UserId, eventData.Username, cancellationToken);
 
                 // 4. 감사 로그
                 await LogAuditAsync(
@@ -422,13 +443,14 @@ namespace AuthHive.Auth.Services.Handlers
                     {
                         ["Username"] = eventData.Username,
                         ["RegistrationSource"] = eventData.RegistrationSource,
-                        ["FirstLoginAt"] = eventData.FirstLoginAt
-                    });
+                        ["FirstLoginAt"] = eventData.OccurredAt
+                    },
+                    cancellationToken);
 
                 // 5. 메트릭 기록
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.first_login");
 
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             catch (Exception ex)
             {
@@ -443,56 +465,60 @@ namespace AuthHive.Auth.Services.Handlers
             {
                 _logger.LogInformation(
                     "New device login detected for User {UserId}. Device: {DeviceType} ({DeviceName}) from {IpAddress}",
-                    eventData.UserId, eventData.DeviceType, eventData.DeviceName, eventData.IpAddress);
+                    eventData.AggregateId, // BaseEvent에서 상속받은 AggregateId를 사용 (생성자에서 userId로 설정됨)
+                    eventData.DeviceType,
+                    eventData.DeviceName,
+                    eventData.IpAddress);
 
                 // 1. AuthenticationAttemptService를 통한 새 디바이스 알림
                 await _authAttemptService.NotifyNewDeviceLoginAsync(
-                    eventData.UserId,
+                    eventData.AggregateId,
                     $"{eventData.DeviceType}: {eventData.DeviceName}",
                     eventData.IpAddress,
                     cancellationToken);
 
                 // 2. 활동 로그 기록
                 await LogUserActivityAsync(
-                    Guid.Empty,
+                    Guid.Empty, // 이 이벤트는 특정 ConnectedId와 직접 연관되지 않을 수 있음
                     UserActivityType.NewDeviceLogin,
                     true,
                     new
                     {
-                        DeviceId = eventData.DeviceId,
-                        DeviceType = eventData.DeviceType,
-                        DeviceName = eventData.DeviceName,
-                        IpAddress = eventData.IpAddress
+                        eventData.DeviceId,
+                        eventData.DeviceType,
+                        eventData.DeviceName,
+                        eventData.IpAddress
                     },
                     cancellationToken);
 
                 // 3. 디바이스 캐싱
-                await UpdateDeviceCacheAsync(eventData.UserId, $"{eventData.DeviceType}:{eventData.DeviceName}");
+                await UpdateDeviceCacheAsync(eventData.AggregateId, $"{eventData.DeviceType}:{eventData.DeviceName}", cancellationToken);
 
-                // 4. 감사 로그
+                // 4. 감사 로그 (✅ FIX: 명명된 인수를 사용하여 CancellationToken을 올바르게 전달)
                 await LogAuditAsync(
-                    Guid.Empty,
-                    "NEW_DEVICE_LOGIN",
-                    $"Login from new device: {eventData.DeviceType} ({eventData.DeviceName})",
-                    eventData.UserId,
-                    AuditEventSeverity.Warning,
-                    new Dictionary<string, object>
+                    performedByConnectedId: Guid.Empty,
+                    action: "NEW_DEVICE_LOGIN",
+                    description: $"Login from new device: {eventData.DeviceType} ({eventData.DeviceName})",
+                    userId: eventData.AggregateId,
+                    severity: AuditEventSeverity.Warning,
+                    metadata: new Dictionary<string, object>
                     {
                         ["DeviceId"] = eventData.DeviceId,
                         ["DeviceType"] = eventData.DeviceType,
                         ["DeviceName"] = eventData.DeviceName,
                         ["IpAddress"] = eventData.IpAddress,
                         ["LoginAt"] = eventData.LoginAt
-                    });
+                    },
+                    cancellationToken: cancellationToken);
 
-                // 5. 메트릭 기록
+                // 5. 메트릭 기록 (✅ FIX: CancellationToken 인수 제거)
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.new_device");
 
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to handle new device login event for User {UserId}", eventData.UserId);
+                _logger.LogError(ex, "Failed to handle new device login event for User {UserId}", eventData.AggregateId);
             }
         }
 
@@ -508,7 +534,8 @@ namespace AuthHive.Auth.Services.Handlers
                 // 1. SessionRepository를 통한 동시 세션 수 확인
                 var concurrentCount = await _sessionRepository.GetConcurrentSessionCountAsync(
                     eventData.UserId,
-                    SessionLevel.Global);
+                    SessionLevel.Global,
+                    cancellationToken);
 
                 // 2. 세션 제한 초과 처리
                 if (eventData.ExceedsLimit || concurrentCount > MAX_CONCURRENT_SESSIONS)
@@ -525,13 +552,14 @@ namespace AuthHive.Auth.Services.Handlers
                     if (connectedIds.Any())
                     {
                         var primaryConnectedId = connectedIds.First().Id;
-                        var endedCount = await _sessionService.EndOtherDeviceSessionsAsync(
+                        var endedCountResult = await _sessionService.EndOtherDeviceSessionsAsync(
                             primaryConnectedId,
-                            currentSessionId);
+                            currentSessionId,
+                            cancellationToken);
 
                         _logger.LogInformation(
                             "Ended {Count} other device sessions for User {UserId}",
-                            endedCount.Data, eventData.UserId);
+                            endedCountResult.Data, eventData.UserId);
                     }
                 }
 
@@ -548,7 +576,8 @@ namespace AuthHive.Auth.Services.Handlers
                         await _authAttemptService.DetectAnomalousPatternAsync(
                             eventData.UserId,
                             eventData.ActiveSessions.First().IpAddress,
-                            fingerprint);
+                            fingerprint,
+                            cancellationToken);
                     }
                 }
 
@@ -562,7 +591,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ActiveSessionCount = eventData.ActiveSessions.Count,
                         NewSessionId = eventData.NewSessionId,
                         ExceedsLimit = eventData.ExceedsLimit
-                    });
+                    },
+                    cancellationToken);
 
                 // 5. 감사 로그
                 var severity = eventData.ExceedsLimit ? AuditEventSeverity.Warning : AuditEventSeverity.Info;
@@ -578,7 +608,8 @@ namespace AuthHive.Auth.Services.Handlers
                         ["NewSessionId"] = eventData.NewSessionId,
                         ["ExceedsLimit"] = eventData.ExceedsLimit,
                         ["ConcurrentCountFromRepo"] = concurrentCount
-                    });
+                    },
+                    cancellationToken);
 
                 // 6. 메트릭 기록 (수정된 부분)
                 await _metricsService.IncrementAsync($"{METRICS_PREFIX}.concurrent");
@@ -587,10 +618,10 @@ namespace AuthHive.Auth.Services.Handlers
                 // 7. 알림
                 if (eventData.ExceedsLimit || concurrentCount > 3)
                 {
-                    await SendConcurrentLoginAlertAsync(eventData);
+                    await SendConcurrentLoginAlertAsync(eventData, cancellationToken);
                 }
 
-                await _unitOfWork.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
             catch (Exception ex)
             {
@@ -602,13 +633,13 @@ namespace AuthHive.Auth.Services.Handlers
 
         #region Private Helper Methods
 
-        private async Task UpdateDeviceCacheAsync(Guid userId, string? device)
+        private async Task UpdateDeviceCacheAsync(Guid userId, string? device, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(device))
                 return;
 
             var key = $"{DEVICE_CACHE_KEY}:{userId}";
-            var devicesJson = await _distributedCache.GetStringAsync(key);
+            var devicesJson = await _distributedCache.GetStringAsync(key, cancellationToken);
 
             var devices = string.IsNullOrEmpty(devicesJson)
                 ? new HashSet<string>()
@@ -622,7 +653,8 @@ namespace AuthHive.Auth.Services.Handlers
                 new DistributedCacheEntryOptions
                 {
                     SlidingExpiration = TimeSpan.FromDays(DEVICE_CACHE_DAYS)
-                });
+                },
+                cancellationToken);
         }
 
         private async Task HandleAccountLockAsync(Guid userId, string reason, CancellationToken cancellationToken = default)
@@ -631,7 +663,8 @@ namespace AuthHive.Auth.Services.Handlers
             await _authAttemptService.LockAccountAsync(
                 userId,
                 TimeSpan.FromMinutes(AuthConstants.Security.AccountLockoutDurationMinutes),
-                reason);
+                reason,
+                cancellationToken);
 
             // SessionService를 통한 모든 세션 종료
             var connectedIds = await _connectedIdRepository.GetByUserIdAsync(userId, cancellationToken);
@@ -641,19 +674,20 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        private async Task HandleSuspiciousLoginAsync(LoginSuccessEvent eventData, double anomalyScore, bool requireAdditionalVerification)
+        private async Task HandleSuspiciousLoginAsync(LoginSuccessEvent eventData, double anomalyScore, bool requireAdditionalVerification, CancellationToken cancellationToken = default)
         {
             _logger.LogWarning(
                 "Suspicious login detected for User {UserId} from {IpAddress}. Anomaly score: {Score}",
                 eventData.UserId, eventData.IpAddress, anomalyScore);
 
             // SessionService를 통한 위험도 업데이트
-            if (eventData.SessionId != Guid.Empty)
+            if (eventData.SessionId.HasValue)
             {
                 await _sessionService.UpdateRiskScoreAsync(
-                    eventData.SessionId,
+                    eventData.SessionId.Value,
                     (int)(anomalyScore * 10),
-                    "Suspicious login pattern detected");
+                    "Suspicious login pattern detected",
+                    cancellationToken);
             }
 
             if (requireAdditionalVerification)
@@ -661,7 +695,8 @@ namespace AuthHive.Auth.Services.Handlers
                 await _notificationService.SendSecurityAlertAsync(
                     eventData.UserId,
                     "Suspicious Login Detected",
-                    $"A login from {eventData.IpAddress} was flagged as suspicious. Please verify this was you.");
+                    $"A login from {eventData.IpAddress} was flagged as suspicious. Please verify this was you.",
+                    cancellationToken);
             }
         }
 
@@ -672,14 +707,13 @@ namespace AuthHive.Auth.Services.Handlers
                 : AuthenticationMethod.Password;
         }
 
-        // 수정된 ParseAuthenticationResult 메서드
         private AuthenticationResult ParseAuthenticationResult(string reason)
         {
             return reason?.ToLower() switch
             {
                 "invalid credentials" => AuthenticationResult.InvalidCredentials,
                 "account locked" => AuthenticationResult.AccountLocked,
-                "two factor required" => AuthenticationResult.MfaRequired,  // TwoFactorRequired 대신 MfaRequired
+                "two factor required" => AuthenticationResult.MfaRequired,
                 "mfa required" => AuthenticationResult.MfaRequired,
                 "account disabled" => AuthenticationResult.AccountDisabled,
                 "account expired" => AuthenticationResult.AccountExpired,
@@ -691,7 +725,7 @@ namespace AuthHive.Auth.Services.Handlers
                 "application access denied" => AuthenticationResult.ApplicationAccessDenied,
                 "session limit exceeded" => AuthenticationResult.SessionLimitExceeded,
                 "system error" => AuthenticationResult.SystemError,
-                _ => AuthenticationResult.Other  // Failed 대신 Other
+                _ => AuthenticationResult.Other
             };
         }
 
@@ -702,7 +736,7 @@ namespace AuthHive.Auth.Services.Handlers
                 // ConnectedId가 없으면 조회 또는 생성
                 if (connectedId == Guid.Empty)
                 {
-                    connectedId = await GetOrCreateConnectedIdAsync(Guid.Empty);
+                    connectedId = await GetOrCreateConnectedIdAsync(Guid.Empty, cancellationToken);
                 }
 
                 var activity = new UserActivityLog
@@ -717,7 +751,7 @@ namespace AuthHive.Auth.Services.Handlers
                     CreatedAt = _dateTimeProvider.UtcNow
                 };
 
-                await _activityLogRepository.AddAsync(activity);
+                await _activityLogRepository.AddAsync(activity, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -736,7 +770,6 @@ namespace AuthHive.Auth.Services.Handlers
                 }
             }
 
-            // 임시 ConnectedId 생성 (실제로는 적절한 생성 로직 필요)
             return Guid.NewGuid();
         }
 
@@ -746,7 +779,8 @@ namespace AuthHive.Auth.Services.Handlers
             string description,
             Guid? userId,
             AuditEventSeverity severity,
-            Dictionary<string, object>? metadata = null)
+            Dictionary<string, object>? metadata = null,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -766,7 +800,7 @@ namespace AuthHive.Auth.Services.Handlers
                     CreatedByConnectedId = performedByConnectedId
                 };
 
-                await _auditRepository.AddAsync(auditLog);
+                await _auditRepository.AddAsync(auditLog, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -774,23 +808,22 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        // 수정된 DetermineActionType 메서드
         private AuditActionType DetermineActionType(string action)
         {
             return action switch
             {
                 "LOGIN_ATTEMPT" => AuditActionType.LoginAttempt,
                 "LOGIN_SUCCESS" => AuditActionType.Login,
-                "LOGIN_FAILURE" => AuditActionType.FailedLogin,  // LoginAttempt 대신 FailedLogin
+                "LOGIN_FAILURE" => AuditActionType.FailedLogin,
                 "FIRST_LOGIN" => AuditActionType.Login,
                 "NEW_DEVICE_LOGIN" => AuditActionType.Login,
                 "CONCURRENT_LOGIN" => AuditActionType.Login,
-                "LOGIN_BLOCKED" => AuditActionType.Blocked,  // Blocked가 없으므로 Others 사용
+                "LOGIN_BLOCKED" => AuditActionType.Blocked,
                 _ => AuditActionType.Others
             };
         }
 
-        private async Task RecordBlockedAttemptAsync(PreLoginEvent eventData)
+        private async Task RecordBlockedAttemptAsync(PreLoginEvent eventData, CancellationToken cancellationToken = default)
         {
             await LogAuditAsync(
                 Guid.Empty,
@@ -803,24 +836,26 @@ namespace AuthHive.Auth.Services.Handlers
                     ["Username"] = eventData.Username,
                     ["IpAddress"] = eventData.IpAddress,
                     ["Reason"] = "High Risk IP"
-                });
+                },
+                cancellationToken);
         }
 
         #endregion
 
         #region Email Notifications
 
-        private async Task SendWelcomeEmailAsync(Guid userId, string username)
+        private async Task SendWelcomeEmailAsync(Guid userId, string username, CancellationToken cancellationToken = default)
         {
             try
             {
-                var user = await _userRepository.GetByIdAsync(userId);
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user != null && !string.IsNullOrEmpty(user.Email))
                 {
                     await _emailService.SendWelcomeEmailAsync(
-                        user.Email,
-                        user.DisplayName ?? username,
-                        user.OrganizationId ?? Guid.Empty);
+        email: user.Email,
+        userName: user.DisplayName ?? username,
+        organizationId: user.OrganizationId ?? Guid.Empty,
+        cancellationToken: cancellationToken);
                 }
             }
             catch (Exception ex)
@@ -829,7 +864,7 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        private async Task SendNewLocationAlertAsync(LoginSuccessEvent eventData)
+        private async Task SendNewLocationAlertAsync(LoginSuccessEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -837,7 +872,8 @@ namespace AuthHive.Auth.Services.Handlers
                     eventData.UserId,
                     "New Login Location",
                     $"Your account was accessed from a new location: {eventData.Location ?? eventData.IpAddress}. " +
-                    $"Device: {eventData.Device ?? "Unknown"}. If this wasn't you, please secure your account immediately.");
+                    $"Device: {eventData.Device ?? "Unknown"}. If this wasn't you, please secure your account immediately.",
+                    cancellationToken);
             }
             catch (Exception ex)
             {
@@ -845,7 +881,7 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        private async Task SendConcurrentLoginAlertAsync(ConcurrentLoginEvent eventData)
+        private async Task SendConcurrentLoginAlertAsync(ConcurrentLoginEvent eventData, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -858,7 +894,8 @@ namespace AuthHive.Auth.Services.Handlers
                 await _notificationService.SendSecurityAlertAsync(
                     eventData.UserId,
                     "Multiple Active Sessions",
-                    message);
+                    message,
+                    cancellationToken);
             }
             catch (Exception ex)
             {

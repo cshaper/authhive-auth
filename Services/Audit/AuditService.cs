@@ -41,7 +41,7 @@ namespace AuthHive.Auth.Services.Audit
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IRoleRepository _roleRepository;
         private readonly IUnitOfWork _unitOfWork;
-        private readonly ICacheService _cacheService; // IMemoryCache, IDistributedCache 대신 ICacheService 사용
+        private readonly ICacheService _cacheService; 
         private readonly IEventBus _eventBus; // 이벤트 발행을 위해 IEventBus 추가
         private readonly ILogger<AuditService> _logger;
 
