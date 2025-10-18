@@ -31,7 +31,7 @@ namespace AuthHive.Auth.Repositories
             IOrganizationContext organizationContext,
             ILogger<AuditLogRepository> logger,
             IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            : base(context)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }

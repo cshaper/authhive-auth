@@ -19,7 +19,8 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Auth.Service; // IAuthorizationService를 위해 추가
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Auth.Repository;
-using AuthHive.Core.Models.Auth.Events; // IConnectedIdRepository를 위해 추가
+using AuthHive.Core.Models.Auth.Events;
+using AuthHive.Core.Models.Auth.ConnectedId.Events; // IConnectedIdRepository를 위해 추가
 
 namespace AuthHive.Auth.Services.Organization
 {

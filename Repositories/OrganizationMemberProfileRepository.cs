@@ -2,150 +2,289 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Interfaces.Organization.Repository;
-using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
-using AuthHive.Auth.Services.Context;
-using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// 조직 멤버 프로필 Repository 구현체 - AuthHive v15
-    /// 조직 구성원의 프로필 정보를 관리하는 데이터 접근 계층
+    /// 조직 멤버 프로필 Repository 구현체 - AuthHive v16
+    /// v16 아키텍처 원칙(IUnitOfWork, ICacheService, CancellationToken, 성능 최적화)이 적용되었습니다.
     /// </summary>
     public class OrganizationMemberProfileRepository : BaseRepository<OrganizationMemberProfile>, IOrganizationMemberProfileRepository
     {
+        /// <summary>
+        /// v16 원칙에 따라 IOrganizationContext를 제거하고 ICacheService를 주입받습니다.
+        /// </summary>
         public OrganizationMemberProfileRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            ICacheService? cacheService = null)
+            : base(context, cacheService)
         {
         }
+
+        /// <summary>
+        /// 이 리포지토리가 다루는 OrganizationMemberProfile 엔티티는 조직 범위(Organization-scoped)임을 명시합니다.
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity() => true;
+
+        #region 캐시 무효화 오버라이드 (v16)
+
+        /// <summary>
+        /// 조직 범위 엔티티에 맞는 캐시 키를 사용하여 캐시를 무효화합니다.
+        /// BaseRepository의 가이드라인을 따릅니다.
+        /// </summary>
+        public override Task UpdateAsync(OrganizationMemberProfile entity, CancellationToken cancellationToken = default)
+        {
+            // UpdatedAt 타임스탬프를 중앙에서 관리하여 일관성을 보장합니다.
+            entity.UpdatedAt = DateTime.UtcNow;
+            _dbSet.Update(entity);
+            return InvalidateCacheAsync(entity.Id, entity.OrganizationId, cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 범위 엔티티에 맞는 캐시 키를 사용하여 여러 캐시를 무효화합니다.
+        /// </summary>
+        public override Task UpdateRangeAsync(IEnumerable<OrganizationMemberProfile> entities, CancellationToken cancellationToken = default)
+        {
+            var timestamp = DateTime.UtcNow;
+            var entityList = entities.ToList();
+            foreach (var entity in entityList)
+            {
+                entity.UpdatedAt = timestamp;
+            }
+
+            _dbSet.UpdateRange(entityList);
+            var tasks = entityList.Select(e => InvalidateCacheAsync(e.Id, e.OrganizationId, cancellationToken));
+            return Task.WhenAll(tasks);
+        }
+
+        /// <summary>
+        /// 조직 범위 엔티티에 맞는 캐시 키를 사용하여 캐시를 무효화합니다.
+        /// </summary>
+        public override async Task DeleteAsync(OrganizationMemberProfile entity, CancellationToken cancellationToken = default)
+        {
+            entity.IsDeleted = true;
+            entity.DeletedAt = DateTime.UtcNow;
+            _dbSet.Update(entity);
+            await InvalidateCacheAsync(entity.Id, entity.OrganizationId, cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 범위 엔티티에 맞는 캐시 키를 사용하여 여러 캐시를 무효화합니다.
+        /// </summary>
+        public override async Task DeleteRangeAsync(IEnumerable<OrganizationMemberProfile> entities, CancellationToken cancellationToken = default)
+        {
+            var timestamp = DateTime.UtcNow;
+            var entityList = entities.ToList();
+            var tasks = new List<Task>();
+            foreach (var entity in entityList)
+            {
+                entity.IsDeleted = true;
+                entity.DeletedAt = timestamp;
+                tasks.Add(InvalidateCacheAsync(entity.Id, entity.OrganizationId, cancellationToken));
+            }
+            _dbSet.UpdateRange(entityList);
+            await Task.WhenAll(tasks);
+        }
+
+        #endregion
+
+        #region IOrganizationScopedRepository Implementations
+        
+        /// <summary>
+        /// IOrganizationScopedRepository 인터페이스를 구현합니다.
+        /// 특정 조직의 모든 멤버 프로필을 조회하며, 선택적으로 날짜 범위 및 개수 제한을 적용합니다.
+        /// [FIXED] CS0266 오류를 해결하기 위해 Where 필터링 후 OrderBy를 적용하도록 순서를 수정했습니다.
+        /// </summary>
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetByOrganizationIdAsync(Guid organizationId, DateTime? startDate = null, DateTime? endDate = null, int? limit = null, CancellationToken cancellationToken = default)
+        {
+            IQueryable<OrganizationMemberProfile> query = QueryForOrganization(organizationId).AsNoTracking();
+
+            if (startDate.HasValue)
+            {
+                query = query.Where(p => p.CreatedAt >= startDate.Value);
+            }
+
+            if (endDate.HasValue)
+            {
+                // endDate의 자정까지 포함하기 위해 +1일하고 미만(<)으로 비교합니다.
+                query = query.Where(p => p.CreatedAt < endDate.Value.AddDays(1));
+            }
+
+            // 모든 필터링이 끝난 후 정렬을 적용합니다.
+            var orderedQuery = query.OrderByDescending(p => p.CreatedAt);
+
+            // 최종적으로 개수 제한을 적용합니다.
+            IQueryable<OrganizationMemberProfile> finalQuery = orderedQuery;
+            if (limit.HasValue && limit > 0)
+            {
+                finalQuery = finalQuery.Take(limit.Value);
+            }
+
+            return await finalQuery.ToListAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 ID와 엔티티 ID로 특정 프로필을 조회합니다.
+        /// </summary>
+        public async Task<OrganizationMemberProfile?> GetByIdAndOrganizationAsync(Guid id, Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            return await QueryForOrganization(organizationId)
+                .AsNoTracking()
+                .FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 내에서 특정 조건을 만족하는 프로필 목록을 조회합니다.
+        /// </summary>
+        public async Task<IEnumerable<OrganizationMemberProfile>> FindByOrganizationAsync(Guid organizationId, Expression<Func<OrganizationMemberProfile, bool>> predicate, CancellationToken cancellationToken = default)
+        {
+            return await QueryForOrganization(organizationId)
+                .Where(predicate)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 내에서 페이징된 프로필 목록을 조회합니다.
+        /// </summary>
+        public async Task<(IEnumerable<OrganizationMemberProfile> Items, int TotalCount)> GetPagedByOrganizationAsync(Guid organizationId, int pageNumber, int pageSize, Expression<Func<OrganizationMemberProfile, bool>>? additionalPredicate = null, Expression<Func<OrganizationMemberProfile, object>>? orderBy = null, bool isDescending = false, CancellationToken cancellationToken = default)
+        {
+            var baseQuery = QueryForOrganization(organizationId);
+            
+            // BaseRepository의 GetPagedAsync 메서드를 재사용하여 코드 중복을 최소화합니다.
+            return await GetPagedAsync(pageNumber, pageSize, additionalPredicate, orderBy, isDescending, cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 내에 특정 ID의 프로필이 존재하는지 확인합니다.
+        /// </summary>
+        public async Task<bool> ExistsInOrganizationAsync(Guid id, Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            return await QueryForOrganization(organizationId)
+                .AnyAsync(e => e.Id == id, cancellationToken);
+        }
+
+        /// <summary>
+        /// 조직 내의 프로필 수를 계산합니다.
+        /// </summary>
+        public async Task<int> CountByOrganizationAsync(Guid organizationId, Expression<Func<OrganizationMemberProfile, bool>>? predicate = null, CancellationToken cancellationToken = default)
+        {
+            var query = QueryForOrganization(organizationId);
+            if (predicate != null)
+            {
+                query = query.Where(predicate);
+            }
+            return await query.CountAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// 특정 조직의 모든 프로필을 소프트 삭제 처리합니다.
+        /// </summary>
+        public async Task DeleteAllByOrganizationAsync(Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            var entitiesToDelete = await QueryForOrganization(organizationId)
+                .ToListAsync(cancellationToken);
+
+            if (entitiesToDelete.Any())
+            {
+                await DeleteRangeAsync(entitiesToDelete, cancellationToken);
+            }
+        }
+        
+        #endregion
 
         #region 기본 조회
 
-        /// <summary>
-        /// ConnectedId로 멤버 프로필 조회
-        /// </summary>
-        public async Task<OrganizationMemberProfile?> GetByConnectedIdAsync(
-            Guid connectedId,
-            Guid organizationId)
+        public async Task<OrganizationMemberProfile?> GetByConnectedIdAsync(Guid connectedId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Include(p => p.Manager)
-                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId);
+                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId, cancellationToken);
         }
 
-        /// <summary>
-        /// 직원 ID로 멤버 프로필 조회
-        /// </summary>
-        public async Task<OrganizationMemberProfile?> GetByEmployeeIdAsync(
-            string employeeId,
-            Guid organizationId)
+        public async Task<OrganizationMemberProfile?> GetByEmployeeIdAsync(string employeeId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Include(p => p.Manager)
-                .FirstOrDefaultAsync(p => p.EmployeeId == employeeId);
+                .FirstOrDefaultAsync(p => p.EmployeeId == employeeId, cancellationToken);
         }
 
-        /// <summary>
-        /// 여러 ConnectedId로 프로필 일괄 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetByConnectedIdsAsync(
-            IEnumerable<Guid> connectedIds,
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetByConnectedIdsAsync(IEnumerable<Guid> connectedIds, Guid organizationId, CancellationToken cancellationToken = default)
         {
             var idList = connectedIds.ToList();
+            if (!idList.Any())
+            {
+                return Enumerable.Empty<OrganizationMemberProfile>();
+            }
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Include(p => p.Manager)
                 .Where(p => idList.Contains(p.ConnectedId))
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 프로필 존재 여부 확인
-        /// </summary>
-        public async Task<bool> ExistsAsync(Guid connectedId, Guid organizationId)
+        public async Task<bool> ExistsAsync(Guid connectedId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .AnyAsync(p => p.ConnectedId == connectedId);
+                .AnyAsync(p => p.ConnectedId == connectedId, cancellationToken);
         }
 
         #endregion
 
         #region 부서 관련
 
-        /// <summary>
-        /// 부서별 멤버 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetByDepartmentAsync(
-            string department,
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetByDepartmentAsync(string department, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Include(p => p.Manager)
                 .Where(p => p.Department == department)
                 .OrderBy(p => p.JobTitle)
                 .ThenBy(p => p.EmployeeId)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 모든 부서 목록 조회
-        /// </summary>
-        public async Task<IEnumerable<string>> GetAllDepartmentsAsync(Guid organizationId)
+        public async Task<IEnumerable<string>> GetAllDepartmentsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(p => p.Department != null)
+                .Where(p => !string.IsNullOrEmpty(p.Department))
                 .Select(p => p.Department!)
                 .Distinct()
                 .OrderBy(d => d)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 부서별 멤버 수 통계
-        /// </summary>
-        public async Task<Dictionary<string, int>> GetDepartmentStatisticsAsync(Guid organizationId)
+        public async Task<Dictionary<string, int>> GetDepartmentStatisticsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(p => p.Department != null)
+                .Where(p => !string.IsNullOrEmpty(p.Department))
                 .GroupBy(p => p.Department!)
                 .Select(g => new { Department = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Department, x => x.Count);
+                .ToDictionaryAsync(x => x.Department, x => x.Count, cancellationToken);
         }
 
-        /// <summary>
-        /// 부서 변경
-        /// </summary>
-        public async Task<bool> ChangeDepartmentAsync(
-            Guid connectedId,
-            Guid organizationId,
-            string newDepartment)
+        public async Task<bool> ChangeDepartmentAsync(Guid connectedId, Guid organizationId, string newDepartment, CancellationToken cancellationToken = default)
         {
-            var profile = await GetByConnectedIdAsync(connectedId, organizationId);
+            var profile = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId, cancellationToken);
+
             if (profile == null)
                 return false;
 
             profile.Department = newDepartment;
-            profile.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(profile);
-            await _context.SaveChangesAsync();
-
+            await UpdateAsync(profile, cancellationToken);
             return true;
         }
 
@@ -153,345 +292,244 @@ namespace AuthHive.Auth.Repositories
 
         #region 직책 관련
 
-        /// <summary>
-        /// 직책별 멤버 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetByJobTitleAsync(
-            string jobTitle,
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetByJobTitleAsync(string jobTitle, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Include(p => p.Manager)
                 .Where(p => p.JobTitle == jobTitle)
                 .OrderBy(p => p.Department)
                 .ThenBy(p => p.EmployeeId)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 모든 직책 목록 조회
-        /// </summary>
-        public async Task<IEnumerable<string>> GetAllJobTitlesAsync(Guid organizationId)
+        public async Task<IEnumerable<string>> GetAllJobTitlesAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(p => p.JobTitle != null)
+                .Where(p => !string.IsNullOrEmpty(p.JobTitle))
                 .Select(p => p.JobTitle!)
                 .Distinct()
                 .OrderBy(j => j)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 직책별 멤버 수 통계
-        /// </summary>
-        public async Task<Dictionary<string, int>> GetJobTitleStatisticsAsync(Guid organizationId)
+        public async Task<Dictionary<string, int>> GetJobTitleStatisticsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(p => p.JobTitle != null)
+                .Where(p => !string.IsNullOrEmpty(p.JobTitle))
                 .GroupBy(p => p.JobTitle!)
                 .Select(g => new { JobTitle = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.JobTitle, x => x.Count);
+                .ToDictionaryAsync(x => x.JobTitle, x => x.Count, cancellationToken);
         }
 
-        /// <summary>
-        /// 직책 업데이트
-        /// </summary>
-        public async Task<bool> UpdateJobTitleAsync(
-            Guid connectedId,
-            Guid organizationId,
-            string newJobTitle)
+        public async Task<bool> UpdateJobTitleAsync(Guid connectedId, Guid organizationId, string newJobTitle, CancellationToken cancellationToken = default)
         {
-            var profile = await GetByConnectedIdAsync(connectedId, organizationId);
+            var profile = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId, cancellationToken);
+
             if (profile == null)
                 return false;
 
             profile.JobTitle = newJobTitle;
-            profile.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(profile);
-            await _context.SaveChangesAsync();
-
+            await UpdateAsync(profile, cancellationToken);
             return true;
         }
 
         #endregion
 
-        #region 관리자 계층 구조
+        #region 관리자 계층 구조 (N+1 성능 최적화)
 
-        /// <summary>
-        /// 관리자의 직속 부하 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetDirectReportsAsync(
-            Guid managerConnectedId,
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetDirectReportsAsync(Guid managerConnectedId, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Where(p => p.ManagerConnectedId == managerConnectedId)
                 .OrderBy(p => p.Department)
                 .ThenBy(p => p.JobTitle)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 관리자 체인 조회 (상위 관리자들)
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetManagerChainAsync(
-            Guid connectedId,
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetManagerChainAsync(Guid connectedId, Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var chain = new List<OrganizationMemberProfile>();
-            var currentProfile = await GetByConnectedIdAsync(connectedId, organizationId);
+            var allProfiles = await QueryForOrganization(organizationId)
+                .AsNoTracking()
+                .ToDictionaryAsync(p => p.ConnectedId, p => p, cancellationToken);
 
-            while (currentProfile?.ManagerConnectedId != null)
+            var chain = new List<OrganizationMemberProfile>();
+            if (!allProfiles.TryGetValue(connectedId, out var currentProfile))
             {
-                var manager = await GetByConnectedIdAsync(currentProfile.ManagerConnectedId.Value, organizationId);
-                if (manager == null)
+                return chain;
+            }
+
+            var visited = new HashSet<Guid> { currentProfile.ConnectedId };
+
+            while (currentProfile?.ManagerConnectedId != null && allProfiles.TryGetValue(currentProfile.ManagerConnectedId.Value, out var manager))
+            {
+                if (!visited.Add(manager.ConnectedId)) 
                     break;
 
                 chain.Add(manager);
-
-                // 순환 참조 방지
-                if (chain.Any(p => p.ConnectedId == manager.ConnectedId))
-                    break;
-
                 currentProfile = manager;
             }
 
             return chain;
         }
 
-        /// <summary>
-        /// 전체 조직 계층 구조 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetOrganizationHierarchyAsync(
-            Guid organizationId,
-            Guid? rootManagerId = null)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetOrganizationHierarchyAsync(Guid organizationId, Guid? rootManagerId = null, CancellationToken cancellationToken = default)
         {
-            if (rootManagerId.HasValue)
+            var allProfiles = await QueryForOrganization(organizationId)
+                .AsNoTracking()
+                .Include(p => p.Manager)
+                .ToListAsync(cancellationToken);
+            
+            var lookup = allProfiles.ToLookup(p => p.ManagerConnectedId);
+
+            var hierarchy = new List<OrganizationMemberProfile>();
+            var rootNodes = rootManagerId.HasValue
+                ? allProfiles.Where(p => p.ConnectedId == rootManagerId.Value)
+                : allProfiles.Where(p => p.ManagerConnectedId == null);
+
+            var visited = new HashSet<Guid>();
+            foreach (var root in rootNodes)
             {
-                // 특정 관리자부터 시작
-                return await GetHierarchyRecursive(rootManagerId.Value, organizationId);
+                BuildHierarchyRecursive(root, lookup, hierarchy, visited);
             }
-            else
+            
+            return hierarchy;
+        }
+        
+        private void BuildHierarchyRecursive(OrganizationMemberProfile current, ILookup<Guid?, OrganizationMemberProfile> lookup, List<OrganizationMemberProfile> result, HashSet<Guid> visited)
+        {
+            if (!visited.Add(current.ConnectedId)) return;
+
+            result.Add(current);
+            
+            foreach (var directReport in lookup[current.ConnectedId].OrderBy(r => r.EmployeeId))
             {
-                // 최상위 관리자들 찾기 (관리자가 없는 사람들)
-                var topManagers = await QueryForOrganization(organizationId)
-                    .Include(p => p.ConnectedIdNavigation)
-                    .Where(p => p.ManagerConnectedId == null)
-                    .ToListAsync();
-
-                var result = new List<OrganizationMemberProfile>();
-                foreach (var manager in topManagers)
-                {
-                    result.Add(manager);
-                    result.AddRange(await GetHierarchyRecursive(manager.ConnectedId, organizationId));
-                }
-
-                return result;
+                BuildHierarchyRecursive(directReport, lookup, result, visited);
             }
         }
 
-        /// <summary>
-        /// 재귀적으로 계층 구조 조회
-        /// </summary>
-        private async Task<IEnumerable<OrganizationMemberProfile>> GetHierarchyRecursive(
-            Guid managerId,
-            Guid organizationId,
-            HashSet<Guid>? visited = null)
+
+        public async Task<bool> ChangeManagerAsync(Guid connectedId, Guid organizationId, Guid? newManagerId, CancellationToken cancellationToken = default)
         {
-            visited ??= new HashSet<Guid>();
-
-            // 순환 참조 방지
-            if (!visited.Add(managerId))
-                return Enumerable.Empty<OrganizationMemberProfile>();
-
-            var directReports = await GetDirectReportsAsync(managerId, organizationId);
-            var result = new List<OrganizationMemberProfile>(directReports);
-
-            foreach (var report in directReports)
+            if (newManagerId.HasValue)
             {
-                result.AddRange(await GetHierarchyRecursive(report.ConnectedId, organizationId, visited));
+                if (connectedId == newManagerId.Value) return false;
+                
+                if (await CheckCircularReferenceAsync(connectedId, newManagerId.Value, organizationId, cancellationToken))
+                    return false;
             }
 
-            return result;
-        }
+            var profile = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId, cancellationToken);
 
-        /// <summary>
-        /// 관리자 변경
-        /// </summary>
-        public async Task<bool> ChangeManagerAsync(
-            Guid connectedId,
-            Guid organizationId,
-            Guid? newManagerId)
-        {
-            // 순환 참조 확인
-            if (newManagerId.HasValue && await CheckCircularReferenceAsync(connectedId, newManagerId.Value, organizationId))
-                return false;
-
-            var profile = await GetByConnectedIdAsync(connectedId, organizationId);
-            if (profile == null)
-                return false;
+            if (profile == null) return false;
 
             profile.ManagerConnectedId = newManagerId;
-            profile.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(profile);
-            await _context.SaveChangesAsync();
-
+            await UpdateAsync(profile, cancellationToken);
             return true;
         }
 
-        /// <summary>
-        /// 관리자가 없는 멤버 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetMembersWithoutManagerAsync(
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetMembersWithoutManagerAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Where(p => p.ManagerConnectedId == null)
                 .OrderBy(p => p.Department)
                 .ThenBy(p => p.JobTitle)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 순환 참조 확인
-        /// </summary>
-        public async Task<bool> CheckCircularReferenceAsync(
-            Guid connectedId,
-            Guid proposedManagerId,
-            Guid organizationId)
+        public async Task<bool> CheckCircularReferenceAsync(Guid connectedId, Guid proposedManagerId, Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // 자기 자신을 관리자로 설정하려는 경우
-            if (connectedId == proposedManagerId)
-                return true;
-
-            // 제안된 관리자의 상위 체인에 자신이 있는지 확인
-            var managerChain = await GetManagerChainAsync(proposedManagerId, organizationId);
+            if (connectedId == proposedManagerId) return true;
+            
+            var managerChain = await GetManagerChainAsync(proposedManagerId, organizationId, cancellationToken);
             return managerChain.Any(m => m.ConnectedId == connectedId);
         }
-
+        
         #endregion
 
         #region 사무실 위치
-
-        /// <summary>
-        /// 사무실 위치별 멤버 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetByOfficeLocationAsync(
-            string officeLocation,
-            Guid organizationId)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetByOfficeLocationAsync(string officeLocation, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
+                .AsNoTracking()
                 .Include(p => p.Manager)
                 .Where(p => p.OfficeLocation == officeLocation)
                 .OrderBy(p => p.Department)
                 .ThenBy(p => p.JobTitle)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 모든 사무실 위치 목록
-        /// </summary>
-        public async Task<IEnumerable<string>> GetAllOfficeLocationsAsync(Guid organizationId)
+        public async Task<IEnumerable<string>> GetAllOfficeLocationsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(p => p.OfficeLocation != null)
+                .Where(p => !string.IsNullOrEmpty(p.OfficeLocation))
                 .Select(p => p.OfficeLocation!)
                 .Distinct()
                 .OrderBy(o => o)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 사무실 위치별 통계
-        /// </summary>
-        public async Task<Dictionary<string, int>> GetOfficeLocationStatisticsAsync(Guid organizationId)
+        public async Task<Dictionary<string, int>> GetOfficeLocationStatisticsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(p => p.OfficeLocation != null)
+                .Where(p => !string.IsNullOrEmpty(p.OfficeLocation))
                 .GroupBy(p => p.OfficeLocation!)
                 .Select(g => new { Location = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Location, x => x.Count);
+                .ToDictionaryAsync(x => x.Location, x => x.Count, cancellationToken);
         }
 
         #endregion
 
         #region 프로필 관리
 
-        /// <summary>
-        /// 프로필 생성 또는 업데이트
-        /// </summary>
-        public async Task<OrganizationMemberProfile> UpsertAsync(OrganizationMemberProfile profile)
+        public async Task<OrganizationMemberProfile> UpsertAsync(OrganizationMemberProfile profile, CancellationToken cancellationToken = default)
         {
-            var existing = await GetByConnectedIdAsync(profile.ConnectedId, profile.OrganizationId);
+            var existing = await QueryForOrganization(profile.OrganizationId)
+                .FirstOrDefaultAsync(p => p.ConnectedId == profile.ConnectedId, cancellationToken);
 
             if (existing != null)
             {
-                // 업데이트
                 existing.JobTitle = profile.JobTitle;
                 existing.Department = profile.Department;
                 existing.EmployeeId = profile.EmployeeId;
                 existing.OfficeLocation = profile.OfficeLocation;
                 existing.ManagerConnectedId = profile.ManagerConnectedId;
-                existing.UpdatedAt = DateTime.UtcNow;
-
-                await UpdateAsync(existing);
-                await _context.SaveChangesAsync();
+                await UpdateAsync(existing, cancellationToken);
                 return existing;
             }
             else
             {
-                // 생성
                 profile.CreatedAt = DateTime.UtcNow;
-                await AddAsync(profile);
-                await _context.SaveChangesAsync();
+                await AddAsync(profile, cancellationToken);
                 return profile;
             }
         }
 
-        /// <summary>
-        /// 프로필 일괄 업데이트
-        /// </summary>
-        public async Task<OrganizationMemberProfile?> UpdateProfileAsync(
-            Guid connectedId,
-            Guid organizationId,
-            Action<OrganizationMemberProfile> updates)
+        public async Task<OrganizationMemberProfile?> UpdateProfileAsync(Guid connectedId, Guid organizationId, Action<OrganizationMemberProfile> updates, CancellationToken cancellationToken = default)
         {
-            var profile = await GetByConnectedIdAsync(connectedId, organizationId);
-            if (profile == null)
-                return null;
+            var profile = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId, cancellationToken);
+
+            if (profile == null) return null;
 
             updates(profile);
-            profile.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(profile);
-            await _context.SaveChangesAsync();
+            await UpdateAsync(profile, cancellationToken);
 
             return profile;
         }
 
-        /// <summary>
-        /// 직원 ID 업데이트
-        /// </summary>
-        public async Task<bool> UpdateEmployeeIdAsync(
-            Guid connectedId,
-            Guid organizationId,
-            string employeeId)
+        public async Task<bool> UpdateEmployeeIdAsync(Guid connectedId, Guid organizationId, string employeeId, CancellationToken cancellationToken = default)
         {
-            var profile = await GetByConnectedIdAsync(connectedId, organizationId);
-            if (profile == null)
-                return false;
+            var profile = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(p => p.ConnectedId == connectedId, cancellationToken);
+            if (profile == null) return false;
 
             profile.EmployeeId = employeeId;
-            profile.UpdatedAt = DateTime.UtcNow;
-
-            await UpdateAsync(profile);
-            await _context.SaveChangesAsync();
+            await UpdateAsync(profile, cancellationToken);
 
             return true;
         }
@@ -500,29 +538,19 @@ namespace AuthHive.Auth.Repositories
 
         #region 검색 및 필터링
 
-        /// <summary>
-        /// 키워드로 프로필 검색
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> SearchAsync(
-            string keyword,
-            Guid organizationId,
-            string[]? searchFields = null)
+        public async Task<IEnumerable<OrganizationMemberProfile>> SearchAsync(string keyword, Guid organizationId, string[]? searchFields = null, CancellationToken cancellationToken = default)
         {
-            var query = QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
-                .Include(p => p.Manager);
+            var query = QueryForOrganization(organizationId).AsNoTracking();
+            
+            if (string.IsNullOrWhiteSpace(keyword)) return await query.ToListAsync(cancellationToken);
 
-            // 검색 필드가 지정되지 않으면 모든 필드 검색
-            if (searchFields == null || searchFields.Length == 0)
-            {
-                searchFields = new[] { "JobTitle", "Department", "EmployeeId", "OfficeLocation" };
-            }
+            searchFields ??= new[] { "JobTitle", "Department", "EmployeeId", "OfficeLocation" };
 
             var predicate = PredicateBuilder.False<OrganizationMemberProfile>();
 
             foreach (var field in searchFields)
             {
-                switch (field.ToLower())
+                switch (field.ToLowerInvariant())
                 {
                     case "jobtitle":
                         predicate = predicate.Or(p => p.JobTitle != null && p.JobTitle.Contains(keyword));
@@ -539,53 +567,29 @@ namespace AuthHive.Auth.Repositories
                 }
             }
 
-            return await query.Where(predicate).ToListAsync();
+            return await query.Where(predicate).ToListAsync(cancellationToken);
         }
 
         /// <summary>
-        /// 고급 검색
+        /// [FIXED] BaseRepository의 GetPagedAsync를 호출하도록 수정하여 안정성과 일관성을 확보합니다.
+        /// 서비스 계층에서 criteria에 OrganizationId 필터를 포함시켜 호출하는 것을 전제로 합니다.
         /// </summary>
-        /// <summary>
-        /// 고급 검색
-        /// </summary>
-        public async Task<PagedResult<OrganizationMemberProfile>> AdvancedSearchAsync(
-            Expression<Func<OrganizationMemberProfile, bool>> criteria,
-            int pageNumber = 1,
-            int pageSize = 50)
+        public async Task<PagedResult<OrganizationMemberProfile>> AdvancedSearchAsync(Expression<Func<OrganizationMemberProfile, bool>> criteria, int pageNumber = 1, int pageSize = 50, CancellationToken cancellationToken = default)
         {
-            IQueryable<OrganizationMemberProfile> query = Query();
-            query = query.Include(p => p.ConnectedIdNavigation);
-            query = query.Include(p => p.Manager);
-            query = query.Where(criteria);
-
-            var totalCount = await query.CountAsync();
-
-            var items = await query
-                .OrderBy(p => p.Department)
-                .ThenBy(p => p.JobTitle)
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
+            var (items, totalCount) = await GetPagedAsync(
+                pageNumber, 
+                pageSize, 
+                criteria, 
+                orderBy: e => e.Department ?? string.Empty, 
+                isDescending: false, 
+                cancellationToken: cancellationToken);
 
             return new PagedResult<OrganizationMemberProfile>(items, totalCount, pageNumber, pageSize);
         }
 
-        /// <summary>
-        /// 필터링된 프로필 조회
-        /// </summary>
-
-        /// <summary>
-        /// 필터링된 프로필 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationMemberProfile>> GetFilteredAsync(
-            Guid organizationId,
-            string? department = null,
-            string? jobTitle = null,
-            string? officeLocation = null)
+        public async Task<IEnumerable<OrganizationMemberProfile>> GetFilteredAsync(Guid organizationId, string? department = null, string? jobTitle = null, string? officeLocation = null, CancellationToken cancellationToken = default)
         {
-            IQueryable<OrganizationMemberProfile> query = QueryForOrganization(organizationId);
-            query = query.Include(p => p.ConnectedIdNavigation);
-            query = query.Include(p => p.Manager);
+            var query = QueryForOrganization(organizationId).AsNoTracking();
 
             if (!string.IsNullOrEmpty(department))
                 query = query.Where(p => p.Department == department);
@@ -599,213 +603,148 @@ namespace AuthHive.Auth.Repositories
             return await query
                 .OrderBy(p => p.Department)
                 .ThenBy(p => p.JobTitle)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
+
         #endregion
 
         #region 일괄 작업
 
-        /// <summary>
-        /// 프로필 일괄 생성
-        /// </summary>
-        public async Task<int> BulkCreateAsync(IEnumerable<OrganizationMemberProfile> profiles)
+        public async Task<int> BulkCreateAsync(IEnumerable<OrganizationMemberProfile> profiles, CancellationToken cancellationToken = default)
         {
             var profileList = profiles.ToList();
             var now = DateTime.UtcNow;
-
-            foreach (var profile in profileList)
+            foreach(var p in profileList)
             {
-                profile.CreatedAt = now;
+                p.CreatedAt = now;
             }
-
-            await AddRangeAsync(profileList);
-            return await _context.SaveChangesAsync();
+            await AddRangeAsync(profileList, cancellationToken);
+            return profileList.Count;
         }
 
-        /// <summary>
-        /// 부서 일괄 업데이트
-        /// </summary>
-        public async Task<int> BulkUpdateDepartmentAsync(
-            IEnumerable<Guid> connectedIds,
-            Guid organizationId,
-            string newDepartment)
+        public async Task<int> BulkUpdateDepartmentAsync(IEnumerable<Guid> connectedIds, Guid organizationId, string newDepartment, CancellationToken cancellationToken = default)
         {
             var idList = connectedIds.ToList();
             var profiles = await QueryForOrganization(organizationId)
                 .Where(p => idList.Contains(p.ConnectedId))
-                .ToListAsync();
-
-            var now = DateTime.UtcNow;
+                .ToListAsync(cancellationToken);
+            
             foreach (var profile in profiles)
             {
                 profile.Department = newDepartment;
-                profile.UpdatedAt = now;
             }
 
-            await UpdateRangeAsync(profiles);
-            return await _context.SaveChangesAsync();
+            await UpdateRangeAsync(profiles, cancellationToken);
+            return profiles.Count;
         }
 
-        /// <summary>
-        /// 관리자 일괄 할당
-        /// </summary>
-        public async Task<int> BulkAssignManagerAsync(
-            IEnumerable<Guid> connectedIds,
-            Guid organizationId,
-            Guid managerId)
+        public async Task<int> BulkAssignManagerAsync(IEnumerable<Guid> connectedIds, Guid organizationId, Guid managerId, CancellationToken cancellationToken = default)
         {
             var idList = connectedIds.ToList();
-
-            // 순환 참조 방지: 관리자 자신은 제외
             idList.Remove(managerId);
 
             var profiles = await QueryForOrganization(organizationId)
                 .Where(p => idList.Contains(p.ConnectedId))
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
-            var now = DateTime.UtcNow;
             foreach (var profile in profiles)
             {
                 profile.ManagerConnectedId = managerId;
-                profile.UpdatedAt = now;
             }
 
-            await UpdateRangeAsync(profiles);
-            return await _context.SaveChangesAsync();
+            await UpdateRangeAsync(profiles, cancellationToken);
+            return profiles.Count;
         }
 
-        /// <summary>
-        /// 조직에서 프로필 일괄 제거
-        /// </summary>
-        public async Task<int> BulkRemoveFromOrganizationAsync(
-            IEnumerable<Guid> connectedIds,
-            Guid organizationId)
+        public async Task<int> BulkRemoveFromOrganizationAsync(IEnumerable<Guid> connectedIds, Guid organizationId, CancellationToken cancellationToken = default)
         {
             var idList = connectedIds.ToList();
             var profiles = await QueryForOrganization(organizationId)
                 .Where(p => idList.Contains(p.ConnectedId))
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
-            await DeleteRangeAsync(profiles);
-            return await _context.SaveChangesAsync();
+            await DeleteRangeAsync(profiles, cancellationToken);
+            return profiles.Count;
         }
 
         #endregion
 
         #region 통계 및 분석
 
-        /// <summary>
-        /// 조직 멤버 통계
-        /// </summary>
-
-        public async Task<OrganizationMemberStatistics> GetStatisticsAsync(Guid organizationId)
+        public async Task<OrganizationMemberStatistics> GetStatisticsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var profiles = await QueryForOrganization(organizationId).ToListAsync();
+            var profiles = await QueryForOrganization(organizationId).AsNoTracking().ToListAsync(cancellationToken);
 
             return new OrganizationMemberStatistics
             {
                 OrganizationId = organizationId,
                 TotalMembers = profiles.Count,
-
-                // 부서별 프로필 수
                 MembersByDepartment = profiles
                     .Where(p => !string.IsNullOrEmpty(p.Department))
                     .GroupBy(p => p.Department!)
                     .ToDictionary(g => g.Key, g => g.Count()),
-
-                // 직책을 역할(Role)로 매핑
                 MembersByRole = profiles
                     .Where(p => !string.IsNullOrEmpty(p.JobTitle))
                     .GroupBy(p => p.JobTitle!)
                     .ToDictionary(g => g.Key, g => g.Count()),
-
-                // 오피스 위치를 지역(Region)으로 매핑
                 MembersByRegion = profiles
                     .Where(p => !string.IsNullOrEmpty(p.OfficeLocation))
                     .GroupBy(p => p.OfficeLocation!)
                     .ToDictionary(g => g.Key, g => g.Count()),
-
                 GeneratedAt = DateTime.UtcNow
             };
         }
 
-        /// <summary>
-        /// 부서별 평균 팀 크기
-        /// </summary>
-        public async Task<Dictionary<string, double>> GetAverageTeamSizeByDepartmentAsync(
-            Guid organizationId)
+        public async Task<Dictionary<string, double>> GetAverageTeamSizeByDepartmentAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var profiles = await QueryForOrganization(organizationId)
-                .Where(p => p.Department != null)
-                .ToListAsync();
-
-            var managersByDept = profiles
-                .Where(p => p.ManagerConnectedId != null)
+             return await QueryForOrganization(organizationId)
+                .Where(p => p.Department != null && p.ManagerConnectedId != null)
                 .GroupBy(p => p.Department!)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.GroupBy(p => p.ManagerConnectedId).Average(mg => mg.Count())
-                );
-
-            return managersByDept;
+                .Select(deptGroup => new 
+                {
+                    Department = deptGroup.Key,
+                    AvgTeamSize = deptGroup
+                                    .GroupBy(p => p.ManagerConnectedId)
+                                    .Average(managerGroup => managerGroup.Count())
+                })
+                .ToDictionaryAsync(x => x.Department, x => x.AvgTeamSize, cancellationToken);
         }
 
-        /// <summary>
-        /// 관리자별 직속 부하 수
-        /// </summary>
-        public async Task<Dictionary<Guid, int>> GetDirectReportCountByManagerAsync(
-            Guid organizationId)
+        public async Task<Dictionary<Guid, int>> GetDirectReportCountByManagerAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(p => p.ManagerConnectedId != null)
                 .GroupBy(p => p.ManagerConnectedId!.Value)
                 .Select(g => new { ManagerId = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.ManagerId, x => x.Count);
+                .ToDictionaryAsync(x => x.ManagerId, x => x.Count, cancellationToken);
         }
 
         #endregion
 
         #region 데이터 정리
 
-        /// <summary>
-        /// 고아 프로필 정리 (ConnectedId가 삭제된 프로필)
-        /// </summary>
-        public async Task<int> CleanupOrphanedProfilesAsync(Guid organizationId)
+        public Task<int> CleanupOrphanedProfilesAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // ConnectedId 테이블과 조인하여 존재하지 않는 프로필 찾기
-            var orphanedProfiles = await QueryForOrganization(organizationId)
-                .Include(p => p.ConnectedIdNavigation)
-                .Where(p => p.ConnectedIdNavigation == null || p.ConnectedIdNavigation.IsDeleted)
-                .ToListAsync();
-
-            if (orphanedProfiles.Any())
-            {
-                await DeleteRangeAsync(orphanedProfiles);
-                return await _context.SaveChangesAsync();
-            }
-
-            return 0;
+            // TODO: User 테이블이 구현되면, 해당 테이블과 조인하여 IsDeleted=true인 유저의 프로필을 찾아야 합니다.
+            // 현재는 User 엔티티가 이 컨텍스트에 없으므로 실제 구현은 보류합니다.
+            // 예시: var orphaned = await _context.OrganizationMemberProfiles.Where(p => p.OrganizationId == organizationId && p.User.IsDeleted)...
+            return Task.FromResult(0);
         }
 
-        /// <summary>
-        /// 빈 프로필 정리 (필수 정보가 없는 프로필)
-        /// </summary>
-        public async Task<int> CleanupEmptyProfilesAsync(Guid organizationId)
+        public async Task<int> CleanupEmptyProfilesAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // 모든 필드가 null인 프로필
             var emptyProfiles = await QueryForOrganization(organizationId)
-                .Where(p =>
-                    p.JobTitle == null &&
-                    p.Department == null &&
-                    p.EmployeeId == null &&
-                    p.OfficeLocation == null &&
-                    p.ManagerConnectedId == null)
-                .ToListAsync();
+                .Where(p => string.IsNullOrEmpty(p.JobTitle) &&
+                            string.IsNullOrEmpty(p.Department) &&
+                            string.IsNullOrEmpty(p.EmployeeId) &&
+                            string.IsNullOrEmpty(p.OfficeLocation) &&
+                            p.ManagerConnectedId == null)
+                .ToListAsync(cancellationToken);
 
             if (emptyProfiles.Any())
             {
-                await DeleteRangeAsync(emptyProfiles);
-                return await _context.SaveChangesAsync();
+                await DeleteRangeAsync(emptyProfiles, cancellationToken);
+                return emptyProfiles.Count;
             }
 
             return 0;
@@ -815,48 +754,24 @@ namespace AuthHive.Auth.Repositories
     }
 
     /// <summary>
-    /// PredicateBuilder for dynamic query building
+    /// 동적 LINQ 쿼리 생성을 위한 Predicate 빌더 유틸리티 클래스입니다.
     /// </summary>
     internal static class PredicateBuilder
     {
         public static Expression<Func<T, bool>> True<T>() { return f => true; }
         public static Expression<Func<T, bool>> False<T>() { return f => false; }
 
-        public static Expression<Func<T, bool>> Or<T>(
-            this Expression<Func<T, bool>> expr1,
-            Expression<Func<T, bool>> expr2)
+        public static Expression<Func<T, bool>> Or<T>(this Expression<Func<T, bool>> expr1, Expression<Func<T, bool>> expr2)
         {
-            var parameter = Expression.Parameter(typeof(T));
-            var leftVisitor = new ReplaceExpressionVisitor(expr1.Parameters[0], parameter);
-            var left = leftVisitor.Visit(expr1.Body);
-            var rightVisitor = new ReplaceExpressionVisitor(expr2.Parameters[0], parameter);
-            var right = rightVisitor.Visit(expr2.Body);
-
-            // null 체크 추가
-            if (left == null || right == null)
-            {
-                throw new InvalidOperationException("Expression visit returned null");
-            }
-
-            return Expression.Lambda<Func<T, bool>>(
-                Expression.OrElse(left, right), parameter);
+            var invokedExpr = Expression.Invoke(expr2, expr1.Parameters.Cast<Expression>());
+            return Expression.Lambda<Func<T, bool>>(Expression.OrElse(expr1.Body, invokedExpr), expr1.Parameters);
         }
 
-        private class ReplaceExpressionVisitor : ExpressionVisitor
+        public static Expression<Func<T, bool>> And<T>(this Expression<Func<T, bool>> expr1, Expression<Func<T, bool>> expr2)
         {
-            private readonly Expression _oldValue;
-            private readonly Expression _newValue;
-
-            public ReplaceExpressionVisitor(Expression oldValue, Expression newValue)
-            {
-                _oldValue = oldValue;
-                _newValue = newValue;
-            }
-
-            public override Expression? Visit(Expression? node)
-            {
-                return node == _oldValue ? _newValue : base.Visit(node);
-            }
+            var invokedExpr = Expression.Invoke(expr2, expr1.Parameters.Cast<Expression>());
+            return Expression.Lambda<Func<T, bool>>(Expression.AndAlso(expr1.Body, invokedExpr), expr1.Parameters);
         }
     }
 }
+

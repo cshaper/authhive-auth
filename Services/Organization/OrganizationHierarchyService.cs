@@ -1,32 +1,33 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Constants.Business;
 using AuthHive.Core.Enums.Audit;
+using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.Business.Platform.Service;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
-using AuthHive.Core.Interfaces.Business.Platform.Service;
-using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.Proxy.Service;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Organization;
 using AuthHive.Core.Models.Organization.Common;
+using AuthHive.Core.Models.Organization.Events;
 using AuthHive.Core.Models.Organization.Requests;
-using AuthHive.Core.Constants.Business;
+using AuthHive.Core.Models.Organization.Responses;
 using AutoMapper;
 using Microsoft.Extensions.Logging;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
-using AuthHive.Core.Models.Organization.Responses;
-using AuthHive.Core.Interfaces.Proxy.Service; // PropagateOrganizationSettingsResponse 등을 위해 추가
+
 
 namespace AuthHive.Business.Services.Organization
 {
     /// <summary>
     /// 조직 계층 구조 관리 서비스 - AuthHive v16
-    /// IMemoryCache를 ICacheService로 교체하고, IPlanService 연동, IEventBus 및 IAuditService를 통합
     /// </summary>
     public class OrganizationHierarchyService : IOrganizationHierarchyService
     {
@@ -35,7 +36,7 @@ namespace AuthHive.Business.Services.Organization
         private readonly IOrganizationService _organizationService;
         private readonly IPlanService _planService;
         private readonly IUsageTrackingService _usageTrackingService;
-        private readonly IOrganizationSettingsService _settingsService; // <<-- 수정: 설정 전문가 서비스 주입
+        private readonly IOrganizationSettingsService _settingsService;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IMapper _mapper;
         private readonly ICacheService _cacheService;
@@ -49,7 +50,7 @@ namespace AuthHive.Business.Services.Organization
             IOrganizationService organizationService,
             IPlanService planService,
             IUsageTrackingService usageTrackingService,
-            IOrganizationSettingsService settingsService, // <<-- 수정: 생성자에서 주입
+            IOrganizationSettingsService settingsService,
             IUnitOfWork unitOfWork,
             IMapper mapper,
             ICacheService cacheService,
@@ -62,7 +63,7 @@ namespace AuthHive.Business.Services.Organization
             _organizationService = organizationService;
             _planService = planService;
             _usageTrackingService = usageTrackingService;
-            _settingsService = settingsService; // <<-- 수정: 필드 할당
+            _settingsService = settingsService;
             _unitOfWork = unitOfWork;
             _mapper = mapper;
             _cacheService = cacheService;
@@ -73,14 +74,10 @@ namespace AuthHive.Business.Services.Organization
 
         #region IService Implementation
 
-        // OrganizationHierarchyService.cs
-
-        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // Pass the token to the repository call. We use 'null' to skip the predicate argument 
-                // and ensure the token is passed to the correct position.
                 await _repository.CountAsync(null, cancellationToken);
                 return true;
             }
@@ -91,9 +88,8 @@ namespace AuthHive.Business.Services.Organization
             }
         }
 
-        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
-            // The method body is already optimized for a completed task.
             _logger.LogInformation("OrganizationHierarchyService initialized.");
             return Task.CompletedTask;
         }
@@ -102,25 +98,25 @@ namespace AuthHive.Business.Services.Organization
 
         #region IOrganizationHierarchyService Implementation
 
-        public async Task<ServiceResult<Guid?>> GetParentOrganizationIdAsync(Guid organizationId)
+        public async Task<ServiceResult<Guid?>> GetParentOrganizationIdAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"org:hierarchy:parent:{organizationId}";
-                var cachedResult = await _cacheService.GetAsync<ParentIdCache>(cacheKey);
+                var cachedResult = await _cacheService.GetAsync<ParentIdCache>(cacheKey, cancellationToken);
                 if (cachedResult != null)
                 {
                     return ServiceResult<Guid?>.Success(cachedResult.ParentId);
                 }
 
-                var organization = await _repository.GetByIdAsync(organizationId);
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
                 if (organization == null)
                 {
                     return ServiceResult<Guid?>.NotFound("Organization not found.");
                 }
 
                 var cacheValue = new ParentIdCache { ParentId = organization.ParentId };
-                await _cacheService.SetAsync(cacheKey, cacheValue, TimeSpan.FromMinutes(15));
+                await _cacheService.SetAsync(cacheKey, cacheValue, TimeSpan.FromMinutes(15), cancellationToken);
                 return ServiceResult<Guid?>.Success(organization.ParentId);
             }
             catch (Exception ex)
@@ -131,11 +127,11 @@ namespace AuthHive.Business.Services.Organization
         }
 
         public async Task<ServiceResult<OrganizationDto>> CreateChildOrganizationAsync(
-                    Guid parentOrganizationId, CreateOrganizationRequest request, Guid createdByConnectedId)
+            Guid parentOrganizationId, CreateOrganizationRequest request, Guid createdByConnectedId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var depthLimitResult = await GetDepthLimitAsync(parentOrganizationId);
+                var depthLimitResult = await GetDepthLimitAsync(parentOrganizationId, cancellationToken);
                 if (!depthLimitResult.IsSuccess || depthLimitResult.Data == null)
                 {
                     return ServiceResult<OrganizationDto>.Failure("Failed to verify depth limit.", "DEPTH_CHECK_FAILED");
@@ -149,40 +145,40 @@ namespace AuthHive.Business.Services.Organization
                 }
 
                 request.ParentId = parentOrganizationId;
-                var createResult = await _organizationService.CreateAsync(request, createdByConnectedId);
+                var createResult = await _organizationService.CreateAsync(request, createdByConnectedId, cancellationToken);
 
                 if (createResult.IsSuccess && createResult.Data != null)
                 {
-                    await InvalidateHierarchyCache(parentOrganizationId);
+                    await InvalidateHierarchyCache(parentOrganizationId, cancellationToken);
                     var createdOrgResponse = createResult.Data;
+                    var newOrg = await _repository.GetByIdAsync(createdOrgResponse.Id, cancellationToken);
+                    var newOrgDto = _mapper.Map<OrganizationDto>(newOrg);
 
-                    // 응답 객체의 정보로 OrganizationDto를 직접 생성합니다.
-                    var newOrg = new OrganizationDto
+                    await _eventBus.PublishAsync(new OrganizationCreatedEvent(newOrgDto.Id)
                     {
-                        Id = createdOrgResponse.Id,
-                        Name = createdOrgResponse.Name,
-                    };
-
-                    await _eventBus.PublishAsync(new OrganizationCreatedEvent(newOrg.Id)
-                    {
-                        OrganizationId = newOrg.Id,
                         ParentOrganizationId = parentOrganizationId,
                         CreatedByConnectedId = createdByConnectedId,
-                        CreatedAt = DateTime.UtcNow
-                    });
+                        OrganizationKey = newOrgDto.OrganizationKey,
+                        Name = newOrgDto.Name,
+                        Type = newOrgDto.Type
+                    }, cancellationToken);
 
                     await _auditService.LogActionAsync(
-                        createdByConnectedId, "CHILD_ORGANIZATION_CREATED", AuditActionType.Create,
-                        "Organization", newOrg.Id.ToString(), true,
-                        $"Created child organization under parent {parentOrganizationId}");
+                        AuditActionType.Create,
+                        "CHILD_ORGANIZATION_CREATED",
+                        createdByConnectedId,
+                        true,
+                        resourceType: "Organization",
+                        resourceId: newOrgDto.Id.ToString(),
+                        metadata: new Dictionary<string, object> { { "ParentId", parentOrganizationId } },
+                        cancellationToken: cancellationToken);
 
-                    return ServiceResult<OrganizationDto>.Success(newOrg);
-
+                    return ServiceResult<OrganizationDto>.Success(newOrgDto);
                 }
 
                 return ServiceResult<OrganizationDto>.Failure(
-      createResult.ErrorMessage ?? "Failed to create child organization.",
-      createResult.ErrorCode);
+                    createResult.ErrorMessage ?? "Failed to create child organization.",
+                    createResult.ErrorCode);
             }
             catch (Exception ex)
             {
@@ -191,30 +187,26 @@ namespace AuthHive.Business.Services.Organization
             }
         }
 
-
         public async Task<ServiceResult<OrganizationHierarchyTree>> GetOrganizationTreeAsync(
-            Guid organizationId,
-            int? maxDepth = null)
+            Guid organizationId, int? maxDepth = null, CancellationToken cancellationToken = default)
         {
             try
             {
-                // <<-- 수정: ?? 연산자를 GetValueOrDefault로 변경
                 var cacheKey = $"org:hierarchy:tree:{organizationId}_{maxDepth.GetValueOrDefault(0)}";
-                var cachedTree = await _cacheService.GetAsync<OrganizationHierarchyTree>(cacheKey);
+                var cachedTree = await _cacheService.GetAsync<OrganizationHierarchyTree>(cacheKey, cancellationToken);
                 if (cachedTree != null)
                 {
                     return ServiceResult<OrganizationHierarchyTree>.Success(cachedTree);
                 }
 
-                var organization = await _repository.GetByIdAsync(organizationId);
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
                 if (organization == null)
                 {
                     return ServiceResult<OrganizationHierarchyTree>.NotFound("Organization not found.");
                 }
 
-                // <<-- 수정: ?? 연산자를 GetValueOrDefault로 변경
-                var tree = await BuildHierarchyTreeAsync(organization, maxDepth.GetValueOrDefault(10));
-                await _cacheService.SetAsync(cacheKey, tree, TimeSpan.FromMinutes(30));
+                var tree = await BuildHierarchyTreeAsync(organization, maxDepth.GetValueOrDefault(10), cancellationToken);
+                await _cacheService.SetAsync(cacheKey, tree, TimeSpan.FromMinutes(30), cancellationToken);
                 return ServiceResult<OrganizationHierarchyTree>.Success(tree);
             }
             catch (Exception ex)
@@ -225,24 +217,24 @@ namespace AuthHive.Business.Services.Organization
         }
 
         public async Task<ServiceResult<bool>> MoveOrganizationAsync(
-            Guid organizationId,
-            Guid? newParentId,
-            Guid movedByConnectedId)
+            Guid organizationId, Guid? newParentId, Guid movedByConnectedId, CancellationToken cancellationToken = default)
         {
-            await _unitOfWork.BeginTransactionAsync();
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                var validationResult = await ValidateHierarchyAsync(organizationId, newParentId);
+                var validationResult = await ValidateHierarchyAsync(organizationId, newParentId, cancellationToken);
                 if (!validationResult.IsSuccess || validationResult.Data?.IsValid == false)
                 {
+                    await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                     return ServiceResult<bool>.Failure(
                         validationResult.Data?.ValidationErrors.FirstOrDefault() ?? "Invalid hierarchy move operation.",
                         "HIERARCHY_VALIDATION_FAILED");
                 }
 
-                var organization = await _repository.GetByIdAsync(organizationId);
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
                 if (organization == null)
                 {
+                    await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                     return ServiceResult<bool>.Failure("Organization not found.", "ORGANIZATION_NOT_FOUND");
                 }
 
@@ -251,44 +243,47 @@ namespace AuthHive.Business.Services.Organization
                 organization.UpdatedByConnectedId = movedByConnectedId;
                 organization.UpdatedAt = DateTime.UtcNow;
 
-                await _repository.UpdateAsync(organization);
-                await _unitOfWork.SaveChangesAsync();
-                await _unitOfWork.CommitTransactionAsync();
+                await _repository.UpdateAsync(organization, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
-                await InvalidateHierarchyCache(organizationId);
-                if (oldParentId.HasValue) await InvalidateHierarchyCache(oldParentId.Value);
-                if (newParentId.HasValue) await InvalidateHierarchyCache(newParentId.Value);
+                await InvalidateHierarchyCache(organizationId, cancellationToken);
+                if (oldParentId.HasValue) await InvalidateHierarchyCache(oldParentId.Value, cancellationToken);
+                if (newParentId.HasValue) await InvalidateHierarchyCache(newParentId.Value, cancellationToken);
 
-                // <<-- 수정: BaseEvent 상속 및 생성자 호출
-                await _eventBus.PublishAsync(new OrganizationMovedEvent(organizationId)
-                {
-                    OrganizationId = organizationId,
-                    OldParentId = oldParentId,
-                    NewParentId = newParentId,
-                    MovedByConnectedId = movedByConnectedId,
-                    MovedAt = DateTime.UtcNow
-                });
+                await _eventBus.PublishAsync(
+                    new OrganizationParentChangedEvent(
+                        organizationId, oldParentId, newParentId, "Organization hierarchy was restructured.", movedByConnectedId
+                    ), cancellationToken);
 
                 await _auditService.LogActionAsync(
-                    movedByConnectedId, "ORGANIZATION_MOVED", AuditActionType.Update,
-                    "OrganizationHierarchy", organizationId.ToString(), true,
-                    $"Moved from parent '{oldParentId}' to '{newParentId}'");
+                    AuditActionType.Update,
+                    "ORGANIZATION_MOVED",
+                    movedByConnectedId,
+                    true,
+                    resourceType: "OrganizationHierarchy",
+                    resourceId: organizationId.ToString(),
+                    metadata: new Dictionary<string, object>
+                    {
+                        { "OldParentId", (object?)oldParentId ?? "ROOT" },
+                        { "NewParentId", (object?)newParentId ?? "ROOT" }
+                    },
+                    cancellationToken: cancellationToken);
 
                 return ServiceResult<bool>.Success(true);
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 _logger.LogError(ex, "Failed to move organization {OrganizationId}", organizationId);
                 return ServiceResult<bool>.Failure("Failed to move organization.");
             }
         }
 
         public async Task<ServiceResult<HierarchyValidationResult>> ValidateHierarchyAsync(
-            Guid organizationId,
-            Guid? proposedParentId)
+            Guid organizationId, Guid? proposedParentId, CancellationToken cancellationToken = default)
         {
-            try
+             try
             {
                 var result = new HierarchyValidationResult
                 {
@@ -308,7 +303,7 @@ namespace AuthHive.Business.Services.Organization
 
                 if (proposedParentId.HasValue)
                 {
-                    var hasCircular = await CheckCircularReferenceAsync(organizationId, proposedParentId.Value);
+                    var hasCircular = await CheckCircularReferenceAsync(organizationId, proposedParentId.Value, cancellationToken);
                     if (hasCircular)
                     {
                         result.IsValid = false;
@@ -316,7 +311,7 @@ namespace AuthHive.Business.Services.Organization
                         result.ValidationErrors.Add("Circular reference detected in hierarchy.");
                     }
 
-                    var depthCheck = await CheckDepthLimitForMoveAsync(organizationId, proposedParentId.Value);
+                    var depthCheck = await CheckDepthLimitForMoveAsync(organizationId, proposedParentId.Value, cancellationToken);
                     if (!depthCheck.IsWithinLimit)
                     {
                         result.IsValid = false;
@@ -327,9 +322,9 @@ namespace AuthHive.Business.Services.Organization
                     }
                 }
 
-                var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId);
+                var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId, null, cancellationToken);
                 result.AffectedChildOrganizations = descendants.Count();
-                result.HierarchyPath = await GetHierarchyPathIdsAsync(organizationId);
+                result.HierarchyPath = await GetHierarchyPathIdsAsync(organizationId, cancellationToken);
 
                 return ServiceResult<HierarchyValidationResult>.Success(result);
             }
@@ -339,10 +334,9 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<HierarchyValidationResult>.Failure("Failed to validate hierarchy.");
             }
         }
-
-        // <<-- 수정: 로직 전체를 IOrganizationSettingsService에 위임
+        
         public async Task<ServiceResult<int>> InheritSettingsToChildrenAsync(
-                    Guid parentOrganizationId, PolicyInheritanceMode inheritanceMode, Guid initiatedByConnectedId)
+            Guid parentOrganizationId, PolicyInheritanceMode inheritanceMode, Guid initiatedByConnectedId, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -351,16 +345,19 @@ namespace AuthHive.Business.Services.Organization
                     ParentOrganizationId = parentOrganizationId,
                     InheritanceMode = inheritanceMode
                 };
+                
+                var result = await _settingsService.PropagateToChildrenAsync(propagateRequest, initiatedByConnectedId, cancellationToken);
 
-                var result = await _settingsService.PropagateToChildrenAsync(propagateRequest, initiatedByConnectedId);
-
-                // <<-- 수정: 결과 처리 로직 변경
-                if (!result.ErrorMessages.Any()) // 성공은 Errors 리스트가 비어있는지로 판단
+                if (!result.ErrorMessages.Any())
                 {
+                    await _auditService.LogActionAsync(AuditActionType.Update, "SETTINGS_INHERITED", initiatedByConnectedId, true,
+                        resourceType: "OrganizationSettings", resourceId: parentOrganizationId.ToString(),
+                        metadata: new Dictionary<string, object> { { "Mode", inheritanceMode.ToString() }, { "AffectedChildren", result.AffectedOrganizationsCount } },
+                        cancellationToken: cancellationToken);
+                    
                     return ServiceResult<int>.Success(result.AffectedOrganizationsCount);
                 }
-
-                // 실패 시, Errors 리스트를 하나의 문자열로 합쳐서 반환
+                
                 var combinedErrorMessage = string.Join("; ", result.ErrorMessages);
                 return ServiceResult<int>.Failure(combinedErrorMessage, "PROPAGATION_FAILED");
             }
@@ -370,21 +367,19 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<int>.Failure("An unexpected error occurred.");
             }
         }
-        // <<-- 수정: 새 DTO에 맞게 전체 로직 수정
+        
         public async Task<ServiceResult<HierarchyUsageDto>> GetHierarchyUsageAsync(
-            Guid organizationId,
-            DateTime startDate,
-            DateTime endDate)
+            Guid organizationId, DateTime startDate, DateTime endDate, CancellationToken cancellationToken = default)
         {
             try
             {
-                var organization = await _repository.GetByIdAsync(organizationId);
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
                 if (organization == null)
                 {
                     return ServiceResult<HierarchyUsageDto>.NotFound("Organization not found.");
                 }
 
-                var usageHierarchy = await BuildUsageHierarchyAsync(organization, startDate, endDate, 0, "/");
+                var usageHierarchy = await BuildUsageHierarchyAsync(organization, startDate, endDate, 0, "/", cancellationToken);
                 return ServiceResult<HierarchyUsageDto>.Success(usageHierarchy);
             }
             catch (Exception ex)
@@ -393,13 +388,12 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<HierarchyUsageDto>.Failure("Failed to retrieve hierarchy usage.");
             }
         }
-
-        // <<-- 수정: 새 DTO에 맞게 전체 로직 수정
-        public async Task<ServiceResult<HierarchyDepthLimit>> GetDepthLimitAsync(Guid organizationId)
+        
+        public async Task<ServiceResult<HierarchyDepthLimit>> GetDepthLimitAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var planResult = await _planService.GetCurrentSubscriptionForOrgAsync(organizationId);
+                var planResult = await _planService.GetCurrentSubscriptionForOrgAsync(organizationId, cancellationToken);
                 if (planResult == null)
                 {
                     return ServiceResult<HierarchyDepthLimit>.Failure("Could not determine organization's plan.");
@@ -407,7 +401,7 @@ namespace AuthHive.Business.Services.Organization
 
                 var planKey = planResult.PlanKey;
                 var maxDepth = PricingConstants.SubscriptionPlans.OrganizationDepthLimits.GetValueOrDefault(planKey, 1);
-                var currentDepth = await _hierarchyRepository.GetHierarchyDepthAsync(organizationId);
+                var currentDepth = await _hierarchyRepository.GetHierarchyDepthAsync(organizationId, cancellationToken);
 
                 var depthLimit = new HierarchyDepthLimit
                 {
@@ -415,7 +409,6 @@ namespace AuthHive.Business.Services.Organization
                     CurrentPlan = planKey,
                     MaxAllowedDepth = maxDepth,
                     CurrentDepth = currentDepth
-                    // RemainingDepth, IsAtLimit 등은 계산 속성이므로 설정 불필요
                 };
 
                 return ServiceResult<HierarchyDepthLimit>.Success(depthLimit);
@@ -426,27 +419,27 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<HierarchyDepthLimit>.Failure("Failed to retrieve depth limit.");
             }
         }
-
-        public async Task<ServiceResult<string>> GetOrganizationPathAsync(Guid organizationId)
+        
+        public async Task<ServiceResult<string>> GetOrganizationPathAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var cacheKey = $"org:hierarchy:path:{organizationId}";
-                var cachedPath = await _cacheService.GetAsync<string>(cacheKey);
+                var cachedPath = await _cacheService.GetAsync<string>(cacheKey, cancellationToken);
                 if (!string.IsNullOrEmpty(cachedPath))
                 {
                     return ServiceResult<string>.Success(cachedPath);
                 }
 
-                var ancestors = await _hierarchyRepository.GetAncestorsAsync(organizationId);
-                var organization = await _repository.GetByIdAsync(organizationId);
+                var ancestors = await _hierarchyRepository.GetAncestorsAsync(organizationId, cancellationToken);
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
                 if (organization == null)
                 {
                     return ServiceResult<string>.NotFound("Organization not found.");
                 }
 
                 var path = string.Join(" / ", ancestors.OrderBy(a => a.Level).Select(a => a.Name).Append(organization.Name));
-                await _cacheService.SetAsync(cacheKey, path, TimeSpan.FromMinutes(30));
+                await _cacheService.SetAsync(cacheKey, path, TimeSpan.FromMinutes(30), cancellationToken);
                 return ServiceResult<string>.Success(path);
             }
             catch (Exception ex)
@@ -455,23 +448,21 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<string>.Failure("Failed to retrieve organization path.");
             }
         }
-
+        
         public async Task<ServiceResult<bool>> ReorderSiblingsAsync(
-            Guid organizationId,
-            int newSortOrder,
-            Guid reorderedByConnectedId)
+            Guid organizationId, int newSortOrder, Guid reorderedByConnectedId, CancellationToken cancellationToken = default)
         {
-            await _unitOfWork.BeginTransactionAsync();
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                var organization = await _repository.GetByIdAsync(organizationId);
+                var organization = await _repository.GetByIdAsync(organizationId, cancellationToken);
                 if (organization == null)
                 {
                     return ServiceResult<bool>.NotFound("Organization not found.");
                 }
 
                 var siblings = organization.ParentId.HasValue
-                    ? await _repository.GetDirectChildrenAsync(organization.ParentId.Value)
+                    ? await _repository.GetDirectChildrenAsync(organization.ParentId.Value, cancellationToken)
                     : Enumerable.Empty<OrganizationEntity>();
 
                 var siblingsList = siblings.OrderBy(s => s.SortOrder).ToList();
@@ -491,36 +482,40 @@ namespace AuthHive.Business.Services.Organization
                         siblingsList[i].SortOrder = i;
                         siblingsList[i].UpdatedByConnectedId = reorderedByConnectedId;
                         siblingsList[i].UpdatedAt = DateTime.UtcNow;
-                        await _repository.UpdateAsync(siblingsList[i]);
+                        await _repository.UpdateAsync(siblingsList[i], cancellationToken);
                     }
                 }
 
-                await _unitOfWork.SaveChangesAsync();
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
                 if (organization.ParentId.HasValue)
                 {
-                    await InvalidateHierarchyCache(organization.ParentId.Value);
+                    await InvalidateHierarchyCache(organization.ParentId.Value, cancellationToken);
                 }
 
                 await _auditService.LogActionAsync(
-                    reorderedByConnectedId, "SIBLINGS_REORDERED", AuditActionType.Update,
-                    "Organization", organizationId.ToString(), true,
-                    $"Reordered to position {newSortOrder}");
+                    AuditActionType.Update,
+                    "SIBLINGS_REORDERED",
+                    reorderedByConnectedId,
+                    true,
+                    resourceType: "Organization",
+                    resourceId: organizationId.ToString(),
+                    metadata: new Dictionary<string, object> { { "NewSortOrder", newSortOrder } },
+                    cancellationToken: cancellationToken);
 
                 return ServiceResult<bool>.Success(true);
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 _logger.LogError(ex, "Failed to reorder siblings for {OrganizationId}", organizationId);
                 return ServiceResult<bool>.Failure("Failed to reorder siblings.");
             }
         }
-
+        
         public async Task<ServiceResult<HierarchyValidationResult>> ValidateHierarchyDepthForPlanAsync(
-            Guid organizationId,
-            string planKey)
+            Guid organizationId, string planKey, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -532,8 +527,7 @@ namespace AuthHive.Business.Services.Organization
                     ValidatedAt = DateTime.UtcNow
                 };
 
-                // <<-- 수정: 없는 메서드 대신 로컬 헬퍼 메서드 사용
-                var currentDepth = await GetSubtreeMaxDepthAsync(organizationId);
+                var currentDepth = await GetSubtreeMaxDepthAsync(organizationId, cancellationToken);
                 var maxDepth = PricingConstants.SubscriptionPlans.OrganizationDepthLimits.GetValueOrDefault(planKey, 1);
 
                 result.CurrentDepth = currentDepth;
@@ -547,7 +541,7 @@ namespace AuthHive.Business.Services.Organization
                         $"Current hierarchy depth ({currentDepth}) exceeds the maximum allowed ({maxDepth}) for plan {planKey}");
                 }
 
-                var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId);
+                var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId, null, cancellationToken);
                 result.AffectedChildOrganizations = descendants.Count();
 
                 return ServiceResult<HierarchyValidationResult>.Success(result);
@@ -558,74 +552,61 @@ namespace AuthHive.Business.Services.Organization
                 return ServiceResult<HierarchyValidationResult>.Failure("Failed to validate hierarchy depth.");
             }
         }
+        
         public async Task InvalidateAncestorCachesAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // 1. 현재 조직을 조회하여 부모 ID를 가져옵니다.
             var currentOrg = await _repository.GetByIdAsync(organizationId, cancellationToken);
-
             Guid? parentId = currentOrg?.ParentId;
 
-            // 2. 조상 체인을 따라 반복문(또는 재귀)으로 캐시를 무효화합니다.
             while (parentId.HasValue)
             {
                 var parent = await _repository.GetByIdAsync(parentId.Value, cancellationToken);
-
                 if (parent == null) break;
 
-                // [핵심] 부모 조직의 '자식 목록' 캐시를 무효화합니다.
-                // GetDirectChildrenAsync 같은 메서드가 사용하는 캐시 키를 여기서 삭제합니다.
-                // 예시 키: "org:id:{ParentId}:children" (정확한 캐시 키 패턴 사용 필요)
-                await _cacheService.RemoveAsync($"org:id:{parent.Id}:children:*", cancellationToken);
-
-                // 3. 상위 조직으로 이동
+                await _cacheService.RemoveByPatternAsync($"org:id:{parent.Id}:children:*", cancellationToken);
+                
                 parentId = parent.ParentId;
             }
         }
+        
         #endregion
 
         #region Private Helper Methods
 
-        private async Task InvalidateHierarchyCache(Guid organizationId)
+        private async Task InvalidateHierarchyCache(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var ancestors = await _hierarchyRepository.GetAncestorsAsync(organizationId);
+            var ancestors = await _hierarchyRepository.GetAncestorsAsync(organizationId, cancellationToken);
             var allAffectedIds = new HashSet<Guid> { organizationId };
             foreach (var ancestor in ancestors)
             {
                 allAffectedIds.Add(ancestor.Id);
             }
 
-            // 하위 조직의 캐시도 무효화해야 할 수 있으나, 상위 트리만 무효화하는 것이 일반적
             foreach (var id in allAffectedIds)
             {
-                // 다양한 깊이의 트리 캐시를 모두 무효화 (와일드카드 삭제가 지원되지 않는 경우)
-                for (int i = 0; i <= 20; i++) // 최대 깊이를 상수로 관리하는 것이 좋음
+                for (int i = 0; i <= 20; i++)
                 {
-                    await _cacheService.RemoveAsync($"org:hierarchy:tree:{id}_{i}");
+                    await _cacheService.RemoveAsync($"org:hierarchy:tree:{id}_{i}", cancellationToken);
                 }
-                await _cacheService.RemoveAsync($"org:hierarchy:path:{id}");
-                await _cacheService.RemoveAsync($"org:hierarchy:parent:{id}");
+                await _cacheService.RemoveAsync($"org:hierarchy:path:{id}", cancellationToken);
+                await _cacheService.RemoveAsync($"org:hierarchy:parent:{id}", cancellationToken);
             }
         }
 
         private async Task<OrganizationHierarchyTree> BuildHierarchyTreeAsync(
-            OrganizationEntity rootOrg,
-            int maxDepth)
+            OrganizationEntity rootOrg, int maxDepth, CancellationToken cancellationToken = default)
         {
             var tree = new OrganizationHierarchyTree
             {
-                Root = await BuildNodeAsync(rootOrg, 0, maxDepth, "/"),
+                Root = await BuildNodeAsync(rootOrg, 0, maxDepth, "/", cancellationToken),
                 PathMap = new Dictionary<Guid, string>()
             };
-
             PopulateTreeMetadata(tree, tree.Root);
             return tree;
         }
 
         private async Task<OrganizationNode> BuildNodeAsync(
-            OrganizationEntity org,
-            int currentLevel,
-            int maxDepth,
-            string parentPath)
+            OrganizationEntity org, int currentLevel, int maxDepth, string parentPath, CancellationToken cancellationToken = default)
         {
             var node = new OrganizationNode
             {
@@ -639,32 +620,34 @@ namespace AuthHive.Business.Services.Organization
 
             if (currentLevel < maxDepth)
             {
-                var children = await _repository.GetDirectChildrenAsync(org.Id);
+                var children = await _repository.GetDirectChildrenAsync(org.Id, cancellationToken);
                 foreach (var child in children.OrderBy(c => c.SortOrder))
                 {
-                    var childNode = await BuildNodeAsync(child, currentLevel + 1, maxDepth, node.Path);
+                    var childNode = await BuildNodeAsync(child, currentLevel + 1, maxDepth, node.Path, cancellationToken);
                     node.Children.Add(childNode);
                 }
             }
             return node;
         }
 
-        private void PopulateTreeMetadata(OrganizationHierarchyTree tree, OrganizationNode node)
+        private void PopulateTreeMetadata(OrganizationHierarchyTree tree, OrganizationNode? node)
         {
             if (node == null) return;
             tree.TotalNodes++;
             tree.MaxDepth = Math.Max(tree.MaxDepth, node.Level);
-            tree.PathMap[node.Id] = node.Path;
+            if(node.Id != Guid.Empty)
+                tree.PathMap[node.Id] = node.Path;
+
             foreach (var child in node.Children)
             {
                 PopulateTreeMetadata(tree, child);
             }
         }
 
-        private async Task<bool> CheckCircularReferenceAsync(Guid organizationId, Guid proposedParentId)
+        private async Task<bool> CheckCircularReferenceAsync(Guid organizationId, Guid proposedParentId, CancellationToken cancellationToken = default)
         {
             var current = proposedParentId;
-            var visited = new HashSet<Guid> { organizationId }; // 자기 자신부터 추가
+            var visited = new HashSet<Guid> { organizationId }; 
             while (true)
             {
                 if (visited.Contains(current))
@@ -673,7 +656,7 @@ namespace AuthHive.Business.Services.Organization
                 }
                 visited.Add(current);
 
-                var parent = await _repository.GetByIdAsync(current);
+                var parent = await _repository.GetByIdAsync(current, cancellationToken);
                 if (parent?.ParentId == null)
                 {
                     break;
@@ -684,40 +667,59 @@ namespace AuthHive.Business.Services.Organization
         }
 
         private async Task<(bool IsWithinLimit, int MaxAllowedDepth, int CurrentDepth)> CheckDepthLimitForMoveAsync(
-            Guid organizationId,
-            Guid proposedParentId)
+            Guid organizationId, Guid proposedParentId, CancellationToken cancellationToken = default)
         {
-            var planResult = await _planService.GetCurrentSubscriptionForOrgAsync(proposedParentId);
+            var planResult = await _planService.GetCurrentSubscriptionForOrgAsync(proposedParentId, cancellationToken);
             var planKey = planResult?.PlanKey ?? PricingConstants.SubscriptionPlans.BASIC_KEY;
             var maxDepth = PricingConstants.SubscriptionPlans.OrganizationDepthLimits.GetValueOrDefault(planKey, 1);
 
-            var parentDepth = await _hierarchyRepository.GetHierarchyDepthAsync(proposedParentId);
-            // <<-- 수정: 없는 메서드 대신 로컬 헬퍼 메서드 사용
-            var subtreeMaxDepth = await GetSubtreeMaxDepthAsync(organizationId);
+            var parentDepth = await _hierarchyRepository.GetHierarchyDepthAsync(proposedParentId, cancellationToken);
+            var subtreeMaxDepth = await GetSubtreeMaxDepthAsync(organizationId, cancellationToken);
             var totalDepthAfterMove = parentDepth + subtreeMaxDepth;
 
             return (totalDepthAfterMove <= maxDepth, maxDepth, totalDepthAfterMove);
         }
-
-        private async Task<List<Guid>> GetHierarchyPathIdsAsync(Guid organizationId)
+        
+        private async Task<List<Guid>> GetHierarchyPathIdsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             var path = new List<Guid>();
             var currentId = (Guid?)organizationId;
             while (currentId.HasValue)
             {
                 path.Insert(0, currentId.Value);
-                var org = await _repository.GetByIdAsync(currentId.Value);
+                var org = await _repository.GetByIdAsync(currentId.Value, cancellationToken);
                 currentId = org?.ParentId;
             }
             return path;
         }
-
-        // <<-- 추가: GetHierarchyUsageAsync를 위한 재귀 헬퍼 메서드
-        private async Task<HierarchyUsageDto> BuildUsageHierarchyAsync(
-            OrganizationEntity organization, DateTime startDate, DateTime endDate, int level, string path)
+        
+        private async Task<int> GetSubtreeMaxDepthAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // AutoMapper 설정이 필요함: IUsageTrackingService의 반환 모델 -> UsageMetrics
-            var directUsageResult = await _usageTrackingService.GetOrganizationUsageAsync(organization.Id, startDate, endDate);
+            var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId, null, cancellationToken);
+            if (!descendants.Any())
+            {
+                return 1;
+            }
+
+            int maxRelativeDepth = 0;
+            var baseDepth = await _hierarchyRepository.GetHierarchyDepthAsync(organizationId, cancellationToken);
+
+            foreach (var descendant in descendants)
+            {
+                var descendantDepth = await _hierarchyRepository.GetHierarchyDepthAsync(descendant.Id, cancellationToken);
+                var relativeDepth = descendantDepth - baseDepth;
+                if (relativeDepth > maxRelativeDepth)
+                {
+                    maxRelativeDepth = relativeDepth;
+                }
+            }
+            return maxRelativeDepth + 1;
+        }
+        
+        private async Task<HierarchyUsageDto> BuildUsageHierarchyAsync(
+            OrganizationEntity organization, DateTime startDate, DateTime endDate, int level, string path, CancellationToken cancellationToken = default)
+        {
+            var directUsageResult = await _usageTrackingService.GetOrganizationUsageAsync(organization.Id, startDate, endDate, cancellationToken);
             var directUsage = _mapper.Map<UsageMetrics>(directUsageResult);
 
             var hierarchyDto = new HierarchyUsageDto
@@ -727,21 +729,19 @@ namespace AuthHive.Business.Services.Organization
                 StartDate = startDate,
                 EndDate = endDate,
                 DirectUsage = directUsage,
-                TotalUsage = _mapper.Map<UsageMetrics>(directUsage), // 깊은 복사를 위해 매퍼 사용
+                TotalUsage = _mapper.Map<UsageMetrics>(directUsage),
                 HierarchyLevel = level,
                 HierarchyPath = $"{path}{organization.Name}/"
             };
 
-            var children = await _repository.GetDirectChildrenAsync(organization.Id);
+            var children = await _repository.GetDirectChildrenAsync(organization.Id, cancellationToken);
             foreach (var child in children)
             {
-                var childUsageDto = await BuildUsageHierarchyAsync(child, startDate, endDate, level + 1, hierarchyDto.HierarchyPath);
-
-                // 자식의 TotalUsage를 현재 조직의 TotalUsage에 합산
+                var childUsageDto = await BuildUsageHierarchyAsync(child, startDate, endDate, level + 1, hierarchyDto.HierarchyPath, cancellationToken);
+                
                 hierarchyDto.TotalUsage.ApiCalls += childUsageDto.TotalUsage.ApiCalls;
                 hierarchyDto.TotalUsage.StorageUsed += childUsageDto.TotalUsage.StorageUsed;
                 hierarchyDto.TotalUsage.ActiveUsers += childUsageDto.TotalUsage.ActiveUsers;
-                // ... 나머지 UsageMetrics 속성들 합산 ...
 
                 hierarchyDto.ChildrenUsage.Add(childUsageDto);
             }
@@ -750,64 +750,10 @@ namespace AuthHive.Business.Services.Organization
             return hierarchyDto;
         }
 
-        // <<-- 추가: GetMaxDepthInHierarchyAsync를 대체하는 로컬 헬퍼 메서드
-        private async Task<int> GetSubtreeMaxDepthAsync(Guid organizationId)
-        {
-            var descendants = await _hierarchyRepository.GetDescendantsAsync(organizationId);
-            if (!descendants.Any())
-            {
-                return 1; // 자식이 없으면 깊이는 1
-            }
-
-            int maxDepth = 0;
-            var baseDepth = await _hierarchyRepository.GetHierarchyDepthAsync(organizationId);
-
-            foreach (var descendant in descendants)
-            {
-                var descendantDepth = await _hierarchyRepository.GetHierarchyDepthAsync(descendant.Id);
-                var relativeDepth = descendantDepth - baseDepth;
-                if (relativeDepth > maxDepth)
-                {
-                    maxDepth = relativeDepth;
-                }
-            }
-            return maxDepth + 1;
-        }
-
         #endregion
 
         #region Event and Cache Wrapper Classes
-
-        // <<-- 수정: BaseEvent 상속 및 생성자 추가
-        public class OrganizationCreatedEvent : BaseEvent
-        {
-
-            public Guid ParentOrganizationId { get; init; }
-            public Guid CreatedByConnectedId { get; init; }
-            public DateTime CreatedAt { get; init; }
-            public OrganizationCreatedEvent(Guid aggregateId) : base(aggregateId) { }
-        }
-
-        public class OrganizationMovedEvent : BaseEvent
-        {
-
-            public Guid? OldParentId { get; init; }
-            public Guid? NewParentId { get; init; }
-            public Guid MovedByConnectedId { get; init; }
-            public DateTime MovedAt { get; init; }
-            public OrganizationMovedEvent(Guid aggregateId) : base(aggregateId) { }
-        }
-
-        public class SettingsInheritedEvent : BaseEvent
-        {
-            public Guid ParentOrganizationId { get; init; }
-            public int AffectedOrganizations { get; init; }
-            public PolicyInheritanceMode InheritanceMode { get; init; }
-            public Guid InitiatedByConnectedId { get; init; }
-            public DateTime InheritedAt { get; init; }
-            public SettingsInheritedEvent(Guid aggregateId) : base(aggregateId) { }
-        }
-
+        
         private class ParentIdCache
         {
             public Guid? ParentId { get; set; }
@@ -816,3 +762,4 @@ namespace AuthHive.Business.Services.Organization
         #endregion
     }
 }
+
