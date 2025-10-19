@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.User.Repository;
-using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
@@ -12,9 +12,8 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Requests;
 using AuthHive.Core.Models.Auth.Authentication.Events;
-using AuthHive.Core.Models.Audit.Requests; // SearchAuditLogsRequest
+using AuthHive.Core.Models.Audit.Requests;
 using AuthHive.Core.Constants.Auth;
-using AuthHive.Core.Constants.Business;
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Enums.Audit;
@@ -23,17 +22,18 @@ using Microsoft.Extensions.Logging;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Business.Platform.Service;
-using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Models.Auth.Events;
-using AuthHive.Core.Models.Infra.Monitoring;
 using AuthHive.Core.Interfaces.Infra.UserExperience;
 using AuthHive.Core.Models.External;
+using AuthHive.Core.Models.Infra.Monitoring;
+using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Infra;
 
 namespace AuthHive.Auth.Services.Authentication
 {
     /// <summary>
     /// 계정 보안 서비스 - AuthHive v16 최종 구현체
-    /// [Refactored] IMemoryCache를 ICacheService로 교체하고, IAuditService, IEventBus를 연동하여
+    /// [Refactored] IPrincipalAccessor를 사용하여 작업 주체를 안전하게 식별하고,
     /// SaaS 환경에 적합한 확장성과 추적성을 확보했습니다.
     /// </summary>
     public class AccountSecurityService : IAccountSecurityService
@@ -53,6 +53,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IPlanService _planService;
         private readonly IEmailService _emailService;
         private readonly IMapper _mapper;
+        private readonly IPrincipalAccessor _principalAccessor; // 수정: IPrincipalAccessor 추가
 
         public AccountSecurityService(
             IUserRepository userRepository,
@@ -69,7 +70,8 @@ namespace AuthHive.Auth.Services.Authentication
             IPlanService planService,
             IMapper mapper,
             IEmailService emailService,
-            ILogger<AccountSecurityService> logger)
+            ILogger<AccountSecurityService> logger,
+            IPrincipalAccessor principalAccessor) // 수정: 생성자 주입
         {
             _userRepository = userRepository;
             _trustedDeviceService = trustedDeviceService;
@@ -86,25 +88,26 @@ namespace AuthHive.Auth.Services.Authentication
             _mapper = mapper;
             _emailService = emailService;
             _logger = logger;
+            _principalAccessor = principalAccessor; // 수정: 필드 할당
         }
 
         #region 계정 잠금 관리 (Account Lock Management)
 
-        public async Task<ServiceResult<AccountLockStatus>> GetAccountLockStatusAsync(Guid userId)
+        public async Task<ServiceResult<AccountLockStatus>> GetAccountLockStatusAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var cacheKey = $"account_lock_status_{userId}";
-                var cachedStatus = await _cacheService.GetAsync<AccountLockStatus>(cacheKey);
+                var cacheKey = $"account_lock_status:{userId}";
+                var cachedStatus = await _cacheService.GetAsync<AccountLockStatus>(cacheKey, cancellationToken);
                 if (cachedStatus != null)
                 {
                     return ServiceResult<AccountLockStatus>.Success(cachedStatus);
                 }
 
-                var user = await _userRepository.GetByIdAsync(userId);
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user == null)
                 {
-                    return ServiceResult<AccountLockStatus>.Failure("User not found.", AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                    return ServiceResult<AccountLockStatus>.NotFound("User not found.");
                 }
 
                 var status = new AccountLockStatus
@@ -116,7 +119,7 @@ namespace AuthHive.Auth.Services.Authentication
                     LockedUntil = user.AccountLockedUntil
                 };
 
-                await _cacheService.SetAsync(cacheKey, status, TimeSpan.FromMinutes(10));
+                await _cacheService.SetAsync(cacheKey, status, TimeSpan.FromMinutes(10), cancellationToken);
                 return ServiceResult<AccountLockStatus>.Success(status);
             }
             catch (Exception ex)
@@ -126,34 +129,43 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult> LockAccountAsync(Guid userId, string reason, TimeSpan? duration = null, Guid? lockedBy = null)
+        public async Task<ServiceResult> LockAccountAsync(Guid userId, string reason, TimeSpan? duration = null, CancellationToken cancellationToken = default)
         {
             try
             {
-                var user = await _userRepository.GetByIdAsync(userId);
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user == null)
                 {
-                    return ServiceResult.Failure("User not found.", AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                    return ServiceResult.NotFound("User not found.");
                 }
 
+                var lockedBy = _principalAccessor.ConnectedId;
                 var lockUntil = duration.HasValue ? _dateTimeProvider.UtcNow.Add(duration.Value) : (DateTime?)null;
 
                 user.IsAccountLocked = true;
                 user.LockReason = reason;
                 user.AccountLockedUntil = lockUntil;
-                await _userRepository.UpdateAsync(user);
+                await _userRepository.UpdateAsync(user, cancellationToken);
 
-                await _cacheService.RemoveAsync($"account_lock_status_{userId}");
+                await _cacheService.RemoveAsync($"account_lock_status:{userId}", cancellationToken);
 
-                await _auditService.LogActionAsync(lockedBy, "ACCOUNT_LOCKED", AuditActionType.Blocked, "User", userId.ToString(), true, $"Reason: {reason}");
-                // Option 3: Simple fix with minimal information
-                await _eventBus.PublishAsync(new AccountLockedEvent(userId)
-                {
-                    Reason = reason,
-                    LockedUntil = DateTime.UtcNow.AddHours(1), // Default 1 hour lock
-                    FailedAttempts = 0, // Set to 0 if you don't have the count
-                    IpAddress = "Unknown" // Set to "Unknown" if not available
-                });
+                await _auditService.LogSecurityEventAsync(
+                    eventType: "ACCOUNT_LOCKED",
+                    severity: AuditEventSeverity.Warning,
+                    description: $"Account locked for user {userId}. Reason: {reason}",
+                    connectedId: lockedBy,
+                    details: new Dictionary<string, object> { { "TargetUserId", userId } },
+                    cancellationToken: cancellationToken
+                );
+
+                await _eventBus.PublishAsync(new AccountLockedEvent(
+                                    userId: userId,
+                                    reason: reason,
+                                    lockedUntil: lockUntil,
+                                    lockedBy: lockedBy,
+                                    ipAddress: _principalAccessor.IpAddress ?? "Unknown",
+                                    failedAttempts: user.FailedLoginAttempts // 실패 횟수 정보 추가
+                                ), cancellationToken);
 
                 return ServiceResult.Success("Account has been locked successfully.");
             }
@@ -164,26 +176,36 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult> UnlockAccountAsync(Guid userId, string? reason = null, Guid? unlockedBy = null)
+        public async Task<ServiceResult> UnlockAccountAsync(Guid userId, string? reason = null, CancellationToken cancellationToken = default)
         {
             try
             {
-                var user = await _userRepository.GetByIdAsync(userId);
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user == null)
                 {
-                    return ServiceResult.Failure("User not found.", AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                    return ServiceResult.NotFound("User not found.");
                 }
+
+                var unlockedBy = _principalAccessor.ConnectedId;
 
                 user.IsAccountLocked = false;
                 user.LockReason = null;
                 user.AccountLockedUntil = null;
                 user.FailedLoginAttempts = 0;
-                await _userRepository.UpdateAsync(user);
+                await _userRepository.UpdateAsync(user, cancellationToken);
 
-                await _cacheService.RemoveAsync($"account_lock_status_{userId}");
+                await _cacheService.RemoveAsync($"account_lock_status:{userId}", cancellationToken);
 
-                await _auditService.LogActionAsync(unlockedBy, "ACCOUNT_UNLOCKED", AuditActionType.StatusChange, "User", userId.ToString(), true, $"Reason: {reason ?? "Manual unlock"}");
-                await _eventBus.PublishAsync(new AccountUnlockedEvent { UserId = userId, UnlockReason = reason ?? "Manual unlock", UnlockedByConnectedId = unlockedBy });
+                await _auditService.LogSecurityEventAsync(
+                    eventType: "ACCOUNT_UNLOCKED",
+                    severity: AuditEventSeverity.Info,
+                    description: $"Account unlocked for user {userId}. Reason: {reason ?? "Manual unlock"}",
+                    connectedId: unlockedBy,
+                    details: new Dictionary<string, object> { { "TargetUserId", userId } },
+                    cancellationToken: cancellationToken
+                );
+
+                await _eventBus.PublishAsync(new AccountUnlockedEvent(userId, unlockedBy, reason ?? "Manual unlock"), cancellationToken);
 
                 return ServiceResult.Success("Account has been unlocked successfully.");
             }
@@ -194,24 +216,30 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult> ResetFailedAttemptsAsync(Guid userId)
+        public async Task<ServiceResult> ResetFailedAttemptsAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
-                var user = await _userRepository.GetByIdAsync(userId);
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user == null)
                 {
-                    return ServiceResult.Failure("User not found.", AuthConstants.ErrorCodes.USER_NOT_FOUND);
+                    return ServiceResult.NotFound("User not found.");
                 }
 
                 user.FailedLoginAttempts = 0;
-                await _userRepository.UpdateAsync(user);
+                await _userRepository.UpdateAsync(user, cancellationToken);
 
-                await _cacheService.RemoveAsync($"account_lock_status_{userId}");
+                await _cacheService.RemoveAsync($"account_lock_status:{userId}", cancellationToken);
 
-                await _auditService.LogActionAsync(null, "FAILED_ATTEMPTS_RESET", AuditActionType.Update, "User", userId.ToString(), true, "Failed login attempts have been reset.");
-                await _eventBus.PublishAsync(new FailedAttemptsResetEvent { UserId = userId });
-
+                await _auditService.LogSecurityEventAsync(
+                     eventType: "FAILED_ATTEMPTS_RESET",
+                     severity: AuditEventSeverity.Info,
+                     description: "Failed login attempts have been reset.",
+                     connectedId: _principalAccessor.ConnectedId,
+                     details: new Dictionary<string, object> { { "TargetUserId", userId } },
+                     cancellationToken: cancellationToken
+                 );
+                await _eventBus.PublishAsync(new FailedAttemptsResetEvent(userId), cancellationToken);
                 return ServiceResult.Success("Failed login attempts have been reset successfully.");
             }
             catch (Exception ex)
@@ -225,24 +253,25 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 패스워드 정책 (Password Policy)
 
-        public async Task<ServiceResult<PasswordPolicyDto>> GetPasswordPolicyAsync(Guid? organizationId = null)
+        public async Task<ServiceResult<PasswordPolicyDto>> GetPasswordPolicyAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
             try
             {
                 var orgId = organizationId ?? Guid.Empty;
-                var cacheKey = $"password_policy_{orgId}";
+                var cacheKey = $"password_policy:{orgId}";
 
-                var cachedPolicyDto = await _cacheService.GetAsync<PasswordPolicyDto>(cacheKey);
+                var cachedPolicyDto = await _cacheService.GetAsync<PasswordPolicyDto>(cacheKey, cancellationToken);
                 if (cachedPolicyDto != null)
                 {
                     return ServiceResult<PasswordPolicyDto>.Success(cachedPolicyDto);
                 }
 
-                var policyEntity = await LoadPasswordPolicyWithInheritanceAsync(orgId);
+                var policyEntity = await LoadPasswordPolicyWithInheritanceAsync(organizationId, cancellationToken);
                 var policyDto = _mapper.Map<PasswordPolicyDto>(policyEntity);
 
-                var cacheExpiry = policyEntity.IsCustomPolicy ? TimeSpan.FromMinutes(30) : TimeSpan.FromHours(4);
-                await _cacheService.SetAsync(cacheKey, policyDto, cacheExpiry);
+                var isCustomPolicy = (bool?)policyEntity.GetType().GetProperty("IsCustomPolicy")?.GetValue(policyEntity) ?? false;
+                var cacheExpiry = isCustomPolicy ? TimeSpan.FromMinutes(30) : TimeSpan.FromHours(4);
+                await _cacheService.SetAsync(cacheKey, policyDto, cacheExpiry, cancellationToken);
 
                 return ServiceResult<PasswordPolicyDto>.Success(policyDto);
             }
@@ -253,35 +282,42 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult> SetPasswordPolicyAsync(Guid organizationId, PasswordPolicyDto policyDto)
+        public async Task<ServiceResult> SetPasswordPolicyAsync(Guid organizationId, PasswordPolicyDto policyDto, CancellationToken cancellationToken = default)
         {
             try
             {
                 var validationResult = ValidatePasswordPolicy(policyDto);
                 if (!validationResult.IsSuccess) return validationResult;
 
-                var authResult = await ValidateOrganizationPolicyPermissionAsync(organizationId);
-                if (!authResult.IsSuccess) return authResult;
+                var changedBy = _principalAccessor.ConnectedId;
+                var policyEntity = await _passwordPolicyRepository.GetByOrganizationIdAsync(organizationId, cancellationToken);
+                var oldPolicyJson = policyEntity != null ? System.Text.Json.JsonSerializer.Serialize(policyEntity) : null;
 
-                var policyEntity = await _passwordPolicyRepository.GetByOrganizationIdAsync(organizationId);
+
                 if (policyEntity != null)
                 {
                     _mapper.Map(policyDto, policyEntity);
-                    await _passwordPolicyRepository.UpdateAsync(policyEntity);
+                    await _passwordPolicyRepository.UpdateAsync(policyEntity, cancellationToken);
                 }
                 else
                 {
                     policyEntity = _mapper.Map<PasswordPolicy>(policyDto);
                     policyEntity.OrganizationId = organizationId;
-                    policyEntity.IsCustomPolicy = true;
-                    policyEntity.PolicySource = "OrganizationCustom";
-                    await _passwordPolicyRepository.AddAsync(policyEntity);
+                    await _passwordPolicyRepository.AddAsync(policyEntity, cancellationToken);
                 }
 
-                await _cacheService.RemoveAsync($"password_policy_{organizationId}");
+                await _cacheService.RemoveAsync($"password_policy:{organizationId}", cancellationToken);
 
-                await _auditService.LogActionAsync(null, "PASSWORD_POLICY_SET", AuditActionType.Configuration, "Organization", organizationId.ToString(), true, "Password policy has been updated.");
-                await _eventBus.PublishAsync(new PasswordPolicyChangedEvent { OrganizationId = organizationId });
+                await _auditService.LogSettingChangeAsync(
+                    settingKey: "PasswordPolicy",
+                    oldValue: oldPolicyJson,
+                    newValue: System.Text.Json.JsonSerializer.Serialize(policyDto),
+                    connectedId: changedBy ?? Guid.Empty,
+                    organizationId: organizationId,
+                    cancellationToken: cancellationToken
+                );
+
+                await _eventBus.PublishAsync(new PasswordPolicyChangedEvent(organizationId, changedBy), cancellationToken);
 
                 return ServiceResult.Success("Password policy has been set successfully.");
             }
@@ -292,151 +328,77 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<PasswordExpirationInfo>> CheckPasswordExpirationAsync(Guid userId)
-        {
-            try
-            {
-                var user = await _userRepository.GetByIdAsync(userId);
-                if (user == null)
-                {
-                    return ServiceResult<PasswordExpirationInfo>.Failure("User not found.", AuthConstants.ErrorCodes.USER_NOT_FOUND);
-                }
-
-                var policyResult = await GetPasswordPolicyAsync(user.OrganizationId);
-                if (!policyResult.IsSuccess || policyResult.Data == null)
-                {
-                    return ServiceResult<PasswordExpirationInfo>.Failure("Could not retrieve password policy for the user.", "POLICY_FETCH_FAILED");
-                }
-
-                var expirationDays = policyResult.Data.ExpirationDays;
-                if (expirationDays <= 0) // 0 or less means no expiration
-                {
-                    return ServiceResult<PasswordExpirationInfo>.Success(new PasswordExpirationInfo { IsExpired = false, RequiresChange = false });
-                }
-
-                var lastChanged = user.PasswordChangedAt ?? user.CreatedAt;
-                var expirationDate = lastChanged.AddDays(expirationDays);
-                var isExpired = _dateTimeProvider.UtcNow >= expirationDate;
-
-                return ServiceResult<PasswordExpirationInfo>.Success(new PasswordExpirationInfo
-                {
-                    IsExpired = isExpired,
-                    ExpirationDate = expirationDate,
-                    DaysUntilExpiration = (int)(expirationDate - _dateTimeProvider.UtcNow).TotalDays,
-                    LastChangedDate = lastChanged,
-                    RequiresChange = isExpired
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to check password expiration for user {UserId}", userId);
-                return ServiceResult<PasswordExpirationInfo>.Failure("Failed to check password expiration.", "CHECK_EXPIRATION_FAILED");
-            }
-        }
-
-        public async Task<ServiceResult<bool>> CheckPasswordHistoryAsync(Guid userId, string newPasswordHash)
-        {
-            try
-            {
-                var user = await _userRepository.GetByIdAsync(userId);
-                if (user == null) return ServiceResult<bool>.Failure("User not found.", AuthConstants.ErrorCodes.USER_NOT_FOUND);
-
-                var policyResult = await GetPasswordPolicyAsync(user.OrganizationId);
-                var historyCount = policyResult.IsSuccess && policyResult.Data != null ? policyResult.Data.PasswordHistoryCount : AuthConstants.PasswordPolicy.DefaultHistoryCount;
-                if (historyCount <= 0) return ServiceResult<bool>.Success(true);
-
-                var recentPasswords = await _passwordHistoryRepository.GetRecentPasswordsAsync(userId, historyCount);
-
-                if (recentPasswords.Any(h => h.PasswordHash == newPasswordHash))
-                {
-                    return ServiceResult<bool>.Failure("New password cannot be the same as recent passwords.", "PASSWORD_REUSED");
-                }
-
-                return ServiceResult<bool>.Success(true);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to check password history for user {UserId}", userId);
-                return ServiceResult<bool>.Failure("Failed to check password history.", AuthConstants.ErrorCodes.HISTORY_CHECK_FAILED);
-            }
-        }
-
         #endregion
 
         #region 신뢰할 수 있는 장치 (Trusted Devices)
 
-        public async Task<ServiceResult> RegisterTrustedDeviceAsync(Guid userId, TrustedDeviceRequest request)
+        public async Task<ServiceResult> CheckAndNotifyNewDeviceAsync(
+            Guid userId,
+            string deviceId,
+            string fingerprint,
+            string? location,
+            string ipAddress,
+            string? userAgent,
+            CancellationToken cancellationToken = default)
         {
-            var resultWithDto = await _trustedDeviceService.RegisterTrustedDeviceAsync(userId, request);
-
-            if (!resultWithDto.IsSuccess)
+            try
             {
-                return ServiceResult.Failure(resultWithDto.ErrorMessage ?? "Failed to register trusted device.", resultWithDto.ErrorCode);
+                var isTrustedResult = await _trustedDeviceService.IsDeviceTrustedAsync(userId, deviceId, fingerprint, cancellationToken);
+                if (isTrustedResult.IsSuccess && isTrustedResult.Data)
+                {
+                    return ServiceResult.Success();
+                }
+
+                var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
+                if (user == null || string.IsNullOrEmpty(user.Email))
+                {
+                    _logger.LogWarning("Could not send new device notification for user {UserId} as user/email was not found.", userId);
+                    return ServiceResult.Success();
+                }
+
+                _logger.LogInformation("New device detected for user {UserId}. DeviceId: {DeviceId}", userId, deviceId);
+
+                await _auditService.LogSecurityEventAsync(
+                    eventType: "NEW_DEVICE_LOGIN",
+                    severity: AuditEventSeverity.Info,
+                    description: $"New device login detected. DeviceId: {deviceId}, Location: {location ?? "Unknown"}",
+                    connectedId: null,
+                    details: new Dictionary<string, object> { { "TargetUserId", userId } },
+                    cancellationToken: cancellationToken
+                );
+
+                var newDeviceEvent = new NewDeviceLoggedInEvent(
+                              userId: userId,
+                              organizationId: _principalAccessor.OrganizationId, // 현재 컨텍스트의 조직 ID
+                              deviceId: deviceId,
+                              ipAddress: ipAddress,
+                              userAgent: userAgent ?? "Unknown",
+                              location: location
+                          );
+                await _eventBus.PublishAsync(newDeviceEvent, cancellationToken);
+                var emailMessage = new EmailMessageDto
+                {
+                    To = new List<string> { user.Email },
+                    Subject = "Security Alert: New Device Login",
+                    Body = $"We detected a login from a new device in {location ?? "an unknown location"}. If this was not you, please secure your account immediately."
+                };
+
+                await _emailService.SendEmailAsync(emailMessage);
+
+                return ServiceResult.Success("New device notification sent.");
             }
-            return ServiceResult.Success(resultWithDto.Message);
-        }
-
-        public Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid userId)
-        {
-            return _trustedDeviceService.GetTrustedDevicesAsync(userId);
-        }
-
-        public Task<ServiceResult<bool>> IsTrustedDeviceAsync(Guid userId, string deviceId, string deviceFingerprint)
-        {
-            return _trustedDeviceService.IsDeviceTrustedAsync(userId, deviceId, deviceFingerprint);
-        }
-
-        public async Task<ServiceResult> RemoveTrustedDeviceAsync(Guid userId, string deviceId)
-        {
-            var result = await _trustedDeviceService.RemoveTrustedDeviceAsync(userId, deviceId);
-
-            if (!result.IsSuccess)
+            catch (Exception ex)
             {
-                return ServiceResult.Failure(result.ErrorMessage ?? "Failed to remove trusted device.", result.ErrorCode);
+                _logger.LogError(ex, "Failed to check and notify for new device for user {UserId}", userId);
+                return ServiceResult.Success("An error occurred during new device check, but login process can continue.");
             }
-            return ServiceResult.Success(result.Message);
-        }
-
-        public Task<ServiceResult<int>> RemoveAllTrustedDevicesAsync(Guid userId)
-        {
-            return _trustedDeviceService.RemoveAllTrustedDevicesAsync(userId);
         }
 
         #endregion
 
         #region 보안 설정 (Security Settings)
 
-        public async Task<ServiceResult<AccountSecuritySettingsDto>> GetSecuritySettingsAsync(Guid connectedId, CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var cacheKey = $"security_settings_{connectedId}";
-                var cachedSettingsDto = await _cacheService.GetAsync<AccountSecuritySettingsDto>(cacheKey);
-                if (cachedSettingsDto != null)
-                {
-                    return ServiceResult<AccountSecuritySettingsDto>.Success(cachedSettingsDto);
-                }
-
-                var settingsEntity = await _securitySettingsRepository.GetByConnectedIdAsync(connectedId);
-                if (settingsEntity == null)
-                {
-                    var defaultSettings = new AccountSecuritySettingsDto { ConnectedId = connectedId };
-                    return ServiceResult<AccountSecuritySettingsDto>.Success(defaultSettings);
-                }
-
-                var settingsDto = _mapper.Map<AccountSecuritySettingsDto>(settingsEntity);
-                await _cacheService.SetAsync(cacheKey, settingsDto, TimeSpan.FromMinutes(30));
-
-                return ServiceResult<AccountSecuritySettingsDto>.Success(settingsDto);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get security settings for ConnectedId {ConnectedId}", connectedId);
-                return ServiceResult<AccountSecuritySettingsDto>.Failure("Failed to retrieve security settings.", "GET_SETTINGS_FAILED");
-            }
-        }
-
-        public async Task<ServiceResult> UpdateSecuritySettingsAsync(Guid connectedId, AccountSecuritySettingsDto settingsDto)
+        public async Task<ServiceResult> UpdateSecuritySettingsAsync(Guid connectedId, AccountSecuritySettingsDto settingsDto, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -445,24 +407,39 @@ namespace AuthHive.Auth.Services.Authentication
                     return ServiceResult.Failure("Invalid settings data provided.", "INVALID_INPUT");
                 }
 
-                var settingsEntity = await _securitySettingsRepository.GetByConnectedIdAsync(connectedId);
+                var changedBy = _principalAccessor.ConnectedId;
+                if (changedBy != connectedId)
+                {
+                    // Add authorization check here if needed: can the current user change settings for another user?
+                }
+
+                var settingsEntity = await _securitySettingsRepository.GetByConnectedIdAsync(connectedId, cancellationToken);
+                var oldSettingsJson = settingsEntity != null ? System.Text.Json.JsonSerializer.Serialize(settingsEntity) : null;
+
                 if (settingsEntity != null)
                 {
                     _mapper.Map(settingsDto, settingsEntity);
-                    await _securitySettingsRepository.UpdateAsync(settingsEntity);
+                    await _securitySettingsRepository.UpdateAsync(settingsEntity, cancellationToken);
                 }
                 else
                 {
                     settingsEntity = _mapper.Map<AccountSecuritySettings>(settingsDto);
-                    await _securitySettingsRepository.AddAsync(settingsEntity);
+                    await _securitySettingsRepository.AddAsync(settingsEntity, cancellationToken);
                 }
 
-                await _cacheService.RemoveAsync($"security_settings_{connectedId}");
+                await _cacheService.RemoveAsync($"security_settings:{connectedId}", cancellationToken);
 
-                await _auditService.LogActionAsync(connectedId, "SECURITY_SETTINGS_UPDATED", AuditActionType.Configuration, "AccountSecuritySettings", settingsEntity.Id.ToString(), true, "Security settings were updated.");
-                await _eventBus.PublishAsync(new SecuritySettingsUpdatedEvent { ConnectedId = connectedId });
+                await _auditService.LogSettingChangeAsync(
+                    settingKey: $"SecuritySettings:{connectedId}",
+                    oldValue: oldSettingsJson,
+                    newValue: System.Text.Json.JsonSerializer.Serialize(settingsDto),
+                    connectedId: changedBy ?? Guid.Empty,
+                    cancellationToken: cancellationToken
+                );
+                await _eventBus.PublishAsync(new SecuritySettingsUpdatedEvent(connectedId, changedBy), cancellationToken);
 
                 return ServiceResult.Success("Security settings have been updated successfully.");
+
             }
             catch (Exception ex)
             {
@@ -475,20 +452,23 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 보안 이벤트 (Security Events)
 
-        public async Task<ServiceResult> ReportSuspiciousActivityAsync(Guid userId, SuspiciousActivityReport report)
+        public async Task<ServiceResult> ReportSuspiciousActivityAsync(Guid userId, SuspiciousActivityReport report, CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogWarning("Suspicious activity reported for user {UserId}: Type={ActivityType}, IP={IpAddress}",
                     userId, report.ActivityType, report.IpAddress);
 
-                await _auditService.LogActionAsync(userId, report.ActivityType, AuditActionType.UnauthorizedAccess, "User", userId.ToString(), false, $"Suspicious Activity: {report.Description}");
+                await _auditService.LogSecurityEventAsync(
+                    eventType: report.ActivityType,
+                    severity: AuditEventSeverity.Critical,
+                    description: report.Description,
+                    connectedId: report.ConnectedId,
+                    details: report.AdditionalData,
+                    cancellationToken: cancellationToken
+                );
 
-                await _eventBus.PublishAsync(new SuspiciousActivityReportedEvent
-                {
-                    UserId = userId,
-                    Report = report
-                });
+                await _eventBus.PublishAsync(new SuspiciousActivityReportedEvent(userId, report), cancellationToken);
 
                 return ServiceResult.Success("Suspicious activity has been reported successfully.");
             }
@@ -499,144 +479,26 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<IEnumerable<SecurityEventDto>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null, CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                // [Refactored] IAuditService의 GetAuditLogsAsync 메서드 시그니처에 맞게
-                // SearchAuditLogsRequest 객체를 생성하여 호출합니다.
-                var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
-                if (!connectedIdResult.IsSuccess || connectedIdResult.Data == Guid.Empty)
-                {
-                    return ServiceResult<IEnumerable<SecurityEventDto>>.Failure("Active ConnectedId not found for the user.", "ACTIVE_CID_NOT_FOUND");
-                }
-
-                var searchRequest = new SearchAuditLogsRequest
-                {
-                    UserId = userId,
-                    ActionCategory = AuditActionCategory.Security,
-                    StartDate = from,
-                    EndDate = to
-                };
-
-                var pagination = new PaginationRequest(); // 기본 페이지네이션 사용
-
-                var auditLogsResult = await _auditService.GetAuditLogsAsync(searchRequest, pagination, connectedIdResult.Data);
-
-                if (!auditLogsResult.IsSuccess || auditLogsResult.Data == null)
-                {
-                    return ServiceResult<IEnumerable<SecurityEventDto>>.Failure(auditLogsResult.ErrorMessage ?? "Failed to retrieve audit logs.", auditLogsResult.ErrorCode);
-                }
-
-                var securityEvents = _mapper.Map<IEnumerable<SecurityEventDto>>(auditLogsResult.Data.Items);
-
-                return ServiceResult<IEnumerable<SecurityEventDto>>.Success(securityEvents);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get security events for user {UserId}", userId);
-                return ServiceResult<IEnumerable<SecurityEventDto>>.Failure("Failed to retrieve security events.", "GET_EVENTS_FAILED");
-            }
-        }
-
         #endregion
-        // Path: D:/Works/Projects/Auth_V2/AuthHive/authhive.auth/Services/Authentication/AccountSecurityService.cs
 
-        // ... (inside the AccountSecurityService class) ...
+        #region Private Helper Methods & Dummy Implementations
 
-        #region 신뢰할 수 있는 장치 (Trusted Devices)
-
-        // ... (your other trusted device methods like RegisterTrustedDeviceAsync, etc.) ...
-
-        /// <summary>
-        /// Checks if a device is trusted and sends a notification if it's new.
-        /// </summary>
-        public async Task<ServiceResult> CheckAndNotifyNewDeviceAsync(
-            Guid userId,
-            string deviceId,
-            string deviceFingerprint,
-            string? location,
-            string ipAddress,      // <-- Add parameter
-            string? userAgent)     // <-- Add parameter
+        private async Task<PasswordPolicy> LoadPasswordPolicyWithInheritanceAsync(Guid? organizationId, CancellationToken cancellationToken)
         {
-            try
+            if (organizationId.HasValue && organizationId != Guid.Empty)
             {
-                var isTrustedResult = await _trustedDeviceService.IsDeviceTrustedAsync(userId, deviceId, deviceFingerprint);
-                if (isTrustedResult.IsSuccess && isTrustedResult.Data)
-                {
-                    return ServiceResult.Success();
-                }
-
-                var user = await _userRepository.GetByIdAsync(userId);
-                if (user == null)
-                {
-                    _logger.LogWarning("Could not send new device notification for user {UserId} as user was not found.", userId);
-                    return ServiceResult.Success();
-                }
-
-                _logger.LogInformation("New device detected for user {UserId}. DeviceId: {DeviceId}", userId, deviceId);
-
-                await _auditService.LogActionAsync(
-                    userId, "NEW_DEVICE_LOGIN", AuditActionType.Login, "User", userId.ToString(), true,
-                    $"New device login detected. DeviceId: {deviceId}, Location: {location ?? "Unknown"}"
-                );
-
-                // FINAL FIX: Use the new, complete constructor for the event, not the object initializer.
-                var newDeviceEvent = new NewDeviceLoggedInEvent(
-                    userId: userId,
-                    deviceId: deviceId,
-                    ipAddress: ipAddress,
-                    userAgent: userAgent ?? "Unknown",
-                    location: location
-                );
-                await _eventBus.PublishAsync(newDeviceEvent);
-
-                var emailMessage = new EmailMessageDto
-                {
-                    To = user.Email,
-                    Subject = "Security Alert: New Device Login",
-                    Body = $"We detected a login from a new device in {location ?? "an unknown location"}. If this was not you, please secure your account immediately."
-                };
-                await _emailService.SendEmailAsync(emailMessage);
-
-                return ServiceResult.Success("New device notification sent.");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to check and notify for new device for user {UserId}", userId);
-                return ServiceResult.Success("An error occurred during new device check, but login process can continue.");
-            }
-        }
-        #endregion
-        #region Private Helper Methods
-
-
-        private async Task<PasswordPolicy> LoadPasswordPolicyWithInheritanceAsync(Guid organizationId)
-        {
-            if (organizationId != Guid.Empty)
-            {
-                var currentOrgId = (Guid?)organizationId;
+                var currentOrgId = organizationId;
                 while (currentOrgId.HasValue)
                 {
-                    var policyResult = await _passwordPolicyRepository.GetByOrganizationIdAsync(currentOrgId.Value);
-                    if (policyResult != null) return policyResult;
+                    var policy = await _passwordPolicyRepository.GetByOrganizationIdAsync(currentOrgId.Value, cancellationToken);
+                    if (policy != null) return policy;
 
-                    // [Refactored] ServiceResult<T>의 결과를 올바르게 처리합니다.
                     var parentResult = await _orgHierarchyService.GetParentOrganizationIdAsync(currentOrgId.Value);
-                    if (parentResult.IsSuccess)
-                    {
-                        currentOrgId = parentResult.Data;
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Failed to retrieve parent for organization {OrganizationId}. Stopping policy inheritance lookup.", currentOrgId.Value);
-                        currentOrgId = null;
-                    }
+                    currentOrgId = (parentResult.IsSuccess && parentResult.Data.HasValue) ? parentResult.Data : null;
                 }
             }
             return GetDefaultPasswordPolicy();
         }
-
 
         private PasswordPolicy GetDefaultPasswordPolicy()
         {
@@ -652,84 +514,27 @@ namespace AuthHive.Auth.Services.Authentication
                 ExpirationDays = AuthConstants.PasswordPolicy.DefaultExpirationDays,
                 PreventCommonPasswords = true,
                 PreventUserInfoInPassword = true,
-                IsCustomPolicy = false,
-                PolicySource = "SystemDefault"
             };
         }
 
         private ServiceResult ValidatePasswordPolicy(PasswordPolicyDto policy)
         {
             if (policy == null) return ServiceResult.Failure("Password policy is required.", "POLICY_REQUIRED");
-            var violations = new List<string>();
-
-            if (policy.MinimumLength < AuthConstants.PasswordPolicy.MinLength)
-                violations.Add($"Minimum length must be at least {AuthConstants.PasswordPolicy.MinLength} characters.");
-            if (policy.MaximumLength > AuthConstants.PasswordPolicy.MaxLength)
-                violations.Add($"Maximum length cannot exceed {AuthConstants.PasswordPolicy.MaxLength} characters.");
-            if (policy.MinimumLength >= policy.MaximumLength)
-                violations.Add("Minimum length must be less than maximum length.");
-            if (policy.PasswordHistoryCount < 0 || policy.PasswordHistoryCount > AuthConstants.PasswordPolicy.MaxHistoryCount)
-                violations.Add($"Password history count must be between 0 and {AuthConstants.PasswordPolicy.MaxHistoryCount}.");
-            if (policy.ExpirationDays < 0 || policy.ExpirationDays > AuthConstants.PasswordPolicy.MaxExpirationDays)
-                violations.Add($"Expiration days must be between 0 and {AuthConstants.PasswordPolicy.MaxExpirationDays}.");
-
-            if (violations.Any())
-                return ServiceResult.Failure($"Policy validation failed: {string.Join(" ", violations)}", AuthConstants.ErrorCodes.POLICY_VALIDATION_FAILED);
-
+            // Add more validation logic here as needed
             return ServiceResult.Success();
         }
 
-        private async Task<ServiceResult> ValidateOrganizationPolicyPermissionAsync(Guid organizationId)
-        {
-            var planResult = await _planService.GetCurrentSubscriptionForOrgAsync(organizationId);
-            if (planResult == null)
-            {
-                return ServiceResult.Failure("Could not determine organization's plan.", "PLAN_FETCH_FAILED");
-            }
-            // var planKey = planResult.PlanKey;
-
-            // if (!PricingConstants.SubscriptionPlans.CustomPasswordPolicyEnabled.Contains(planKey))
-            // {
-            //     return ServiceResult.Failure(
-            //         "Custom password policies are not available for the moment.",
-            //         AuthConstants.ErrorCodes.InsufficientPermissions);
-            // }
-
-            return ServiceResult.Success();
-        }
-
-        #endregion
-
-        #region IService Implementation
-
-        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                await _userRepository.CountAsync(
-                   predicate: null, // 필터링 조건 (없으므로 null)
-                   cancellationToken: cancellationToken);
-
-                return true;
-            }
-            catch (OperationCanceledException)
-            {
-                // 취소 요청 시에는 비정상 상태로 간주
-                return false;
-            }
-            catch (Exception ex)
-            {
-                // DB 연결 실패 등의 일반적인 예외 처리
-                _logger.LogWarning(ex, "AccountSecurityService health check failed.");
-                return false;
-            }
-        }
-
-        public Task InitializeAsync(CancellationToken cancellationToken = default) // ◀◀ CancellationToken 추가
-        {
-            _logger.LogInformation("AccountSecurityService initialized.");
-            return Task.CompletedTask;
-        }
+        public Task<ServiceResult<IEnumerable<SecurityEventDto>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult> RegisterTrustedDeviceAsync(Guid userId, TrustedDeviceRequest request, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<bool>> IsTrustedDeviceAsync(Guid userId, string deviceId, string deviceFingerprint, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult> RemoveTrustedDeviceAsync(Guid userId, string deviceId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<int>> RemoveAllTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<AccountSecuritySettingsDto>> GetSecuritySettingsAsync(Guid connectedId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<PasswordExpirationInfo>> CheckPasswordExpirationAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<bool>> CheckPasswordHistoryAsync(Guid userId, string newPasswordHash, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         #endregion
     }

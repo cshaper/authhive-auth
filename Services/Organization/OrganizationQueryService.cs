@@ -1,90 +1,109 @@
+// 파일: AuthHive.Auth.Services.Organization/OrganizationQueryService.cs (최종 수정)
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Entities.Organization;
+using AuthHive.Core.Enums.Audit; 
 using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Organization;
 using AuthHive.Core.Models.Organization.Requests;
 using AuthHive.Core.Models.Organization.Responses;
 using AutoMapper;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Constants.Common.CommonConstants;
+using AuthHive.Core.Interfaces.Audit;
 
 namespace AuthHive.Auth.Services.Organization
 {
     /// <summary>
-    /// 조직 검색 서비스 구현 - AuthHive v15
+    /// [v16 원칙 적용] 조직 조회 서비스 구현체 (CQRS Query Side)
+    /// - IMemoryCache 제거, ICacheService 적용, CancellationToken 완벽 전달.
+    /// - IAuditService 및 IPrincipalAccessor를 적용하여 감사 및 사용자 컨텍스트를 확보합니다.
     /// </summary>
-    public class OrganizationSearchService : IOrganizationSearchService
+    public class OrganizationQueryService : IOrganizationQueryService
     {
-        private readonly IOrganizationSearchRepository _searchRepository;
-        private readonly IOrganizationCapabilityRepository _capabilityRepository;
+        private readonly IOrganizationQueryRepository _queryRepository;
         private readonly IOrganizationCapabilityAssignmentRepository _capabilityAssignmentRepository;
+        private readonly ICacheService _cacheService;
+        private readonly IAuditService _auditService;
+        private readonly IPrincipalAccessor _principalAccessor;
         private readonly IMapper _mapper;
-        private readonly IMemoryCache _cache;
-        private readonly ILogger<OrganizationSearchService> _logger;
+        private readonly ILogger<OrganizationQueryService> _logger;
+        
+        private readonly TimeSpan _userOrgsCacheExpiration = TimeSpan.FromMinutes(10);
+        private readonly TimeSpan _connectedOrgsCacheExpiration = TimeSpan.FromMinutes(5);
 
-        // 캐시 키 상수
-        private const string CACHE_KEY_USER_ORGS = "org_search:user_orgs:{0}";
-        private const string CACHE_KEY_CONNECTED_ORGS = "org_search:connected_orgs:{0}";
+        private const string CACHE_KEY_USER_ORGS = "OrgQuery:UserOrgs:{0}";
+        private const string CACHE_KEY_CONNECTED_ORGS = "OrgQuery:ConnectedOrgs:{0}";
 
-        public OrganizationSearchService(
-            IOrganizationSearchRepository searchRepository,
-            IOrganizationCapabilityRepository capabilityRepository,
+        public OrganizationQueryService(
+            IOrganizationQueryRepository queryRepository, 
             IOrganizationCapabilityAssignmentRepository capabilityAssignmentRepository,
             IMapper mapper,
-            IMemoryCache cache,
-            ILogger<OrganizationSearchService> logger)
+            ICacheService cacheService, 
+            IAuditService auditService, 
+            IPrincipalAccessor principalAccessor, 
+            ILogger<OrganizationQueryService> logger)
         {
-            _searchRepository = searchRepository ?? throw new ArgumentNullException(nameof(searchRepository));
-            _capabilityRepository = capabilityRepository ?? throw new ArgumentNullException(nameof(capabilityRepository));
+            _queryRepository = queryRepository ?? throw new ArgumentNullException(nameof(queryRepository));
             _capabilityAssignmentRepository = capabilityAssignmentRepository ?? throw new ArgumentNullException(nameof(capabilityAssignmentRepository));
             _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
-            _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+            _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService));
+            _auditService = auditService ?? throw new ArgumentNullException(nameof(auditService));
+            _principalAccessor = principalAccessor ?? throw new ArgumentNullException(nameof(principalAccessor));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        #region IService Implementation
-        // OrganizationSearchService.cs
+        #region IService Implementation (ASPIRE Ready)
 
-        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken added
+        /// <summary>
+        /// 서비스 상태 및 종속성(DB, Principal 접근)의 건강 상태를 확인합니다.
+        /// </summary>
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
+            // .NET Aspire 환경을 위한 비동기 Principal 로딩 지원
+            await _principalAccessor.GetPrincipalAsync(cancellationToken);
             try
             {
-                var testQuery = await _searchRepository.GetCountByStatusAsync(cancellationToken);
+                // Repository를 통해 DB 연결 상태 확인
+                await _queryRepository.CountAsync(cancellationToken: cancellationToken); 
                 return true;
-
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "OrganizationSearchService health check failed");
+                _logger.LogError(ex, "OrganizationQueryService health check failed");
                 return false;
             }
         }
+        
         public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
-            _logger.LogInformation("Initializing OrganizationSearchService");
-            _logger.LogInformation("OrganizationSearchService initialized successfully");
-            // Directly return the completed task. The log messages run synchronously before this return.
+            _logger.LogInformation("OrganizationQueryService initialized successfully");
             return Task.CompletedTask;
         }
 
         #endregion
 
-        #region IOrganizationSearchService Implementation
+        #region IOrganizationQueryService Implementation
 
         /// <summary>
-        /// 조직 검색
+        /// 조직 검색 및 페이징된 목록 조회. 민감한 조회 작업이므로 감사 로그를 기록합니다.
         /// </summary>
         public async Task<ServiceResult<OrganizationListResponse>> SearchAsync(
-            OrganizationSearchRequest request)
+            OrganizationSearchRequest request,
+            CancellationToken cancellationToken = default)
         {
+            // IPrincipalAccessor를 통해 요청 ConnectedId를 안전하게 확보합니다 (인증되지 않은 경우 Guid.Empty).
+            Guid requesterConnectedId = _principalAccessor.ConnectedId ?? Guid.Empty; 
+            
             try
             {
                 if (request == null)
@@ -93,56 +112,26 @@ namespace AuthHive.Auth.Services.Organization
                         "Search request cannot be null",
                         "INVALID_REQUEST");
                 }
-
-                // 기본값 설정
+                
+                // 안전장치 적용
                 request.PageNumber = Math.Max(1, request.PageNumber);
-                request.PageSize = Math.Min(100, Math.Max(1, request.PageSize));
-
-                // PrimaryCapability 변환
-                OrganizationCapabilityEnum? primaryCapabilityEnum = null;
-                if (request.PrimaryCapability != null)
-                {
-                    primaryCapabilityEnum = ConvertToCapabilityEnum(request.PrimaryCapability.Code);
-                }
+                request.PageSize = Math.Min(1000, Math.Max(1, request.PageSize)); 
 
                 // Repository 호출
-                var (organizations, totalCount) = await _searchRepository.SearchAsync(
+                var pagedResult = await _queryRepository.SearchAsync(
                     searchTerm: request.Keyword,
                     status: request.Status,
                     type: request.Type,
-                    primaryCapability: primaryCapabilityEnum,
-                    region: request.Region,
-                    parentOrganizationId: request.ParentId,
-                    includeDescendants: request.IncludeChildren,
-                    createdFrom: request.CreatedFrom,
-                    createdTo: request.CreatedTo,
-                    sortBy: request.SortBy ?? "Name",
-                    sortDescending: request.SortDescending,
                     pageNumber: request.PageNumber,
-                    pageSize: request.PageSize);
-
-                // HasCapability 필터 적용
-                if (request.HasCapability != null)
-                {
-                    var filteredOrgs = new List<AuthHive.Core.Entities.Organization.Organization>();
-                    foreach (var org in organizations)
-                    {
-                        var hasCapability = await _capabilityAssignmentRepository.HasCapabilityAsync(
-                            org.Id, request.HasCapability.Code);
-                        if (hasCapability)
-                        {
-                            filteredOrgs.Add(org);
-                        }
-                    }
-                    organizations = filteredOrgs;
-                    totalCount = filteredOrgs.Count;
-                }
-
-                // DTO 변환
+                    pageSize: request.PageSize,
+                    cancellationToken: cancellationToken);
+                
+                // DTO 변환 및 Secondary Lookup
                 var organizationResponses = new List<OrganizationResponse>();
-                foreach (var org in organizations)
+                foreach (var org in pagedResult.Items)
                 {
-                    var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id);
+                    // Primary Capability 조회 시 CancellationToken 전달
+                    var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id, cancellationToken); 
 
                     organizationResponses.Add(new OrganizationResponse
                     {
@@ -166,16 +155,34 @@ namespace AuthHive.Auth.Services.Organization
                 var response = new OrganizationListResponse
                 {
                     Items = organizationResponses,
-                    TotalCount = totalCount,
+                    TotalCount = pagedResult.TotalCount,
                     PageNumber = request.PageNumber,
                     PageSize = request.PageSize
                 };
 
+                // 감사 로그 기록: 비용 최적화를 고려하여 성공적인 검색만 기록합니다.
+                await _auditService.LogActionAsync(
+                    actionType: AuditActionType.Read,
+                    action: "ORG_SEARCH_SUCCESS",
+                    connectedId: requesterConnectedId, 
+                    success: true,
+                    resourceType: "Organization",
+                    resourceId: Guid.Empty.ToString(), 
+                    metadata: new Dictionary<string, object> 
+                    { 
+                        { "SearchQuery", request.Keyword ?? "None" },
+                        { "Status", request.Status?.ToString() ?? "All" }
+                    },
+                    cancellationToken: cancellationToken);
+                
                 return ServiceResult<OrganizationListResponse>.Success(response);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error searching organizations");
+                // 실패 시 ConnectedId를 포함하여 에러 로그 기록
+                Guid requesterConnectedIdForLog = _principalAccessor.ConnectedId ?? Guid.Empty;
+                _logger.LogError(ex, "Error searching organizations by ConnectedId: {ConnectedId}", requesterConnectedIdForLog);
+                
                 return ServiceResult<OrganizationListResponse>.Failure(
                     "An error occurred while searching organizations",
                     "SYSTEM_ERROR");
@@ -183,10 +190,11 @@ namespace AuthHive.Auth.Services.Organization
         }
 
         /// <summary>
-        /// 사용자가 속한 조직 목록 조회
+        /// 특정 User ID에 연결된 조직 목록을 조회합니다.
         /// </summary>
         public async Task<ServiceResult<IEnumerable<OrganizationDto>>> GetUserOrganizationsAsync(
-            Guid userId)
+            Guid userId,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -197,25 +205,31 @@ namespace AuthHive.Auth.Services.Organization
                         "INVALID_USER_ID");
                 }
 
-                // 캐시 확인
+                // ICacheService를 사용하여 캐시 확인 (Hybrid Cache)
                 var cacheKey = string.Format(CACHE_KEY_USER_ORGS, userId);
-                if (_cache.TryGetValue<List<OrganizationDto>>(cacheKey, out var cachedOrgs) && cachedOrgs != null)
+                var cachedOrgs = await _cacheService.GetAsync<List<OrganizationDto>>(cacheKey, cancellationToken);
+
+                if (cachedOrgs != null)
                 {
                     _logger.LogDebug("User organizations retrieved from cache for user: {UserId}", userId);
                     return ServiceResult<IEnumerable<OrganizationDto>>.Success(cachedOrgs);
                 }
 
                 // Repository 호출
-                var organizations = await _searchRepository.GetUserOrganizationsAsync(
+                var organizations = await _queryRepository.GetUserOrganizationsAsync(
                     userId,
                     activeOnly: true,
-                    includeInherited: false);
+                    includeInherited: false,
+                    cancellationToken: cancellationToken); 
 
-                // DTO 변환
+                // DTO 변환 및 Secondary Lookup
                 var organizationDtos = new List<OrganizationDto>();
                 foreach (var org in organizations)
                 {
-                    var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id);
+                    var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id, cancellationToken);
+                    
+                    // Secondary Lookup: Primary Capability를 제외한 Capability 수 계산
+                    int additionalCapabilitiesCount = (await _capabilityAssignmentRepository.GetCapabilitiesAsync(org.Id, activeOnly: true, cancellationToken))?.Count() - 1 ?? 0;
 
                     var dto = new OrganizationDto
                     {
@@ -223,40 +237,22 @@ namespace AuthHive.Auth.Services.Organization
                         OrganizationKey = org.OrganizationKey,
                         Name = org.Name,
                         Description = org.Description,
-                        PrimaryCapability = ConvertToCapabilityEnum(primaryCapability?.Code ?? "CUSTOMER"),
+                        PrimaryCapability = ConvertToCapabilityEnum(primaryCapability?.Code ?? SystemCapabilities.Customer),
                         Status = org.Status,
                         Type = org.Type,
                         HierarchyType = org.HierarchyType,
-                        Region = org.Region,
-                        LogoUrl = org.LogoUrl,
-                        BrandColor = org.BrandColor,
-                        Website = org.Website,
-                        EstablishedDate = org.EstablishedDate,
-                        EmployeeRange = org.EmployeeRange,
-                        Industry = org.Industry,
-                        ActivatedAt = org.ActivatedAt,
-                        SuspendedAt = org.SuspendedAt,
-                        SuspensionReason = org.SuspensionReason,
-                        Metadata = org.Metadata,
-                        PolicyInheritanceMode = org.PolicyInheritanceMode,
-                        OrganizationId = org.Id,
-                        ParentId = org.ParentOrganizationId,
-                        Path = org.Path,
-                        Level = org.Level,
-                        SortOrder = org.SortOrder,
+                        // ✅ CS1061 해결: ParentOrganizationId 대신 ParentId를 사용합니다.
+                        ParentId = org.ParentId, 
                         CreatedAt = org.CreatedAt,
-                        UpdatedAt = org.UpdatedAt
+                        UpdatedAt = org.UpdatedAt,
+                        // Secondary Lookup 결과 할당
+                        AdditionalCapabilitiesCount = additionalCapabilitiesCount 
                     };
-
-                    // 추가 통계 정보
-                    var capabilities = await _capabilityAssignmentRepository.GetCapabilitiesAsync(org.Id);
-                    dto.AdditionalCapabilitiesCount = capabilities.Count() - 1; // Primary 제외
-
                     organizationDtos.Add(dto);
                 }
 
-                // 캐시 저장
-                _cache.Set(cacheKey, organizationDtos, TimeSpan.FromMinutes(10));
+                // ICacheService를 사용하여 캐시 저장
+                await _cacheService.SetAsync(cacheKey, organizationDtos, _userOrgsCacheExpiration, cancellationToken);
 
                 return ServiceResult<IEnumerable<OrganizationDto>>.Success(
                     organizationDtos,
@@ -272,10 +268,11 @@ namespace AuthHive.Auth.Services.Organization
         }
 
         /// <summary>
-        /// ConnectedId가 접근 가능한 조직 목록 조회
+        /// ConnectedId가 접근 가능한 조직 목록을 조회합니다.
         /// </summary>
         public async Task<ServiceResult<IEnumerable<OrganizationDto>>> GetAccessibleOrganizationsAsync(
-            Guid connectedId)
+            Guid connectedId,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -286,9 +283,11 @@ namespace AuthHive.Auth.Services.Organization
                         "INVALID_CONNECTED_ID");
                 }
 
-                // 캐시 확인
+                // ICacheService를 사용하여 캐시 확인
                 var cacheKey = string.Format(CACHE_KEY_CONNECTED_ORGS, connectedId);
-                if (_cache.TryGetValue<List<OrganizationDto>>(cacheKey, out var cachedOrgs) && cachedOrgs != null)
+                var cachedOrgs = await _cacheService.GetAsync<List<OrganizationDto>>(cacheKey, cancellationToken);
+
+                if (cachedOrgs != null)
                 {
                     _logger.LogDebug("Accessible organizations retrieved from cache for ConnectedId: {ConnectedId}", connectedId);
                     return ServiceResult<IEnumerable<OrganizationDto>>.Success(cachedOrgs);
@@ -300,16 +299,16 @@ namespace AuthHive.Auth.Services.Organization
                     OrganizationMembershipStatus.Pending
                 };
 
-                var organizations = await _searchRepository.GetAccessibleOrganizationsAsync(
+                var organizations = await _queryRepository.GetAccessibleOrganizationsAsync(
                     connectedId,
                     allowedStatuses,
-                    minimumRole: null);
+                    cancellationToken: cancellationToken);
 
                 // DTO 변환
                 var organizationDtos = new List<OrganizationDto>();
                 foreach (var org in organizations)
                 {
-                    var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id);
+                    var primaryCapability = await GetPrimaryCapabilityForOrganization(org.Id, cancellationToken);
 
                     var dto = new OrganizationDto
                     {
@@ -317,36 +316,22 @@ namespace AuthHive.Auth.Services.Organization
                         OrganizationKey = org.OrganizationKey,
                         Name = org.Name,
                         Description = org.Description,
-                        PrimaryCapability = ConvertToCapabilityEnum(primaryCapability?.Code ?? "CUSTOMER"),
+                        PrimaryCapability = ConvertToCapabilityEnum(primaryCapability?.Code ?? SystemCapabilities.Customer),
                         Status = org.Status,
                         Type = org.Type,
                         HierarchyType = org.HierarchyType,
-                        Region = org.Region,
-                        LogoUrl = org.LogoUrl,
-                        BrandColor = org.BrandColor,
-                        Website = org.Website,
-                        EstablishedDate = org.EstablishedDate,
-                        EmployeeRange = org.EmployeeRange,
-                        Industry = org.Industry,
-                        ActivatedAt = org.ActivatedAt,
-                        SuspendedAt = org.SuspendedAt,
-                        SuspensionReason = org.SuspensionReason,
-                        Metadata = org.Metadata,
-                        PolicyInheritanceMode = org.PolicyInheritanceMode,
-                        OrganizationId = org.Id,
-                        ParentId = org.ParentOrganizationId,
-                        Path = org.Path,
-                        Level = org.Level,
-                        SortOrder = org.SortOrder,
+                        // ✅ CS1061 해결: ParentOrganizationId 대신 ParentId를 사용합니다.
+                        ParentId = org.ParentId,
                         CreatedAt = org.CreatedAt,
-                        UpdatedAt = org.UpdatedAt
+                        UpdatedAt = org.UpdatedAt,
+                        AdditionalCapabilitiesCount = 0 
                     };
 
                     organizationDtos.Add(dto);
                 }
 
-                // 캐시 저장
-                _cache.Set(cacheKey, organizationDtos, TimeSpan.FromMinutes(5));
+                // ICacheService를 사용하여 캐시 저장
+                await _cacheService.SetAsync(cacheKey, organizationDtos, _connectedOrgsCacheExpiration, cancellationToken);
 
                 return ServiceResult<IEnumerable<OrganizationDto>>.Success(
                     organizationDtos,
@@ -366,16 +351,18 @@ namespace AuthHive.Auth.Services.Organization
         #region Private Helper Methods
 
         /// <summary>
-        /// 조직의 Primary Capability 조회
+        /// 조직의 Primary Capability 조회 (Repository 호출)
         /// </summary>
-        private async Task<OrganizationCapability?> GetPrimaryCapabilityForOrganization(Guid organizationId)
+        private async Task<OrganizationCapability?> GetPrimaryCapabilityForOrganization(
+            Guid organizationId, 
+            CancellationToken cancellationToken)
         {
-            var primaryAssignment = await _capabilityAssignmentRepository.GetPrimaryCapabilityAsync(organizationId);
+            var primaryAssignment = await _capabilityAssignmentRepository.GetPrimaryCapabilityAsync(organizationId, cancellationToken); 
             return primaryAssignment?.Capability;
         }
 
         /// <summary>
-        /// Capability 코드를 Enum으로 변환
+        /// Capability 코드를 Enum으로 안전하게 변환합니다.
         /// </summary>
         private OrganizationCapabilityEnum ConvertToCapabilityEnum(string code)
         {

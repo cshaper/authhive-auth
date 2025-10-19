@@ -69,7 +69,10 @@ namespace AuthHive.Auth.Services.Context
                 return false;
             }
         }
-
+        /// <summary>
+        /// 현재 컨텍스트에 유효한 ConnectedId가 있는지 여부를 확인합니다.
+        /// </summary>
+        public bool HasConnectedId => ConnectedId.HasValue;
         /// <summary>
         /// ConnectedId를 해결하는 내부 메서드
         /// 우선순위: JWT Claims > HTTP Headers > API Key Context

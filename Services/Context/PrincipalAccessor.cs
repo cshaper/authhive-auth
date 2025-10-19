@@ -1,14 +1,17 @@
 using System;
 using System.Security.Claims;
-using AuthHive.Core.Constants.Auth; // AuthConstants 사용
+using System.Threading;
+using System.Threading.Tasks;
+using AuthHive.Core.Constants.Auth;
 using AuthHive.Core.Interfaces.Base;
 using Microsoft.AspNetCore.Http;
 
 namespace AuthHive.Auth.Services.Context
 {
     /// <summary>
-    /// IHttpContextAccessor를 사용하여 현재 요청의 Principal 정보를 구현하는 클래스입니다.
-    /// PASETO 토큰에서 커스텀 클레임을 파싱하여 필요한 ID를 제공합니다.
+    /// IPrincipalAccessor의 구현체입니다. - v16 최종본
+    /// IHttpContextAccessor를 통해 현재 HTTP 요청의 ClaimsPrincipal(인증된 사용자 정보)에 접근합니다.
+    /// 이 클래스는 DI(종속성 주입)를 통해 Scoped 라이프타임으로 등록되어야 합니다.
     /// </summary>
     public class PrincipalAccessor : IPrincipalAccessor
     {
@@ -19,35 +22,51 @@ namespace AuthHive.Auth.Services.Context
             _httpContextAccessor = httpContextAccessor;
         }
 
-        /// <summary>
-        /// 현재 HTTP 컨텍스트에서 ClaimsPrincipal을 가져옵니다.
-        /// </summary>
+        /// <inheritdoc />
+        // 수정: private -> public으로 변경하여 인터페이스 멤버를 올바르게 구현합니다.
         public ClaimsPrincipal? Principal => _httpContextAccessor.HttpContext?.User;
 
-        /// <summary>
-        /// "sub" 클레임에서 User ID를 파싱합니다. 실패 시 Guid.Empty를 반환합니다.
-        /// </summary>
-        public Guid UserId => GetGuidClaim(AuthConstants.ClaimTypes.Subject);//Subject ==> UserId
-
-        /// <summary>
-        /// "cid" 클레임에서 Connected ID를 파싱합니다. 실패 시 Guid.Empty를 반환합니다.
-        /// </summary>
-        public Guid ConnectedId => GetGuidClaim(AuthConstants.ClaimTypes.ConnectedId);
-
-        /// <summary>
-        /// "org_id" 클레임에서 Organization ID를 파싱합니다. 실패 시 Guid.Empty를 반환합니다.
-        /// </summary>
-        public Guid OrganizationId => GetGuidClaim(AuthConstants.ClaimTypes.OrganizationId);
-
-        /// <summary>
-        /// Principal에서 특정 클레임 타입의 값을 Guid로 안전하게 파싱하는 헬퍼 메서드입니다.
-        /// </summary>
-        /// <param name="claimType">찾으려는 클레임의 타입</param>
-        /// <returns>파싱된 Guid 또는 실패 시 Guid.Empty</returns>
-        private Guid GetGuidClaim(string claimType)
+        /// <inheritdoc />
+        public Task<ClaimsPrincipal?> GetPrincipalAsync(CancellationToken cancellationToken = default)
         {
-            var claimValue = Principal?.FindFirstValue(claimType);
-            return Guid.TryParse(claimValue, out var parsedGuid) ? parsedGuid : Guid.Empty;
+            return Task.FromResult(Principal);
+        }
+
+        /// <inheritdoc />
+        public bool IsAuthenticated => Principal?.Identity?.IsAuthenticated ?? false;
+        
+        /// <inheritdoc />
+        public Guid? UserId => GetGuidClaimValue(System.Security.Claims.ClaimTypes.NameIdentifier);
+
+        /// <inheritdoc />
+        public Guid? ConnectedId => GetGuidClaimValue(AuthConstants.ClaimTypes.ConnectedId);
+
+        /// <inheritdoc />
+        public Guid? OrganizationId => GetGuidClaimValue(AuthConstants.ClaimTypes.OrganizationId);
+
+        /// <inheritdoc />
+        public Guid? SessionId => GetGuidClaimValue(AuthConstants.ClaimTypes.SessionId);
+        
+        /// <inheritdoc />
+        public string? IpAddress => _httpContextAccessor.HttpContext?.Connection?.RemoteIpAddress?.ToString();
+        
+        /// <inheritdoc />
+        public bool HasConnectedId => ConnectedId.HasValue && ConnectedId.Value != Guid.Empty;
+
+        /// <summary>
+        /// ClaimsPrincipal에서 Guid 타입의 클레임 값을 안전하게 파싱하여 가져오는 헬퍼 메서드입니다.
+        /// </summary>
+        private Guid? GetGuidClaimValue(string claimType)
+        {
+            var claimValue = Principal?.FindFirst(claimType)?.Value;
+
+            if (string.IsNullOrEmpty(claimValue) || !Guid.TryParse(claimValue, out var guidValue))
+            {
+                return null;
+            }
+
+            return guidValue;
         }
     }
 }
+

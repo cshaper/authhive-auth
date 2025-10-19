@@ -1,216 +1,295 @@
+// 파일: AuthHive.Auth.Services.External/OAuthProviderService.cs (최종 수정)
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
+using System.Net.Http.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Web;
 using AuthHive.Core.Constants.Business;
 using AuthHive.Core.Enums.Auth;
-using AuthHive.Core.Enums.Business;
 using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Auth.External;
+using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Business.Validation;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Infra.Security;
-using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Interfaces.Repositories.Business.Platform;
-using AuthHive.Core.Interfaces.User.Service;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Responses;
 using AuthHive.Core.Models.Base;
 using AuthHive.Core.Models.Business.Events;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.User;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+
+// 엔티티 클래스 별칭
+using OAuthProviderEntity = AuthHive.Core.Entities.Auth.OAuthProvider;
 using UserEntity = AuthHive.Core.Entities.User.User;
-using UserProfileEntity = AuthHive.Core.Entities.User.UserProfile;
+using OrganizationMemberRole = AuthHive.Core.Enums.Core.OrganizationMemberRole;
 
 namespace AuthHive.Auth.Services.External
 {
-    /// <summary>
-    /// OAuth Provider Service 구현체 - AuthHive v16
-    /// 전략 패턴(Strategy Pattern)을 사용하여 플랜 제한 검증 로직을 최적화하고,
-    /// IOAuthProviderService 및 IExternalService 인터페이스의 모든 멤버를 구현합니다.
-    /// </summary>
     public class OAuthProviderService : IOAuthProviderService
     {
-        // 서비스 의존성
         private readonly IHttpClientFactory _httpClientFactory;
-        private readonly IConfiguration _configuration;
         private readonly ICacheService _cacheService;
         private readonly IEncryptionService _encryptionService;
-        private readonly IUserService _userService;
-        private readonly IOrganizationService _organizationService;
         private readonly IOrganizationPlanRepository _planRepository;
-        private readonly ILogger<OAuthProviderService> _logger;
+        private readonly IOAuthProviderRepository _oauthProviderRepository;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IEventBus _eventBus;
         private readonly IAuditService _auditService;
-        private readonly IDateTimeProvider _dateTimeProvider;
-        private readonly IHttpContextAccessor _httpContextAccessor;
+        private readonly IPrincipalAccessor _principalAccessor;
+        private readonly ILogger<OAuthProviderService> _logger;
         private readonly IReadOnlyDictionary<PlanLimitType, ILimitChecker> _limitCheckers;
+        private readonly Dictionary<SSOProvider, OAuthProviderConfiguration> _providerConfigs = new(); 
 
-        // 내부 상태 관리
-        private readonly Dictionary<SSOProvider, OAuthProviderConfiguration> _providerConfigs;
-        private readonly Dictionary<string, string> _stateCache;
-        private readonly Dictionary<string, RateLimitInfo> _rateLimitCache;
-
-        #region IExternalService Implementation
+        #region IExternalService Properties (생략)
         public string ServiceName => "OAuthProviderService";
         public string Provider => "Multi-Provider OAuth";
         public string? ApiVersion => "2.0";
-        public RetryPolicy RetryPolicy { get; set; }
-        public int TimeoutSeconds { get; set; }
-        public bool EnableCircuitBreaker { get; set; }
+        public RetryPolicy RetryPolicy { get; set; } = new();
+        public int TimeoutSeconds { get; set; } = 30;
+        public bool EnableCircuitBreaker { get; set; } = true;
         public IExternalService? FallbackService { get; set; }
-
         public event EventHandler<ExternalServiceCalledEventArgs>? ServiceCalled;
         public event EventHandler<ExternalServiceFailedEventArgs>? ServiceFailed;
         public event EventHandler<ExternalServiceRecoveredEventArgs>? ServiceRecovered;
         #endregion
 
         public OAuthProviderService(
-            IHttpClientFactory httpClientFactory,
-            IConfiguration configuration,
-            ICacheService cacheService,
-            IEncryptionService encryptionService,
-            IUserService userService,
-            IOrganizationService organizationService,
-            IOrganizationPlanRepository planRepository,
-            ILogger<OAuthProviderService> logger,
-            IUnitOfWork unitOfWork,
-            IEventBus eventBus,
-            IAuditService auditService,
-            IDateTimeProvider dateTimeProvider,
-            IHttpContextAccessor httpContextAccessor,
-            IEnumerable<ILimitChecker> limitCheckers) // 모든 전문가(Checker)들을 주입받음
+            IHttpClientFactory httpClientFactory, ICacheService cacheService, IEncryptionService encryptionService,
+            IOrganizationPlanRepository planRepository, IOAuthProviderRepository oauthProviderRepository,
+            IUnitOfWork unitOfWork, IEventBus eventBus, IAuditService auditService,
+            IPrincipalAccessor principalAccessor, ILogger<OAuthProviderService> logger,
+            IEnumerable<ILimitChecker> limitCheckers)
         {
-            _httpClientFactory = httpClientFactory;
-            _configuration = configuration;
-            _cacheService = cacheService;
-            _encryptionService = encryptionService;
-            _userService = userService;
-            _organizationService = organizationService;
-            _planRepository = planRepository;
-            _logger = logger;
-            _unitOfWork = unitOfWork;
-            _eventBus = eventBus;
-            _auditService = auditService;
-            _dateTimeProvider = dateTimeProvider;
-            _httpContextAccessor = httpContextAccessor;
+            _httpClientFactory = httpClientFactory; _cacheService = cacheService; _encryptionService = encryptionService;
+            _planRepository = planRepository; _oauthProviderRepository = oauthProviderRepository;
+            _unitOfWork = unitOfWork; _eventBus = eventBus; _auditService = auditService;
+            _principalAccessor = principalAccessor; _logger = logger;
             _limitCheckers = limitCheckers.ToDictionary(c => c.HandledLimitType);
-            _providerConfigs = new Dictionary<SSOProvider, OAuthProviderConfiguration>();
-            _stateCache = new Dictionary<string, string>();
-            _rateLimitCache = new Dictionary<string, RateLimitInfo>();
-
-            RetryPolicy = new RetryPolicy { MaxRetries = 3, InitialDelayMs = 1000 };
-            TimeoutSeconds = 30;
-            EnableCircuitBreaker = true;
-
-            LoadProvidersFromConfiguration();
         }
 
         #region IOAuthProviderService Implementation
-
-        public async Task<ServiceResult> RegisterProviderAsync(OAuthProviderConfiguration config)
+        // ... (RegisterProviderAsync 및 GetProviderConfigAsync 등 다른 메서드 유지) ...
+        
+        public async Task<ServiceResult> RegisterProviderAsync(OAuthProviderConfiguration config, CancellationToken cancellationToken = default)
         {
-            await _unitOfWork.BeginTransactionAsync();
+            var organizationId = _principalAccessor.OrganizationId;
+            var performingConnectedId = _principalAccessor.ConnectedId;
+
+            if (organizationId == null || performingConnectedId == null)
+                return ServiceResult.Failure("Valid organization and user context are required.", "CONTEXT_NOT_FOUND");
+            
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
             {
-                var organizationId = GetCurrentOrganizationId();
-                if (organizationId == Guid.Empty)
+                var planCheckResult = await CheckOrganizationPlanLimitsAsync(organizationId.Value, PlanLimitType.OAuthProvider, cancellationToken);
+                if (!planCheckResult.IsSuccess) 
+                    return await RollbackAndReturn(planCheckResult, cancellationToken);
+
+                string providerName = config.Provider.ToString();
+
+                var existingProvider = await _oauthProviderRepository.GetByProviderNameAsync(organizationId.Value, providerName, cancellationToken);
+                if (existingProvider != null) 
+                    return await RollbackAndReturn(ServiceResult.Failure($"Provider '{providerName}' is already registered.", "CONFLICT"), cancellationToken);
+
+                var encryptedClientSecret = await _encryptionService.EncryptAsync(config.ClientSecret ?? string.Empty);
+                var newProviderEntity = new OAuthProviderEntity
                 {
-                    return ServiceResult.Failure("Organization context not found.");
-                }
+                    OrganizationId = organizationId.Value, Provider = providerName, ClientId = config.ClientId,
+                    ClientSecretEncrypted = encryptedClientSecret, IsEnabled = config.IsEnabled,
+                    AuthorizationEndpoint = config.AuthorizationEndpoint ?? string.Empty, 
+                    TokenEndpoint = config.TokenEndpoint ?? string.Empty,
+                    UserInfoEndpoint = config.UserInfoEndpoint ?? string.Empty, 
+                    Scopes = config.Scopes?.Any() == true ? string.Join(" ", config.Scopes) : "openid profile email",
+                    CreatedBy = performingConnectedId.Value 
+                };
 
-                var planCheckResult = await CheckOrganizationPlanLimitsAsync(organizationId, PlanLimitType.OAuthProvider);
-                if (!planCheckResult.IsSuccess)
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return planCheckResult;
-                }
+                await _oauthProviderRepository.AddAsync(newProviderEntity, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                // ... 공급자 등록 로직 ...
+                await _auditService.LogActionAsync(AuditActionType.Create, "OAuthProvider.Registered", performingConnectedId.Value,
+                    resourceType: "OAuthProvider", resourceId: newProviderEntity.Id.ToString(),
+                    metadata: new Dictionary<string, object> { { "ProviderName", providerName } }, 
+                    cancellationToken: cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
-                return ServiceResult.Success($"OAuth provider {config.Provider} registered successfully.");
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+                return ServiceResult.Success();
             }
             catch (Exception ex)
             {
-                await _unitOfWork.RollbackTransactionAsync();
-                _logger.LogError(ex, "Failed to register OAuth provider {Provider}", config.Provider);
-                return ServiceResult.Failure($"Failed to register provider: {ex.Message}");
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                _logger.LogError(ex, "Failed to register OAuth provider {Provider} for organization {OrganizationId}", config.Provider, organizationId);
+                ServiceFailed?.Invoke(this, new ExternalServiceFailedEventArgs(nameof(RegisterProviderAsync), ex)
+                {
+                    ServiceName = this.ServiceName, Method = nameof(RegisterProviderAsync), Error = ex.Message
+                });
+                return ServiceResult.Failure($"An unexpected error occurred while registering the provider: {ex.Message}");
             }
         }
-
-        public Task<ServiceResult<OAuthProviderConfiguration>> GetProviderConfigAsync(string providerName)
+        
+        public async Task<ServiceResult<OAuthProviderConfiguration>> GetProviderConfigAsync(
+            string providerName, 
+            CancellationToken cancellationToken = default)
         {
-            if (Enum.TryParse<SSOProvider>(providerName, true, out var providerEnum) && _providerConfigs.TryGetValue(providerEnum, out var config))
+            var organizationId = _principalAccessor.OrganizationId ?? Guid.Empty;
+            
+            // 1. DB에서 조직별 커스텀 설정 조회
+            var entity = await _oauthProviderRepository.GetByProviderNameAsync(organizationId, providerName, cancellationToken);
+
+            if (entity != null)
             {
-                return Task.FromResult(ServiceResult<OAuthProviderConfiguration>.Success(config));
+                var config = new OAuthProviderConfiguration 
+                { 
+                    Provider = Enum.TryParse<SSOProvider>(entity.Provider, true, out var p) ? p : SSOProvider.Custom, 
+                    ClientId = entity.ClientId, 
+                    ClientSecret = "(Encrypted)", 
+                    AuthorizationEndpoint = entity.AuthorizationEndpoint,
+                    TokenEndpoint = entity.TokenEndpoint,
+                    UserInfoEndpoint = entity.UserInfoEndpoint,
+                    Scopes = entity.Scopes?.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).ToList() ?? new List<string>(),
+                    IsEnabled = entity.IsEnabled
+                }; 
+                return ServiceResult<OAuthProviderConfiguration>.Success(config);
             }
-            return Task.FromResult(ServiceResult<OAuthProviderConfiguration>.Failure($"Provider '{providerName}' not found or configured."));
+
+            // 2. 로컬/기본 설정 조회 (Fallback)
+            if (Enum.TryParse<SSOProvider>(providerName, true, out var providerEnum))
+            {
+                if (_providerConfigs.TryGetValue(providerEnum, out var localConfig))
+                {
+                    return ServiceResult<OAuthProviderConfiguration>.Success(localConfig);
+                }
+            }
+            
+            return ServiceResult<OAuthProviderConfiguration>.Failure($"Provider '{providerName}' not found or configured.", "NOT_FOUND");
         }
 
-        public Task<ServiceResult<List<OAuthProviderConfiguration>>> GetAllProvidersAsync()
+        public Task<ServiceResult<List<OAuthProviderConfiguration>>> GetAllProvidersAsync(
+            CancellationToken cancellationToken = default)
         {
             var providers = _providerConfigs.Values.ToList();
             return Task.FromResult(ServiceResult<List<OAuthProviderConfiguration>>.Success(providers));
         }
 
-        public Task<ServiceResult<AuthenticationResponse>> InitiateAuthAsync(string provider, string redirectUri, List<string>? scopes = null)
+        public Task<ServiceResult<AuthenticationResponse>> InitiateAuthAsync(
+            string provider, string redirectUri, List<string>? scopes = null, CancellationToken cancellationToken = default)
         {
-            // ... InitiateAuthAsync 로직 구현 ...
-            return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Not implemented"));
+            return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        public Task<ServiceResult<AuthenticationResponse>> ProcessCallbackAsync(string provider, string code, string state)
+        public Task<ServiceResult<AuthenticationResponse>> ProcessCallbackAsync(
+            string provider, string code, string state, CancellationToken cancellationToken = default)
         {
-            // ... ProcessCallbackAsync 로직 구현 ...
-            return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Not implemented"));
+            return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        public Task<ServiceResult<TokenIssueResponse>> ExchangeTokenAsync(string provider, string code, string redirectUri)
+        public Task<ServiceResult<TokenIssueResponse>> ExchangeTokenAsync(
+            string provider, string code, string redirectUri, CancellationToken cancellationToken = default)
         {
-            // ... ExchangeTokenAsync 로직 구현 ...
-            return Task.FromResult(ServiceResult<TokenIssueResponse>.Failure("Not implemented"));
+            return Task.FromResult(ServiceResult<TokenIssueResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        // 인터페이스에 맞게 누락된 메서드 추가
-        public Task<ServiceResult<TokenRefreshResponse>> RefreshTokenAsync(string provider, string refreshToken)
+        public Task<ServiceResult<TokenRefreshResponse>> RefreshTokenAsync(
+            string provider, string refreshToken, CancellationToken cancellationToken = default)
         {
-            // ... RefreshTokenAsync 로직 구현 ...
-            return Task.FromResult(ServiceResult<TokenRefreshResponse>.Failure("Not implemented"));
+            return Task.FromResult(ServiceResult<TokenRefreshResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        // 인터페이스에 맞게 시그니처 수정 및 컴파일 오류 해결
-        public Task<ServiceResult<UserProfileEntity>> GetUserProfileAsync(string provider, string accessToken)
+        public async Task<ServiceResult<UserProfileDto>> GetUserProfileAsync(
+            string provider, string accessToken, CancellationToken cancellationToken = default)
         {
-            // ... GetUserProfileAsync 로직 구현 ...
-            return Task.FromResult(ServiceResult<UserProfileEntity>.Failure("Not implemented"));
+            var configResult = await GetProviderConfigAsync(provider, cancellationToken);
+
+            if (!configResult.IsSuccess || configResult.Data?.UserInfoEndpoint == null)
+                return ServiceResult<UserProfileDto>.NotFound(configResult.ErrorMessage ?? "UserInfo endpoint not configured for this provider.");
+
+            var config = configResult.Data;
+            var client = _httpClientFactory.CreateClient("OAuthClient");
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            client.Timeout = TimeSpan.FromSeconds(TimeoutSeconds);
+
+            try
+            {
+                ServiceCalled?.Invoke(this, new ExternalServiceCalledEventArgs(nameof(GetUserProfileAsync))
+                {
+                    ServiceName = this.ServiceName,
+                    Method = nameof(GetUserProfileAsync),
+                });
+
+                var responseNode = await client.GetFromJsonAsync<JsonNode>(config.UserInfoEndpoint, cancellationToken);
+                if (responseNode == null)
+                    return ServiceResult<UserProfileDto>.Failure("Failed to deserialize user profile response.", "EXTERNAL_API_ERROR");
+
+                await RecordMetricsAsync(new ExternalServiceMetrics { ResponseTimeMs = 0, Success = true }, cancellationToken);
+
+                var userProfileDto = MapExternalProfileToDto(responseNode, provider);
+                return ServiceResult<UserProfileDto>.Success(userProfileDto);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to get user profile from {Provider}", provider);
+                await RecordMetricsAsync(new ExternalServiceMetrics { ResponseTimeMs = 0, Success = false, ErrorMessage = ex.Message }, cancellationToken);
+                ServiceFailed?.Invoke(this, new ExternalServiceFailedEventArgs(nameof(GetUserProfileAsync), ex)
+                {
+                    ServiceName = this.ServiceName, Method = nameof(GetUserProfileAsync), Error = ex.Message
+                });
+                return ServiceResult<UserProfileDto>.Failure($"Failed to get user profile: {ex.Message}", "EXTERNAL_API_FAILURE");
+            }
         }
 
         #endregion
 
-        #region IExternalService Implementation (Stubs)
-        public Task<ServiceHealthStatus> CheckHealthAsync() => Task.FromResult(new ServiceHealthStatus { IsHealthy = true });
-        public Task<ServiceResult> TestConnectionAsync() => Task.FromResult(ServiceResult.Success("Connection successful."));
-        public Task<ServiceResult> ValidateConfigurationAsync() => Task.FromResult(ServiceResult.Success("Configuration is valid."));
-        public Task<ServiceResult<ExternalServiceUsage>> GetUsageAsync(DateTime startDate, DateTime endDate, Guid? organizationId = null) => Task.FromResult(ServiceResult<ExternalServiceUsage>.Success(new ExternalServiceUsage()));
-        public Task RecordMetricsAsync(ExternalServiceMetrics metrics) => Task.CompletedTask;
+        #region IExternalService Implementation (v16 Compliance)
+
+        public Task<ServiceHealthStatus> CheckHealthAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ServiceHealthStatus { ServiceName = ServiceName, Provider = Provider, IsHealthy = true, CheckedAt = DateTime.UtcNow });
+        }
+
+        public Task<ServiceResult> TestConnectionAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(ServiceResult.Success("Connection successful."));
+        }
+
+        public Task<ServiceResult> ValidateConfigurationAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(ServiceResult.Success("Configuration is valid."));
+        }
+
+        public Task<ServiceResult<ExternalServiceUsage>> GetUsageAsync(
+            DateTime startDate, DateTime endDate, Guid? organizationId = null, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(ServiceResult<ExternalServiceUsage>.Success(new ExternalServiceUsage()));
+        }
+        
+        public Task RecordMetricsAsync(ExternalServiceMetrics metrics, CancellationToken cancellationToken = default)
+        {
+            _logger.LogDebug("Metrics recorded for {Service}: Success={Success}, Error={Error}", 
+                ServiceName, metrics.Success, metrics.ErrorMessage);
+            return Task.CompletedTask;
+        }
+
         #endregion
 
         #region Private Helper Methods
 
-        private async Task<ServiceResult> CheckOrganizationPlanLimitsAsync(Guid organizationId, PlanLimitType limitType)
+        private async Task<ServiceResult> RollbackAndReturn(ServiceResult result, CancellationToken cancellationToken)
+        {
+            await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+            return result;
+        }
+
+        private async Task<ServiceResult> CheckOrganizationPlanLimitsAsync(
+            Guid organizationId, PlanLimitType limitType, CancellationToken cancellationToken = default)
         {
             if (!_limitCheckers.TryGetValue(limitType, out var checker))
             {
@@ -218,30 +297,21 @@ namespace AuthHive.Auth.Services.External
                 return ServiceResult.Success();
             }
 
-            var plan = await _planRepository.GetByIdAsync(organizationId);
+            var plan = await _planRepository.GetActivePlanByOrganizationIdAsync(organizationId, cancellationToken);
             var planKey = plan?.PlanKey ?? PricingConstants.DefaultPlanKey;
             var maxLimit = GetMaxLimitForType(planKey, limitType);
 
             if (maxLimit == -1) return ServiceResult.Success();
 
-            var currentUsage = await checker.GetCurrentUsageAsync(organizationId);
+            var currentUsage = await checker.GetCurrentUsageAsync(organizationId, cancellationToken);
             if (currentUsage >= maxLimit)
             {
-                string errorMessage = $"Limit for {limitType} exceeded. Maximum: {maxLimit}, Current: {currentUsage}";
-
-                // ✅ 수정된 부분: 모든 필수 정보를 생성자의 파라미터로 전달합니다.
                 var limitEvent = new PlanLimitReachedEvent(
-                    organizationId: organizationId,
-                    planKey: planKey,
-                    limitType: limitType,
-                    currentValue: (int)currentUsage,
-                    maxValue: (int)maxLimit
-                );
-
-                await _eventBus.PublishAsync(limitEvent);
-
-                // 이벤트 객체 내부에 이미 더 상세한 메시지가 있으므로 그것을 사용할 수 있습니다.
-                return ServiceResult.Failure(limitEvent.Message);
+                    organizationId: organizationId, planKey: planKey, limitType: limitType,
+                    currentValue: (int)currentUsage, maxValue: (int)maxLimit);
+                
+                await _eventBus.PublishAsync(limitEvent, cancellationToken);
+                return ServiceResult.Failure(limitEvent.Message, "PLAN_LIMIT_EXCEEDED");
             }
 
             return ServiceResult.Success();
@@ -265,31 +335,44 @@ namespace AuthHive.Auth.Services.External
             return (limitsDict != null && limitsDict.TryGetValue(planKey, out var limit)) ? limit : -1;
         }
 
-        // 컴파일 오류 해결 (User -> UserEntity)
-        private async Task<ServiceResult<UserEntity>> ProcessOAuthUserAsync(UserProfileDto oauthProfile, Guid organizationId)
+        private ServiceResult<UserEntity> ProcessOAuthUserAsync(UserProfileDto oauthProfile, Guid organizationId, CancellationToken cancellationToken = default)
         {
-            var mauCheckResult = await CheckOrganizationPlanLimitsAsync(organizationId, PlanLimitType.MAU);
-            if (!mauCheckResult.IsSuccess)
-            {
-                return ServiceResult<UserEntity>.Failure(mauCheckResult.ErrorMessage ?? "MAU limit exceeded");
-            }
-
-            // ... 사용자 조회 또는 생성 로직 구현 ...
             return ServiceResult<UserEntity>.Failure("Not implemented");
         }
 
-        private Guid GetCurrentOrganizationId()
+        /// <summary>
+        /// 외부 OAuth 응답(JsonNode)을 내부 UserProfileDto로 매핑합니다.
+        /// </summary>
+        private UserProfileDto MapExternalProfileToDto(JsonNode responseNode, string provider)
         {
-            var context = _httpContextAccessor.HttpContext;
-            return (context?.Items.TryGetValue("OrganizationId", out var orgId) == true && orgId is Guid guidOrgId) ? guidOrgId : Guid.Empty;
-        }
+            // OAuth 응답에서 이름 필드를 추출합니다.
+            var firstName = responseNode["given_name"]?.GetValue<string>();
+            var lastName = responseNode["family_name"]?.GetValue<string>();
 
-        private void LoadProvidersFromConfiguration() { /* ... appsettings.json 등에서 공급자 정보 로드 ... */ }
-
-        private class RateLimitInfo
-        {
-            public int Count { get; set; }
-            public DateTime WindowStart { get; set; }
+            // DisplayName을 위해 이름 필드를 조합합니다.
+            var calculatedName = responseNode["name"]?.GetValue<string>();
+            if (string.IsNullOrEmpty(calculatedName) && !string.IsNullOrEmpty(firstName))
+            {
+                calculatedName = $"{firstName} {lastName}";
+            }
+            else if (string.IsNullOrEmpty(calculatedName))
+            {
+                calculatedName = responseNode["email"]?.GetValue<string>() ?? "External User";
+            }
+            
+            return new UserProfileDto
+            {
+                UserId = Guid.Empty, 
+                ExternalId = responseNode["sub"]?.GetValue<string>() ?? responseNode["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString(),
+                Email = responseNode["email"]?.GetValue<string>(),
+                
+                Provider = provider,
+                FirstName = firstName, 
+                LastName = lastName,
+                MiddleName = responseNode["middle_name"]?.GetValue<string>(),
+                
+                DisplayName = calculatedName,
+            };
         }
 
         #endregion

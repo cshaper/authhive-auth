@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq.Expressions;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Entities.Organization;
@@ -86,8 +88,12 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult<OrganizationMemberProfileDto>> GetProfileAsync(Guid organizationId, Guid connectedId, CancellationToken cancellationToken = default)
         {
             var performingConnectedId = _principalAccessor.ConnectedId;
+            if (performingConnectedId == null)
+            {
+                return ServiceResult<OrganizationMemberProfileDto>.Unauthorized("Unauthenticated access.");
+            }
 
-            var canView = await _authorizationService.CanViewMemberProfileAsync(performingConnectedId, organizationId, connectedId, cancellationToken);
+            var canView = await _authorizationService.CanViewMemberProfileAsync(performingConnectedId.Value, organizationId, connectedId, cancellationToken);
             if (!canView)
             {
                 return ServiceResult<OrganizationMemberProfileDto>.Forbidden("Permission denied to view member profile.");
@@ -112,8 +118,12 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult<PagedResult<OrganizationMemberProfileDto>>> GetProfilesAsync(Guid organizationId, GetOrganizationProfileRequest request, CancellationToken cancellationToken = default)
         {
             var performingConnectedId = _principalAccessor.ConnectedId;
+            if (performingConnectedId == null)
+            {
+                return ServiceResult<PagedResult<OrganizationMemberProfileDto>>.Unauthorized("Unauthenticated access.");
+            }
 
-            var canView = await _authorizationService.CanViewMembersAsync(performingConnectedId, organizationId, cancellationToken);
+            var canView = await _authorizationService.CanViewMembersAsync(performingConnectedId.Value, organizationId, cancellationToken);
             if (!canView)
             {
                 return ServiceResult<PagedResult<OrganizationMemberProfileDto>>.Forbidden("Permission denied to view member profiles.");
@@ -140,8 +150,11 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult<OrganizationMemberProfileDto>> UpdateProfileAsync(Guid organizationId, Guid targetConnectedId, UpdateOrganizationProfileRequest request, CancellationToken cancellationToken = default)
         {
             var performingConnectedId = _principalAccessor.ConnectedId;
-
-            var canManage = await _authorizationService.CanManageMemberProfileAsync(performingConnectedId, organizationId, targetConnectedId, cancellationToken);
+            if (performingConnectedId == null)
+            {
+                return ServiceResult<OrganizationMemberProfileDto>.Unauthorized("Unauthenticated access.");
+            }
+            var canManage = await _authorizationService.CanManageMemberProfileAsync(performingConnectedId.Value, organizationId, targetConnectedId, cancellationToken);
             if (!canManage)
             {
                 return ServiceResult<OrganizationMemberProfileDto>.Forbidden("Permission denied to update member profile.");
@@ -159,69 +172,76 @@ namespace AuthHive.Auth.Services.Organization
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             await InvalidateProfileCacheAsync(organizationId, targetConnectedId, cancellationToken);
-            await _eventBus.PublishAsync(new MemberProfileUpdatedEvent(organizationId, targetConnectedId, performingConnectedId), cancellationToken);
+            await _eventBus.PublishAsync(new MemberProfileUpdatedEvent(organizationId, targetConnectedId, performingConnectedId.Value), cancellationToken);
             await _auditService.LogActionAsync(
-                AuditActionType.Update, "Member Profile Updated", performingConnectedId, true,
+                AuditActionType.Update, "Member Profile Updated", performingConnectedId.Value, true,
                 resourceType: "OrganizationMemberProfile", resourceId: profile.Id.ToString(), cancellationToken: cancellationToken);
 
             var dto = _mapper.Map<OrganizationMemberProfileDto>(profile);
             return ServiceResult<OrganizationMemberProfileDto>.Success(dto, "Profile updated successfully.");
         }
 
-        public async Task<ServiceResult<OrganizationMemberProfileDto>> UpsertProfileAsync(Guid organizationId, Guid targetConnectedId, UpdateOrganizationProfileRequest request, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<OrganizationMemberProfileDto>> UpsertProfileAsync(
+                    Guid organizationId,
+                    Guid targetConnectedId,
+                    UpdateOrganizationMemberProfileRequest request,
+                    Guid updatedByConnectedId,
+                    CancellationToken cancellationToken = default)
         {
-            var performingConnectedId = _principalAccessor.ConnectedId;
-
-            var canManage = await _authorizationService.CanManageMemberProfileAsync(performingConnectedId, organizationId, targetConnectedId, cancellationToken);
-            if (!canManage)
+            if (targetConnectedId != updatedByConnectedId)
             {
-                return ServiceResult<OrganizationMemberProfileDto>.Forbidden("Permission denied to create or update member profile.");
+                // TODO: 관리자인지 확인하는 권한 검사 로직 필요
+                return ServiceResult<OrganizationMemberProfileDto>.Forbidden("You do not have permission to update this profile.");
             }
 
-            var profile = await _profileRepository.GetByConnectedIdAsync(targetConnectedId, organizationId, cancellationToken);
-            bool isNew = profile == null;
-
-            if (isNew)
+            try
             {
-                // isNew가 true이면, 새 인스턴스를 생성하므로 'profile'은 더 이상 null이 아닙니다.
-                profile = new OrganizationMemberProfileEntity
+                var profile = await _profileRepository.GetByConnectedIdAsync(organizationId, targetConnectedId, cancellationToken)
+                              ?? new OrganizationMemberProfileEntity { ConnectedId = targetConnectedId, OrganizationId = organizationId };
+
+                var changes = new Dictionary<string, (object? Old, object? New)>();
+
+                UpdateProperty(profile, p => p.JobTitle, request.JobTitle, changes);
+                UpdateProperty(profile, p => p.Department, request.Department, changes);
+                UpdateProperty(profile, p => p.EmployeeId, request.EmployeeId, changes);
+                UpdateProperty(profile, p => p.OfficeLocation, request.OfficeLocation, changes);
+                UpdateProperty(profile, p => p.ManagerConnectedId, request.ManagerConnectedId, changes);
+
+                if (!changes.Any())
                 {
-                    OrganizationId = organizationId,
-                    ConnectedId = targetConnectedId
-                };
-                _mapper.Map(request, profile);
-                await _profileRepository.AddAsync(profile, cancellationToken);
+                    return ServiceResult<OrganizationMemberProfileDto>.Success(MapToDto(profile));
+                }
+
+                if (profile.Id == Guid.Empty) await _profileRepository.AddAsync(profile, cancellationToken);
+                else await _profileRepository.UpdateAsync(profile, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                await _auditService.LogActionAsync(
+                    actionType: profile.Id == Guid.Empty ? AuditActionType.Create : AuditActionType.Update,
+                    action: "MemberProfile.Upserted",
+                    connectedId: updatedByConnectedId,
+                    success: true,
+                    resourceType: "OrganizationMemberProfile",
+                    resourceId: profile.Id.ToString(),
+                    metadata: changes.ToDictionary(kvp => kvp.Key, kvp => (object)kvp.Value),
+                    cancellationToken: cancellationToken);
+
+                return ServiceResult<OrganizationMemberProfileDto>.Success(MapToDto(profile));
             }
-            else
+            catch (Exception ex)
             {
-                // isNew가 false이면, 'profile'은 이 블록에서 null이 아님이 보장됩니다.
-                _mapper.Map(request, profile);
-
-                // --- 수정된 부분 ---
-                // '!' 연산자를 사용하여 컴파일러에게 null이 아님을 명시적으로 알려줍니다.
-                await _profileRepository.UpdateAsync(profile!, cancellationToken);
+                _logger.LogError(ex, "An error occurred while upserting profile for {TargetConnectedId}", targetConnectedId);
+                return ServiceResult<OrganizationMemberProfileDto>.Failure("An unexpected error occurred.");
             }
-
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            await InvalidateProfileCacheAsync(organizationId, targetConnectedId, cancellationToken);
-            await _eventBus.PublishAsync(new MemberProfileUpdatedEvent(organizationId, targetConnectedId, performingConnectedId), cancellationToken);
-
-            var auditAction = isNew ? "Member Profile Created" : "Member Profile Updated";
-            var auditType = isNew ? AuditActionType.Create : AuditActionType.Update;
-
-            // if/else 블록 이후 'profile'은 null이 아니므로 '!'를 사용하여 경고를 제거합니다.
-            await _auditService.LogActionAsync(auditType, auditAction, performingConnectedId, true,
-                resourceType: "OrganizationMemberProfile", resourceId: profile!.Id.ToString(), cancellationToken: cancellationToken);
-
-            var dto = _mapper.Map<OrganizationMemberProfileDto>(profile);
-            return ServiceResult<OrganizationMemberProfileDto>.Success(dto, isNew ? "Profile created successfully." : "Profile updated successfully.");
         }
-
         public async Task<ServiceResult<bool>> ChangeManagerAsync(Guid organizationId, Guid targetConnectedId, Guid? newManagerId, CancellationToken cancellationToken = default)
         {
             var performingConnectedId = _principalAccessor.ConnectedId;
-
-            var canManage = await _authorizationService.CanManageMemberProfileAsync(performingConnectedId, organizationId, targetConnectedId, cancellationToken);
+            if (performingConnectedId == null)
+            {
+                return ServiceResult<bool>.Unauthorized("Unauthenticated access.");
+            }
+            var canManage = await _authorizationService.CanManageMemberProfileAsync(performingConnectedId.Value, organizationId, targetConnectedId, cancellationToken);
             if (!canManage)
             {
                 return ServiceResult<bool>.Forbidden("Permission denied to change manager.");
@@ -249,11 +269,11 @@ namespace AuthHive.Auth.Services.Organization
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             await InvalidateProfileCacheAsync(organizationId, targetConnectedId, cancellationToken);
-            await _eventBus.PublishAsync(new MemberProfileUpdatedEvent(organizationId, targetConnectedId, performingConnectedId), cancellationToken);
+            await _eventBus.PublishAsync(new MemberProfileUpdatedEvent(organizationId, targetConnectedId, performingConnectedId.Value), cancellationToken);
             await _auditService.LogActionAsync(
                      AuditActionType.Update,
                      "Manager Changed",
-                     performingConnectedId,
+                     performingConnectedId.Value,
                      true,
                      resourceType: "OrganizationMemberProfile",
                      resourceId: profile.Id.ToString(),
@@ -274,8 +294,11 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult<IEnumerable<OrganizationMemberProfileDto>>> GetOrganizationHierarchyAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             var performingConnectedId = _principalAccessor.ConnectedId;
-
-            var canView = await _authorizationService.CanViewOrganizationDashboardAsync(performingConnectedId, organizationId, cancellationToken);
+            if (performingConnectedId == null)
+            {
+                return ServiceResult<IEnumerable<OrganizationMemberProfileDto>>.Unauthorized("Unauthenticated access.");
+            }
+            var canView = await _authorizationService.CanViewOrganizationDashboardAsync(performingConnectedId.Value, organizationId, cancellationToken);
             if (!canView)
             {
                 return ServiceResult<IEnumerable<OrganizationMemberProfileDto>>.Forbidden("Permission denied to view organization member hierarchy.");
@@ -291,8 +314,11 @@ namespace AuthHive.Auth.Services.Organization
         public async Task<ServiceResult<OrganizationProfileStatisticsDto>> GetProfileStatisticsAsync(Guid organizationId, CancellationToken cancellationToken = default)
         {
             var performingConnectedId = _principalAccessor.ConnectedId;
-
-            var canView = await _authorizationService.CanViewOrganizationDashboardAsync(performingConnectedId, organizationId, cancellationToken);
+            if (performingConnectedId == null)
+            {
+                return ServiceResult<OrganizationProfileStatisticsDto>.Unauthorized("Unauthenticated access.");
+            }
+            var canView = await _authorizationService.CanViewOrganizationDashboardAsync(performingConnectedId.Value, organizationId, cancellationToken);
             if (!canView)
             {
                 return ServiceResult<OrganizationProfileStatisticsDto>.Forbidden("Permission denied to view profile statistics.");
@@ -323,6 +349,63 @@ namespace AuthHive.Auth.Services.Organization
             await _cacheService.RemoveByPatternAsync(memberListCachePattern, cancellationToken);
 
             _logger.LogDebug("Invalidated profile caches for OrgId: {OrgId}, ConnId: {ConnId}", organizationId, connectedId);
+        }
+
+        private static OrganizationMemberProfileDto MapToDto(OrganizationMemberProfileEntity profile)
+        {
+            return new OrganizationMemberProfileDto
+            {
+                Id = profile.Id, OrganizationId = profile.OrganizationId, ConnectedId = profile.ConnectedId,
+                JobTitle = profile.JobTitle, Department = profile.Department, EmployeeId = profile.EmployeeId,
+                OfficeLocation = profile.OfficeLocation, ManagerConnectedId = profile.ManagerConnectedId
+            };
+        }
+
+        /// <summary>
+        /// 속성 업데이트를 위한 헬퍼 메서드. 변경된 경우에만 값을 업데이트하고 changes 딕셔너리에 기록합니다.
+        /// CS0103 오류를 해결하기 위해 이 메서드를 클래스 내부에 추가합니다.
+        /// </summary>
+        private static void UpdateProperty<T>(
+              OrganizationMemberProfileEntity profile,
+              Expression<Func<OrganizationMemberProfileEntity, T?>> propertyExpression,
+              T? newValue,
+              Dictionary<string, (object? Old, object? New)> changes)
+        {
+            if (propertyExpression.Body is not MemberExpression memberExpression)
+                throw new ArgumentException("Expression must be a member expression.");
+
+            var propertyInfo = (PropertyInfo)memberExpression.Member;
+            var propertyName = propertyInfo.Name;
+            var oldValue = (T?)propertyInfo.GetValue(profile);
+
+            if (newValue != null && !EqualityComparer<T>.Default.Equals(oldValue, newValue))
+            {
+                changes[propertyName] = (oldValue, newValue);
+                propertyInfo.SetValue(profile, newValue);
+            }
+        }
+
+        /// <summary>
+        /// Nullable 값 타입(예: Guid?, DateTime?)을 위한 UpdateProperty 오버로드입니다.
+        /// </summary>
+        private static void UpdateProperty<T>(
+             OrganizationMemberProfileEntity profile,
+             Expression<Func<OrganizationMemberProfileEntity, T?>> propertyExpression,
+             T? newValue,
+             Dictionary<string, (object? Old, object? New)> changes) where T : struct
+        {
+            if (propertyExpression.Body is not MemberExpression memberExpression)
+                throw new ArgumentException("Expression must be a member expression.");
+
+            var propertyInfo = (PropertyInfo)memberExpression.Member;
+            var propertyName = propertyInfo.Name;
+            var oldValue = (T?)propertyInfo.GetValue(profile);
+
+            if (newValue.HasValue && !EqualityComparer<T?>.Default.Equals(oldValue, newValue))
+            {
+                changes[propertyName] = (oldValue, newValue);
+                propertyInfo.SetValue(profile, newValue);
+            }
         }
         #endregion
     }

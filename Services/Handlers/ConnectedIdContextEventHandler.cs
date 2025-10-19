@@ -328,57 +328,6 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        public async Task<EventResult> OnCacheHitAsync(
-            string contextKey,
-            string cacheType,
-            long latencyMs)
-        {
-            try
-            {
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.hit.{cacheType.ToLower()}");
-                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.cache.latency.{cacheType.ToLower()}", latencyMs);
-
-                _logger.LogDebug(
-                    "Cache hit for {ContextKey} in {CacheType}, Latency: {Latency}ms",
-                    contextKey, cacheType, latencyMs);
-
-                return EventResult.CreateSuccess();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle cache hit event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnCacheMissAsync(
-            string contextKey,
-            string cacheType,
-            bool fallbackUsed = false)
-        {
-            try
-            {
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.miss.{cacheType.ToLower()}");
-
-                if (fallbackUsed)
-                {
-                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.fallback");
-                }
-
-                _logger.LogDebug(
-                    "Cache miss for {ContextKey} in {CacheType}, Fallback used: {FallbackUsed}",
-                    contextKey, cacheType, fallbackUsed);
-
-                return EventResult.CreateSuccess();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle cache miss event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
 
         public async Task<EventResult> OnPromotedToHotPathAsync(
             ConnectedIdContext context,

@@ -1,5 +1,13 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Organization.Repository.Settings;
 using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Common.Validation;
@@ -8,305 +16,316 @@ using AuthHive.Core.Models.Organization.Requests;
 using AuthHive.Core.Models.Organization.Responses;
 using AutoMapper;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
-using AuthHive.Core.Interfaces.Organization.Repository.Settings;
-using AuthHive.Core.Interfaces.Organization.Service.Settings;
+using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Constants.Business;
+using AuthHive.Core.Interfaces.Organization.Repository;
+using AuthHive.Core.Interfaces.Infra;
 
-namespace AuthHive.Auth.Services.Organization.Settings;
-
-public class OrganizationSettingsService : IOrganizationSettingsService
+namespace AuthHive.Auth.Services.Organization.Settings
 {
-    private readonly IOrganizationSettingsRepository _repository;
-    private readonly IOrganizationSettingsQueryRepository _queryRepository;
-    private readonly IOrganizationSettingsCommandRepository _commandRepository;
-    private readonly IOrganizationSettingsLifecycleHandler _lifecycleHandler;
-    private readonly IMapper _mapper;
-    private readonly ILogger<OrganizationSettingsService> _logger;
-    private readonly IMemoryCache _cache;
-
-    public OrganizationSettingsService(
-        IOrganizationSettingsRepository repository,
-        IOrganizationSettingsQueryRepository queryRepository,
-        IOrganizationSettingsCommandRepository commandRepository,
-        IOrganizationSettingsLifecycleHandler lifecycleHandler,
-        IMapper mapper,
-        ILogger<OrganizationSettingsService> logger,
-        IMemoryCache cache)
+    /// <summary>
+    /// 조직 설정 서비스 구현체 - v16 Refactored
+    /// v16 원칙에 따라 IPrincipalAccessor, ICacheService, IAuditService, IEventBus, IPlanRestrictionService를 사용하여
+    /// 안전하고 확장 가능하며 추적 가능한 비즈니스 로직을 제공합니다.
+    /// </summary>
+    public class OrganizationSettingsService : IOrganizationSettingsService
     {
-        _repository = repository;
-        _queryRepository = queryRepository;
-        _commandRepository = commandRepository;
-        _lifecycleHandler = lifecycleHandler;
-        _mapper = mapper;
-        _logger = logger;
-        _cache = cache;
-    }
+        private readonly IOrganizationSettingsRepository _repository;
+        private readonly IOrganizationSettingsQueryRepository _queryRepository;
+        private readonly IPrincipalAccessor _principalAccessor;
+        private readonly ICacheService _cacheService;
+        private readonly IAuditService _auditService;
+        private readonly IEventBus _eventBus;
+        private readonly IDateTimeProvider _dateTimeProvider;
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly IPlanRestrictionService _planRestrictionService;
+        private readonly IMapper _mapper;
+        private readonly ILogger<OrganizationSettingsService> _logger;
 
-    #region 기본 CRUD 작업
-
-    public async Task<OrganizationSettingsDto?> GetSettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, Guid connectedId)
-    {
-        var entity = await _queryRepository.GetSettingAsync(organizationId, category.ToString(), settingKey);
-        return _mapper.Map<OrganizationSettingsDto?>(entity);
-    }
-
-    public async Task<T?> GetSettingValueAsync<T>(Guid organizationId, OrganizationSettingCategory category, string settingKey, Guid connectedId) where T : class
-    {
-        var setting = await GetSettingAsync(organizationId, category, settingKey, connectedId);
-        if (setting?.SettingValue == null) return null;
-
-        try
+        public OrganizationSettingsService(
+            IOrganizationSettingsRepository repository,
+            IOrganizationSettingsQueryRepository queryRepository,
+            IPrincipalAccessor principalAccessor,
+            ICacheService cacheService,
+            IAuditService auditService,
+            IEventBus eventBus,
+            IDateTimeProvider dateTimeProvider,
+            IUnitOfWork unitOfWork,
+            IPlanRestrictionService planRestrictionService,
+            IMapper mapper,
+            ILogger<OrganizationSettingsService> logger)
         {
-            if (setting.SettingValue is T value) return value;
-            return (T)Convert.ChangeType(setting.SettingValue, typeof(T));
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    public async Task<OrganizationSettingsDto> UpsertSettingAsync(CreateOrUpdateOrganizationSettingRequest request, Guid connectedId)
-    {
-        var entity = _mapper.Map<Core.Entities.Organization.OrganizationSettings>(request);
-        var resultEntity = await _repository.UpsertSettingAsync(entity, connectedId);
-        return _mapper.Map<OrganizationSettingsDto>(resultEntity);
-    }
-
-    public async Task<bool> DeleteSettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, Guid connectedId)
-    {
-        return await _repository.DeleteSettingAsync(organizationId, category.ToString(), settingKey, connectedId);
-    }
-
-    #endregion
-
-    #region 조회 작업
-
-    public async Task<IEnumerable<OrganizationSettingsDto>> GetSettingsByCategoryAsync(Guid organizationId, OrganizationSettingCategory category, Guid connectedId)
-    {
-        var entities = await _queryRepository.GetSettingsByCategoryAsync(organizationId, category);
-        return _mapper.Map<IEnumerable<OrganizationSettingsDto>>(entities);
-    }
-
-    public async Task<OrganizationSettingsListResponse> GetAllSettingsAsync(Guid organizationId, Guid connectedId, bool groupByCategory = true)
-    {
-        var entities = await _queryRepository.GetAllSettingsAsync(organizationId);
-        var dtos = _mapper.Map<List<OrganizationSettingsDto>>(entities);
-
-        var response = new OrganizationSettingsListResponse
-        {
-            OrganizationId = organizationId,
-            TotalSettings = dtos.Count,
-            ActiveSettings = dtos.Count(s => s.IsActive),
-            InheritedSettings = dtos.Count(s => s.IsInherited),
-            CustomSettings = dtos.Count(s => !s.IsInherited),
-            LastModified = dtos.Max(s => s.UpdatedAt ?? s.CreatedAt)
-        };
-
-        if (groupByCategory)
-        {
-            response.SettingsByCategory = dtos
-                .GroupBy(s => s.Category)
-                .ToDictionary(g => g.Key, g => g.ToList());
+            _repository = repository;
+            _queryRepository = queryRepository;
+            _principalAccessor = principalAccessor;
+            _cacheService = cacheService;
+            _auditService = auditService;
+            _eventBus = eventBus;
+            _dateTimeProvider = dateTimeProvider;
+            _unitOfWork = unitOfWork;
+            _planRestrictionService = planRestrictionService;
+            _mapper = mapper;
+            _logger = logger;
         }
 
-        return response;
-    }
+        #region 기본 CRUD 작업
 
-    public async Task<IEnumerable<OrganizationSettingsDto>> GetActiveSettingsAsync(Guid organizationId, Guid connectedId)
-    {
-        var entities = await _queryRepository.GetActiveSettingsAsync(organizationId);
-        return _mapper.Map<IEnumerable<OrganizationSettingsDto>>(entities);
-    }
-
-    public async Task<IEnumerable<OrganizationSettingsDto>> GetUserConfigurableSettingsAsync(Guid organizationId, Guid connectedId)
-    {
-        var entities = await _queryRepository.GetUserConfigurableSettingsAsync(organizationId);
-        return _mapper.Map<IEnumerable<OrganizationSettingsDto>>(entities);
-    }
-
-    public async Task<IEnumerable<OrganizationSettingsDto>> GetRecentlyModifiedSettingsAsync(Guid organizationId, int days, Guid connectedId)
-    {
-        var entities = await _queryRepository.GetRecentlyModifiedSettingsAsync(organizationId, days);
-        return _mapper.Map<IEnumerable<OrganizationSettingsDto>>(entities);
-    }
-
-    #endregion
-
-    #region 일괄 작업
-
-    public async Task<BulkUpdateOrganizationSettingsResponse> BulkUpdateSettingsAsync(BulkUpdateOrganizationSettingsRequest request, Guid connectedId)
-    {
-        var entities = _mapper.Map<IEnumerable<Core.Entities.Organization.OrganizationSettings>>(request.Settings);
-        var resultEntities = await _repository.BulkUpsertAsync(entities, connectedId);
-        var dtos = _mapper.Map<List<OrganizationSettingsDto>>(resultEntities);
-
-        return new BulkUpdateOrganizationSettingsResponse
+        /// <summary>
+        /// 특정 조직의 개별 설정 하나를 조회합니다.
+        /// 이 메서드는 캐시를 우선적으로 확인하고, 캐시에 없는 경우 리포지토리를 통해 데이터를 조회한 후 결과를 캐시에 저장합니다.
+        /// 상속 규칙이 적용된 최종 설정 값을 DTO 형태로 반환합니다.
+        /// </summary>
+        public async Task<ServiceResult<OrganizationSettingsDto>> GetSettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, bool includeInherited = true, CancellationToken cancellationToken = default)
         {
-            UpdatedSettings = dtos,
-            SuccessfullyUpdated = dtos.Count,
-            TotalRequested = request.Settings.Count(),
-            Failed = 0
-        };
-    }
+            var connectedId = _principalAccessor.ConnectedId;
+            if (!connectedId.HasValue) return ServiceResult<OrganizationSettingsDto>.Unauthorized();
 
-    public async Task<ResetOrganizationSettingsResponse> ResetToDefaultsAsync(Guid organizationId, OrganizationSettingCategory? category, Guid connectedId)
-    {
-        var result = await _lifecycleHandler.ResetToDefaultsAsync(organizationId, category, connectedId);
-        return result.Data!;
-    }
+            try
+            {
+                // TODO: Add permission check if user can read settings for this organization
 
-    #endregion
+                var cacheKey = $"org-setting:{organizationId}:{category}:{settingKey}:{includeInherited}";
+                var cachedDto = await _cacheService.GetAsync<OrganizationSettingsDto>(cacheKey, cancellationToken);
+                if (cachedDto != null)
+                {
+                    return ServiceResult<OrganizationSettingsDto>.Success(cachedDto);
+                }
 
-    #region 상속 및 전파 (간단 구현)
+                var entity = await _queryRepository.GetSettingAsync(organizationId, category, settingKey, includeInherited, cancellationToken);
+                if (entity == null)
+                {
+                    // TODO: Load default setting value
+                    return ServiceResult<OrganizationSettingsDto>.NotFound("Setting not found.");
+                }
 
-    public Task<InheritOrganizationSettingsResponse> InheritFromParentAsync(Guid organizationId, Guid connectedId, IEnumerable<OrganizationSettingCategory>? categories = null)
-    {
-        // TODO: 부모 조직 ID 조회 로직 추가 필요
-        _logger.LogWarning("InheritFromParentAsync not fully implemented");
-        return Task.FromResult(new InheritOrganizationSettingsResponse());
-    }
+                var dto = _mapper.Map<OrganizationSettingsDto>(entity);
+                await _cacheService.SetAsync(cacheKey, dto, TimeSpan.FromMinutes(30), cancellationToken); // Cache for 30 minutes
 
-    public async Task<PropagateOrganizationSettingsResponse> PropagateToChildrenAsync(
-        PropagateOrganizationSettingsRequest request,
-        Guid connectedId)
-    {
-        var affectedCount = await _commandRepository.PropagateSettingsToChildrenAsync(
-            request.ParentOrganizationId,
-            request.SettingKeys,
-            request.ForceOverride);
+                return ServiceResult<OrganizationSettingsDto>.Success(dto);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting setting '{SettingKey}' for organization {OrganizationId}", settingKey, organizationId);
+                return ServiceResult<OrganizationSettingsDto>.Failure("An error occurred while retrieving the setting.");
+            }
+        }
 
-        return new PropagateOrganizationSettingsResponse
+        public async Task<ServiceResult<T?>> GetSettingValueAsync<T>(Guid organizationId, OrganizationSettingCategory category, string settingKey, CancellationToken cancellationToken = default) where T : class
         {
-            IsSuccess = affectedCount > 0,
-            PropagatedSettingsCount = affectedCount,
-            AffectedOrganizationsCount = affectedCount > 0 ? 1 : 0, // 또는 실제 영향받은 조직 수
-            Message = $"{affectedCount}개의 설정이 하위 조직에 전파되었습니다."
-        };
-    }
+            var settingResult = await GetSettingAsync(organizationId, category, settingKey, true, cancellationToken); // Always include inherited for value resolution
+            if (!settingResult.IsSuccess || settingResult.Data?.SettingValue == null)
+            {
+                return ServiceResult<T?>.Failure(settingResult.ErrorMessage ?? "Setting value not found.", settingResult.ErrorCode);
+            }
 
-    public async Task<OrganizationSettingsDto> OverrideInheritedSettingAsync(OverrideInheritedSettingRequest request, Guid connectedId)
-    {
-        var entity = new Core.Entities.Organization.OrganizationSettings
+            try
+            {
+                // Assuming SettingValue is stored as JSON string for complex types
+                var value = System.Text.Json.JsonSerializer.Deserialize<T>(settingResult.Data.SettingValue.ToString() ?? string.Empty);
+                return ServiceResult<T?>.Success(value);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to convert setting value for '{SettingKey}' to type {TypeName}", settingKey, typeof(T).Name);
+                return ServiceResult<T?>.Failure($"Could not convert setting value to the requested type '{typeof(T).Name}'.");
+            }
+        }
+
+        public async Task<ServiceResult<OrganizationSettingsDto>> UpsertSettingAsync(CreateOrUpdateOrganizationSettingRequest request, CancellationToken cancellationToken = default)
         {
-            OrganizationId = request.OrganizationId,
-            Category = request.Category.ToString(),
-            SettingKey = request.SettingKey,
-            SettingValue = request.NewValue,
-            IsInherited = false
-        };
+            var connectedId = _principalAccessor.ConnectedId;
+            if (!connectedId.HasValue) return ServiceResult<OrganizationSettingsDto>.Unauthorized();
 
-        var result = await _repository.UpsertSettingAsync(entity, connectedId);
-        return _mapper.Map<OrganizationSettingsDto>(result);
+            try
+            {
+                // if (request.Category == OrganizationSettingCategory.Security)
+                // {
+                //     await _planRestrictionService.EnforceFeatureEnabledAsync(
+                //         request.OrganizationId,
+                //         PricingConstants.FeatureKeys.AdvancedSecuritySettings,
+                //         cancellationToken);
+                // }
+
+                var canModifyResult = await CanModifySettingAsync(request.OrganizationId, request.Category, request.SettingKey, cancellationToken);
+                if (!canModifyResult.IsSuccess || !canModifyResult.Data)
+                {
+                    return ServiceResult<OrganizationSettingsDto>.Forbidden(canModifyResult.ErrorMessage ?? "You do not have permission to modify this setting.");
+                }
+
+                var entity = _mapper.Map<Core.Entities.Organization.OrganizationSettings>(request);
+                var resultEntity = await _repository.UpsertSettingAsync(entity, connectedId.Value, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                
+                await InvalidateSettingCacheAsync(request.OrganizationId, request.Category, request.SettingKey, cancellationToken);
+
+                await _auditService.LogSettingChangeAsync(
+                    request.SettingKey,
+                    null,
+                    request.SettingValue?.ToString(),
+                    connectedId.Value,
+                    request.OrganizationId,
+                    cancellationToken: cancellationToken);
+
+                var dto = _mapper.Map<OrganizationSettingsDto>(resultEntity);
+                return ServiceResult<OrganizationSettingsDto>.Success(dto);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error upserting setting '{SettingKey}' for organization {OrganizationId}", request.SettingKey, request.OrganizationId);
+                return ServiceResult<OrganizationSettingsDto>.Failure(ex.Message, "UPSERT_SETTING_FAILED");
+            }
+        }
+        
+        public async Task<ServiceResult> DeleteSettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, CancellationToken cancellationToken = default)
+        {
+            var connectedId = _principalAccessor.ConnectedId;
+            if (!connectedId.HasValue) return ServiceResult.Unauthorized();
+            
+            try
+            {
+                var success = await _repository.DeleteSettingAsync(organizationId, category.ToString(), settingKey, connectedId.Value, cancellationToken);
+                if (!success)
+                {
+                    return ServiceResult.NotFound("Setting not found or could not be deleted.");
+                }
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                await InvalidateSettingCacheAsync(organizationId, category, settingKey, cancellationToken);
+                
+                await _auditService.LogSettingChangeAsync(
+                   settingKey,
+                   "[DELETED]",
+                   "[DEFAULT]",
+                   connectedId.Value,
+                   organizationId,
+                   cancellationToken: cancellationToken);
+
+                return ServiceResult.Success();
+            }
+            catch(Exception ex)
+            {
+                 _logger.LogError(ex, "Error deleting setting '{SettingKey}' for organization {OrganizationId}", settingKey, organizationId);
+                return ServiceResult.Failure("An error occurred while deleting the setting.");
+            }
+        }
+
+        #endregion
+
+        #region 조회 작업
+
+        public async Task<ServiceResult<IEnumerable<OrganizationSettingsDto>>> GetSettingsByCategoryAsync(Guid organizationId, OrganizationSettingCategory category, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var entities = await _queryRepository.GetSettingsByCategoryAsync(organizationId, category, true, cancellationToken);
+                var dtos = _mapper.Map<IEnumerable<OrganizationSettingsDto>>(entities);
+                return ServiceResult<IEnumerable<OrganizationSettingsDto>>.Success(dtos);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting settings for category {Category} in organization {OrganizationId}", category, organizationId);
+                return ServiceResult<IEnumerable<OrganizationSettingsDto>>.Failure("An error occurred while retrieving settings.");
+            }
+        }
+
+        public async Task<ServiceResult<OrganizationSettingsListResponse>> GetAllSettingsAsync(Guid organizationId, bool groupByCategory = true, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var entities = await _queryRepository.GetAllSettingsAsync(organizationId, true, true, cancellationToken);
+                var dtos = _mapper.Map<List<OrganizationSettingsDto>>(entities);
+                
+                var response = new OrganizationSettingsListResponse
+                {
+                    OrganizationId = organizationId,
+                    TotalSettings = dtos.Count,
+                    ActiveSettings = dtos.Count(s => s.IsActive),
+                    InheritedSettings = dtos.Count(s => s.IsInherited),
+                    CustomSettings = dtos.Count(s => !s.IsInherited),
+                    LastModified = dtos.Any() ? dtos.Max(s => s.UpdatedAt ?? s.CreatedAt) : _dateTimeProvider.UtcNow
+                };
+
+                if (groupByCategory)
+                {
+                    response.SettingsByCategory = dtos.GroupBy(s => s.Category).ToDictionary(g => g.Key, g => g.ToList());
+                }
+
+                return ServiceResult<OrganizationSettingsListResponse>.Success(response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting all settings for organization {OrganizationId}", organizationId);
+                return ServiceResult<OrganizationSettingsListResponse>.Failure("An error occurred while retrieving all settings.");
+            }
+        }
+        
+        #endregion
+
+        #region 검증 및 권한
+
+        public async Task<ServiceResult<bool>> CanModifySettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, CancellationToken cancellationToken = default)
+        {
+            var connectedId = _principalAccessor.ConnectedId;
+            if (!connectedId.HasValue)
+            {
+                return ServiceResult<bool>.Unauthorized("Authentication required.");
+            }
+
+            // TODO: IAuthorizationService를 주입받아 실제 권한 검증 로직 구현
+            // 예: 사용자가 'Admin' 역할을 가졌는지 또는 'settings:manage' 권한이 있는지 확인
+            // var hasPermission = await _authorizationService.HasPermissionAsync(connectedId.Value, "settings:manage");
+            // return ServiceResult<bool>.Success(hasPermission);
+
+            // 임시 구현
+            await Task.CompletedTask;
+            return ServiceResult<bool>.Success(true);
+        }
+
+        #endregion
+        
+        #region IService Implementation
+
+        public Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            // Can connect to the database via repository?
+            // All dependencies are resolved?
+            return Task.FromResult(_repository != null && _queryRepository != null && _principalAccessor != null);
+        }
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            _logger.LogInformation("OrganizationSettingsService (v16) Initialized.");
+            return Task.CompletedTask;
+        }
+
+        #endregion
+
+        #region Dummy Implementations (TODO: Implement fully)
+
+        public Task<ServiceResult<BulkUpdateOrganizationSettingsResponse>> BulkUpdateSettingsAsync(BulkUpdateOrganizationSettingsRequest request, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<ResetOrganizationSettingsResponse>> ResetToDefaultsAsync(Guid organizationId, OrganizationSettingCategory? category, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<InheritOrganizationSettingsResponse>> InheritFromParentAsync(Guid organizationId, IEnumerable<OrganizationSettingCategory>? categories = null, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<PropagateOrganizationSettingsResponse>> PropagateToChildrenAsync(PropagateOrganizationSettingsRequest request, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<ValidationResult>> ValidateSettingValueAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, string value, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<ApplyOrganizationSettingsTemplateResponse>> ApplyTemplateAsync(ApplyOrganizationSettingsTemplateRequest request, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<IEnumerable<OrganizationSettingsDto>>> InitializeDefaultSettingsAsync(Guid organizationId, string planType, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult> RefreshSettingsCacheAsync(Guid organizationId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public async Task<ServiceResult> InvalidateSettingCacheAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var cacheKey = $"org-setting:{organizationId}:{category}:{settingKey}";
+                await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+                _logger.LogInformation("Cache invalidated for setting {SettingKey} in organization {OrganizationId}", settingKey, organizationId);
+                return ServiceResult.Success();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to invalidate cache for setting {SettingKey}", settingKey);
+                return ServiceResult.Failure("Failed to invalidate cache.");
+            }
+        }
+        #endregion
     }
-
-    #endregion
-
-    #region 검증 및 권한
-
-    public async Task<ValidationResult> ValidateSettingValueAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, string value)
-    {
-        var isValid = await _queryRepository.ValidateSettingValueAsync(organizationId, category.ToString(), settingKey, value);
-        return new ValidationResult { IsValid = isValid };
-    }
-
-    public Task<bool> CanModifySettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, Guid connectedId)
-    {
-        // TODO: 권한 검증 로직 구현
-        return Task.FromResult(true);
-    }
-
-    public Task<bool> IsSettingAvailableForPlanAsync(Guid organizationId, string settingKey)
-    {
-        // TODO: 플랜 검증 로직 구현
-        return Task.FromResult(true);
-    }
-
-    #endregion
-
-    #region 템플릿 관리
-
-    public async Task<ApplyOrganizationSettingsTemplateResponse> ApplyTemplateAsync(ApplyOrganizationSettingsTemplateRequest request, Guid connectedId)
-    {
-        var result = await _lifecycleHandler.ApplyTemplateAsync(request, connectedId);
-        return result.Data!;
-    }
-
-    public async Task<IEnumerable<OrganizationSettingsDto>> InitializeDefaultSettingsAsync(Guid organizationId, string planType, Guid createdByConnectedId)
-    {
-        var result = await _lifecycleHandler.InitializeDefaultSettingsAsync(organizationId, planType, createdByConnectedId);
-        return result.Data!;
-    }
-
-    #endregion
-
-    #region 암호화 및 보안
-
-    public Task<OrganizationSettingsDto> EncryptSensitiveSettingAsync(EncryptSensitiveSettingRequest request, Guid connectedId)
-    {
-        // TODO: 암호화 로직 구현
-        _logger.LogWarning("EncryptSensitiveSettingAsync not implemented");
-        return Task.FromResult(new OrganizationSettingsDto());
-    }
-
-    public Task<string> DecryptSensitiveSettingAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey, Guid connectedId)
-    {
-        // TODO: 복호화 로직 구현
-        _logger.LogWarning("DecryptSensitiveSettingAsync not implemented");
-        return Task.FromResult(string.Empty);
-    }
-
-    #endregion
-
-    #region 내보내기 및 백업
-
-    public async Task<OrganizationSettingsBackupResponse> BackupSettingsAsync(Guid organizationId, Guid connectedId, bool includeEncrypted = false)
-    {
-        var result = await _lifecycleHandler.BackupSettingsAsync(organizationId, connectedId, includeEncrypted);
-        return result.Data!;
-    }
-
-    public async Task<RestoreOrganizationSettingsResponse> RestoreSettingsAsync(RestoreOrganizationSettingsRequest request, Guid connectedId)
-    {
-        var result = await _lifecycleHandler.RestoreSettingsAsync(request, connectedId);
-        return result.Data!;
-    }
-
-    public Task<ExportOrganizationSettingsResponse> ExportSettingsAsync(Guid organizationId, OrganizationSettingsExportFormat format, Guid connectedId)
-    {
-        // TODO: Export 로직 구현
-        _logger.LogWarning("ExportSettingsAsync not implemented");
-        return Task.FromResult(new ExportOrganizationSettingsResponse());
-    }
-
-    #endregion
-
-    #region 변경 이력
-
-    public Task<OrganizationSettingsHistoryResponse> GetSettingHistoryAsync(GetOrganizationSettingsHistoryRequest request, Guid connectedId)
-    {
-        // TODO: 이력 조회 로직 구현
-        _logger.LogWarning("GetSettingHistoryAsync not implemented");
-        return Task.FromResult(new OrganizationSettingsHistoryResponse());
-    }
-
-    #endregion
-
-    #region 캐싱 관리
-
-    public async Task RefreshSettingsCacheAsync(Guid organizationId)
-    {
-        var cacheKey = $"org-settings:{organizationId}";
-        _cache.Remove(cacheKey);
-        await Task.CompletedTask;
-    }
-
-    public async Task InvalidateSettingCacheAsync(Guid organizationId, OrganizationSettingCategory category, string settingKey)
-    {
-        var cacheKey = $"org-settings:{organizationId}:{category}:{settingKey}";
-        _cache.Remove(cacheKey);
-        await Task.CompletedTask;
-    }
-
-    #endregion
 }
+

@@ -1,90 +1,99 @@
-// Providers/Authentication/PasetoAuthenticationProvider.cs
-using AuthHive.Auth.Data.Context;
-using AuthHive.Auth.Providers;
-using AuthHive.Core.Entities.Auth;
-using AuthHive.Core.Entities.User;
-using AuthHive.Core.Enums.Auth;
-using AuthHive.Core.Interfaces.Auth.External;
 using AuthHive.Core.Interfaces.Auth.Provider;
-using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Models.Auth.Authentication;
-using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Requests;
 using AuthHive.Core.Models.Common;
-using AuthHive.Core.Models.PlatformApplication.Common;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Claims;
+using System.Threading;
 using System.Threading.Tasks;
+using AuthHive.Core.Entities.Auth;
+using AuthHive.Core.Enums.Auth;
+using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Auth.External;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
+using AuthHive.Core.Constants.Auth;
+using AuthHive.Core.Interfaces.User.Repository; // AuthConstants 사용을 위해 추가
 
 namespace AuthHive.Auth.Providers.Authentication
 {
     /// <summary>
-    /// PASETO 기반 인증 제공자 - AuthHive v15
-    /// 내부 인증(Password, API Key) 처리
+    /// PASETO 기반 인증 제공자 - AuthHive v16 Refactored
+    /// IUnitOfWork, Repository, ICacheService를 사용하여 v16 아키텍처 원칙을 준수합니다.
     /// </summary>
     public class PasetoAuthenticationProvider : IAuthenticationProvider
     {
-        private readonly PasetoTokenProvider _tokenProvider;
+        private readonly ITokenProvider _tokenProvider;
         private readonly IPasswordProvider _passwordProvider;
-        private readonly ILogger<PasetoAuthenticationProvider> _logger;
-        private readonly IDistributedCache _cache;
-        private readonly AuthDbContext _context;
-        private readonly IAuthenticationAttemptLogRepository _attemptLogRepository;
-        private readonly IMfaService _mfaService;
         private readonly IApiKeyProvider _apiKeyProvider;
+        private readonly IMfaService _mfaService;
+        private readonly ILogger<PasetoAuthenticationProvider> _logger;
+
+        // v16 아키텍처 의존성
+        private readonly ICacheService _cacheService;
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly IUserRepository _userRepository;
+        private readonly ISessionRepository _sessionRepository;
+        private readonly IConnectedIdRepository _connectedIdRepository;
+        private readonly IAuthenticationAttemptLogRepository _attemptLogRepository;
 
         public string ProviderName => "PASETO";
         public string ProviderType => "Internal";
 
         public PasetoAuthenticationProvider(
-            PasetoTokenProvider tokenProvider,
+            // 기존 의존성
+            ITokenProvider tokenProvider,
             IPasswordProvider passwordProvider,
-            ILogger<PasetoAuthenticationProvider> logger,
-            IDistributedCache cache,
-            AuthDbContext context,
-            IAuthenticationAttemptLogRepository attemptLogRepository,
+            IApiKeyProvider apiKeyProvider,
             IMfaService mfaService,
-            IApiKeyProvider apiKeyProvider)
+            ILogger<PasetoAuthenticationProvider> logger,
+            // v16 신규/변경 의존성
+            ICacheService cacheService,
+            IUnitOfWork unitOfWork,
+            IUserRepository userRepository,
+            ISessionRepository sessionRepository,
+            IConnectedIdRepository connectedIdRepository,
+            IAuthenticationAttemptLogRepository attemptLogRepository)
         {
             _tokenProvider = tokenProvider;
             _passwordProvider = passwordProvider;
-            _logger = logger;
-            _cache = cache;
-            _context = context;
-            _attemptLogRepository = attemptLogRepository;
-            _mfaService = mfaService;
             _apiKeyProvider = apiKeyProvider;
+            _mfaService = mfaService;
+            _logger = logger;
+            _cacheService = cacheService;
+            _unitOfWork = unitOfWork;
+            _userRepository = userRepository;
+            _sessionRepository = sessionRepository;
+            _connectedIdRepository = connectedIdRepository;
+            _attemptLogRepository = attemptLogRepository;
         }
 
         public async Task<ServiceResult<AuthenticationOutcome>> AuthenticateAsync(
-            AuthenticationRequest request)
+            AuthenticationRequest request, CancellationToken cancellationToken = default)
         {
             try
             {
-                // Rate limiting
-                if (!await CheckRateLimitAsync(request.IpAddress))
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!await CheckRateLimitAsync(request.IpAddress, cancellationToken))
                 {
-                    await LogFailedAttemptAsync(request, AuthenticationResult.TooManyAttempts);
+                    await LogFailedAttemptAsync(request, AuthenticationResult.TooManyAttempts, cancellationToken);
                     return ServiceResult<AuthenticationOutcome>.Failure("Too many attempts. Please try again later.");
                 }
 
-                // 인증 방식별 처리
                 var result = request.Method switch
                 {
-                    AuthenticationMethod.Password => await AuthenticatePasswordAsync(request),
-                    AuthenticationMethod.ApiKey => await AuthenticateApiKeyAsync(request),
+                    AuthenticationMethod.Password => await AuthenticatePasswordAsync(request, cancellationToken),
+                    AuthenticationMethod.ApiKey => await AuthenticateApiKeyAsync(request, cancellationToken),
                     _ => ServiceResult<AuthenticationOutcome>.Failure($"Unsupported authentication method: {request.Method}")
                 };
 
-                // 로깅
-                await LogAuthenticationAttemptAsync(request, result);
+                await LogAuthenticationAttemptAsync(request, result, cancellationToken);
 
                 return result;
             }
@@ -96,62 +105,53 @@ namespace AuthHive.Auth.Providers.Authentication
         }
 
         private async Task<ServiceResult<AuthenticationOutcome>> AuthenticatePasswordAsync(
-            AuthenticationRequest request)
+              AuthenticationRequest request, CancellationToken cancellationToken)
         {
-            // UserProfile과 User 조회
-            var userProfile = await _context.UserProfiles
-                .Include(up => up.User)
-                .ThenInclude(u => u.ConnectedIds)
-                .FirstOrDefaultAsync(up =>
-                    up.User.Username == request.Username ||
-                    up.User.Email == request.Username);
-
-            if (userProfile == null)
+            if (string.IsNullOrEmpty(request.Username))
             {
                 return ServiceResult<AuthenticationOutcome>.Failure("Invalid credentials");
             }
 
-            var user = userProfile.User;
+            var user = await _userRepository.GetByUsernameAsync(request.Username, cancellationToken: cancellationToken);
+            if (user == null)
+            {
+                user = await _userRepository.GetByEmailAsync(request.Username, cancellationToken: cancellationToken);
+            }
 
-            // 비밀번호 검증
+            if (user == null)
+            {
+                return ServiceResult<AuthenticationOutcome>.Failure("Invalid credentials");
+            }
+
             var passwordHash = user.PasswordHash ?? string.Empty;
-            if (!await _passwordProvider.VerifyPasswordAsync(request.Password ?? "", passwordHash))
+            if (!await _passwordProvider.VerifyPasswordAsync(request.Password ?? "", passwordHash, cancellationToken))
             {
                 return ServiceResult<AuthenticationOutcome>.Failure("Invalid credentials");
             }
 
             // MFA 확인
-            if (user.TwoFactorEnabled && string.IsNullOrEmpty(request.MfaCode))
+            if (user.TwoFactorEnabled)
             {
-                var mfaMethods = new List<string> { user.TwoFactorMethod?.ToString() ?? MfaMethod.Totp.ToString() };
-
-                return ServiceResult<AuthenticationOutcome>.Success(new AuthenticationOutcome
+                if (string.IsNullOrEmpty(request.MfaCode))
                 {
-                    Success = false,
-                    RequiresMfa = true,
-                    UserId = user.Id,
-                    MfaMethods = mfaMethods,
-                    Message = "MFA verification required"
-                });
-            }
-
-
-            // MFA 코드 검증 부분 수정
-            if (user.TwoFactorEnabled && !string.IsNullOrEmpty(request.MfaCode))
-            {
-                MfaMethod mfaMethod = MfaMethod.None;
-                if (!string.IsNullOrEmpty(request.MfaMethod))
-                {
-                    Enum.TryParse<MfaMethod>(request.MfaMethod, out mfaMethod);
+                    return ServiceResult<AuthenticationOutcome>.Success(new AuthenticationOutcome
+                    {
+                        Success = false,
+                        RequiresMfa = true,
+                        UserId = user.Id,
+                        MfaMethods = new List<string> { user.TwoFactorMethod ?? MfaMethod.Totp.ToString() },
+                        Message = "MFA verification required"
+                    });
                 }
 
-                var verifyResult = await _mfaService.VerifyMfaCodeAsync(
-                    user.Id,
-                    request.MfaCode,
-                    mfaMethod,
-                    null);
+                // 수정: user.TwoFactorMethod (string)를 MfaMethod (enum)으로 변환합니다.
+                if (!Enum.TryParse<MfaMethod>(user.TwoFactorMethod, true, out var mfaMethodEnum))
+                {
+                    // 파싱 실패 시 기본값(Totp)으로 설정
+                    mfaMethodEnum = MfaMethod.Totp;
+                }
 
-                // null 체크 추가
+                var verifyResult = await _mfaService.VerifyMfaCodeAsync(user.Id, request.MfaCode, mfaMethodEnum, null, cancellationToken);
                 if (!verifyResult.IsSuccess || verifyResult.Data == null || !verifyResult.Data.Success)
                 {
                     return ServiceResult<AuthenticationOutcome>.Failure("Invalid MFA code");
@@ -162,9 +162,7 @@ namespace AuthHive.Auth.Providers.Authentication
             ConnectedId? connectedId = null;
             if (request.OrganizationId.HasValue)
             {
-                connectedId = user.ConnectedIds
-                    .FirstOrDefault(c => c.OrganizationId == request.OrganizationId.Value);
-
+                connectedId = user.ConnectedIds.FirstOrDefault(c => c.OrganizationId == request.OrganizationId.Value);
                 if (connectedId == null)
                 {
                     connectedId = new ConnectedId
@@ -177,8 +175,7 @@ namespace AuthHive.Auth.Providers.Authentication
                         JoinedAt = DateTime.UtcNow,
                         LastActiveAt = DateTime.UtcNow
                     };
-                    await _context.ConnectedIds.AddAsync(connectedId);
-                    await _context.SaveChangesAsync();
+                    await _connectedIdRepository.AddAsync(connectedId, cancellationToken);
                 }
             }
 
@@ -198,40 +195,26 @@ namespace AuthHive.Auth.Providers.Authentication
                 ExpiresAt = DateTime.UtcNow.AddHours(8),
                 LastActivityAt = DateTime.UtcNow
             };
+            await _sessionRepository.AddAsync(session, cancellationToken);
 
-            await _context.Sessions.AddAsync(session);
-            await _context.SaveChangesAsync();
-
-            // 토큰 생성
-            var claims = new List<Claim>
-            {
-                new Claim("session_id", session.Id.ToString()),
-                new Claim("user_id", user.Id.ToString())
-            };
-
+            // 토큰 생성을 위한 클레임 구성
+            var claims = new List<Claim> { new Claim(AuthConstants.ClaimTypes.SessionId, session.Id.ToString()) };
             if (request.OrganizationId.HasValue)
             {
-                claims.Add(new Claim("org_id", request.OrganizationId.Value.ToString()));
+                claims.Add(new Claim(AuthConstants.ClaimTypes.OrganizationId, request.OrganizationId.Value.ToString()));
             }
 
-            var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(
-                user.Id,
-                connectedId?.Id ?? Guid.Empty,
-                claims);
-
+            var tokenResult = await _tokenProvider.GenerateAccessTokenAsync(user.Id, connectedId?.Id ?? Guid.Empty, claims, cancellationToken);
             if (!tokenResult.IsSuccess || tokenResult.Data == null)
             {
-                _context.Sessions.Remove(session);
-                await _context.SaveChangesAsync();
+                _logger.LogError("Token generation failed for user {UserId}. Session will not be persisted.", user.Id);
                 return ServiceResult<AuthenticationOutcome>.Failure("Token generation failed");
             }
 
-            var refreshToken = await _tokenProvider.GenerateRefreshTokenAsync(user.Id);
+            var refreshTokenResult = await _tokenProvider.GenerateRefreshTokenAsync(user.Id, cancellationToken);
 
-            // 세션에 토큰 정보 저장
-            session.TokenId = tokenResult.Data.AccessToken;
-            session.TokenExpiresAt = tokenResult.Data.ExpiresAt;
-            await _context.SaveChangesAsync();
+            // 최종적으로 DB에 변경사항 저장
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return ServiceResult<AuthenticationOutcome>.Success(new AuthenticationOutcome
             {
@@ -240,7 +223,7 @@ namespace AuthHive.Auth.Providers.Authentication
                 ConnectedId = connectedId?.Id,
                 SessionId = session.Id,
                 AccessToken = tokenResult.Data.AccessToken,
-                RefreshToken = refreshToken.Data,
+                RefreshToken = refreshTokenResult.Data,
                 ExpiresAt = tokenResult.Data.ExpiresAt,
                 OrganizationId = request.OrganizationId,
                 ApplicationId = request.ApplicationId,
@@ -248,21 +231,22 @@ namespace AuthHive.Auth.Providers.Authentication
                 MfaVerified = user.TwoFactorEnabled && !string.IsNullOrEmpty(request.MfaCode)
             });
         }
-
-        private async Task<ServiceResult<AuthenticationOutcome>> AuthenticateApiKeyAsync(
-            AuthenticationRequest request)
+        private async Task<ServiceResult<AuthenticationOutcome>> AuthenticateApiKeyAsync(AuthenticationRequest request, CancellationToken cancellationToken)
         {
             if (string.IsNullOrEmpty(request.ApiKey))
-            {
                 return ServiceResult<AuthenticationOutcome>.Failure("API key is required");
-            }
 
-            var validationResult = await _apiKeyProvider.ValidateApiKeyAsync(request.ApiKey);
+            // 수정: ValidateApiKeyAsync 메서드 시그니처에 맞게 IpAddress와 UserAgent를 전달합니다.
+            var validationResult = await _apiKeyProvider.ValidateApiKeyAsync(
+                request.ApiKey,
+                request.IpAddress,
+                request.UserAgent,
+                cancellationToken);
+
             if (!validationResult.IsSuccess || validationResult.Data == null || !validationResult.Data.IsValid)
-            {
                 return ServiceResult<AuthenticationOutcome>.Failure("Invalid API key");
-            }
 
+            // API Key 인증 성공 시에는 토큰을 발급하지 않고, 인증 컨텍스트만 반환합니다.
             return ServiceResult<AuthenticationOutcome>.Success(new AuthenticationOutcome
             {
                 Success = true,
@@ -272,105 +256,114 @@ namespace AuthHive.Auth.Providers.Authentication
             });
         }
 
-        public async Task<ServiceResult<bool>> ValidateAsync(string token)
+        public async Task<ServiceResult<bool>> ValidateAsync(string token, CancellationToken cancellationToken = default)
         {
-            var result = await _tokenProvider.ValidateAccessTokenAsync(token);
-            return ServiceResult<bool>.Success(result.IsSuccess);
+            var result = await _tokenProvider.ValidateAccessTokenAsync(token, cancellationToken);
+
+            // 수정: result의 성공 여부에 따라 Success() 또는 Failure() 메서드를 호출합니다.
+            if (result.IsSuccess)
+            {
+                return ServiceResult<bool>.Success(true);
+            }
+            else
+            {
+                return ServiceResult<bool>.Failure(result.ErrorMessage ?? "Token validation failed.", result.ErrorCode);
+            }
         }
 
-        public async Task<ServiceResult> RevokeAsync(string token)
+        public async Task<ServiceResult> RevokeAsync(string token, CancellationToken cancellationToken = default)
         {
-            var session = await _context.Sessions
-                .FirstOrDefaultAsync(s => s.TokenId == token && s.Status == SessionStatus.Active);
+            // 토큰 자체를 무효화하는 대신, 토큰과 연결된 세션을 무효화합니다.
+            // PASETO는 상태 비저장 토큰이므로, 상태 저장이 필요한 폐기는 DB(세션)에서 처리해야 합니다.
+            var principalResult = await _tokenProvider.ValidateAccessTokenAsync(token, cancellationToken);
+            if (!principalResult.IsSuccess || principalResult.Data == null)
+                return ServiceResult.Failure("Invalid token.");
 
-            if (session != null)
+            var sessionIdClaim = principalResult.Data.Claims.FirstOrDefault(c => c.Type == AuthConstants.ClaimTypes.SessionId);
+            if (sessionIdClaim == null || !Guid.TryParse(sessionIdClaim.Value, out var sessionId))
+                return ServiceResult.Failure("Session ID not found in token.");
+
+            var session = await _sessionRepository.GetByIdAsync(sessionId, cancellationToken);
+            if (session != null && session.Status == SessionStatus.Active)
             {
                 session.Status = SessionStatus.LoggedOut;
                 session.EndedAt = DateTime.UtcNow;
                 session.EndReason = SessionEndReason.UserLogout;
-                await _context.SaveChangesAsync();
 
-                await _cache.RemoveAsync($"session:{session.Id}");
+                await _sessionRepository.UpdateAsync(session, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                // 세션 관련 캐시 무효화
+                await _cacheService.RemoveAsync($"session:{session.Id}", cancellationToken);
             }
 
             return ServiceResult.Success();
         }
 
-        public Task<bool> IsEnabledAsync()
+        public Task<bool> IsEnabledAsync(CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(true);
+            return Task.FromResult(true); // 이 제공자는 항상 활성화 상태입니다.
         }
 
-        private async Task<bool> CheckRateLimitAsync(string? ipAddress)
+        // --- Private Helper Methods ---
+
+        private async Task<bool> CheckRateLimitAsync(string? ipAddress, CancellationToken cancellationToken)
         {
             if (string.IsNullOrEmpty(ipAddress)) return true;
 
             var key = $"auth_rate:{ipAddress}";
-            var count = await _cache.GetStringAsync(key);
+            var countStr = await _cacheService.GetAsync<string>(key, cancellationToken);
 
-            if (!string.IsNullOrEmpty(count) && int.Parse(count) >= 10)
+            int.TryParse(countStr, out var count);
+            if (count >= 10) // TODO: 설정에서 값 가져오기
                 return false;
 
-            await _cache.SetStringAsync(key,
-                string.IsNullOrEmpty(count) ? "1" : (int.Parse(count) + 1).ToString(),
-                new DistributedCacheEntryOptions { SlidingExpiration = TimeSpan.FromMinutes(15) });
-
+            await _cacheService.SetAsync(key, (count + 1).ToString(), TimeSpan.FromMinutes(15), cancellationToken);
             return true;
         }
 
-        private async Task LogAuthenticationAttemptAsync(
-            AuthenticationRequest request,
-            ServiceResult<AuthenticationOutcome> result)
+        private async Task LogAuthenticationAttemptAsync(AuthenticationRequest request, ServiceResult<AuthenticationOutcome> result, CancellationToken cancellationToken)
         {
-            var attemptLog = new AuthenticationAttemptLog
-            {
-                Username = request.Username,
-                UserId = result.Data?.UserId,
-                Method = request.Method,
-                Provider = ProviderName,
-                IpAddress = request.IpAddress ?? "Unknown",
-                UserAgent = request.UserAgent,
-                IsSuccess = result.IsSuccess && result.Data?.Success == true,
-                AttemptedAt = DateTime.UtcNow,
-                ApplicationId = request.ApplicationId,
-                SessionId = result.Data?.SessionId,
-                FailureReason = !result.IsSuccess ?
-                    (result.Data?.RequiresMfa == true ? AuthenticationResult.MfaRequired : AuthenticationResult.InvalidCredentials)
-                    : null
-            };
+            var isSuccess = result.IsSuccess && (result.Data?.Success ?? false);
+            var failureReason = !isSuccess
+                ? (result.Data?.RequiresMfa == true ? AuthenticationResult.MfaRequired : AuthenticationResult.InvalidCredentials)
+                : (AuthenticationResult?)null;
 
-            // OrganizationId가 있는 경우에만 설정
-            if (request.OrganizationId.HasValue)
-            {
-                attemptLog.OrganizationId = request.OrganizationId.Value;
-            }
-
-            await _attemptLogRepository.AddAsync(attemptLog);
+            await LogAttemptInternalAsync(request, isSuccess, failureReason, result.Data?.UserId, result.Data?.SessionId, cancellationToken);
         }
-        private async Task LogFailedAttemptAsync(
-            AuthenticationRequest request,
-            AuthenticationResult reason)
+
+        private async Task LogFailedAttemptAsync(AuthenticationRequest request, AuthenticationResult reason, CancellationToken cancellationToken)
         {
-            var attemptLog = new AuthenticationAttemptLog
-            {
-                Username = request.Username,
-                Method = request.Method,
-                Provider = ProviderName,
-                IpAddress = request.IpAddress ?? "Unknown",
-                UserAgent = request.UserAgent,
-                IsSuccess = false,
-                FailureReason = reason,
-                AttemptedAt = DateTime.UtcNow,
-                ApplicationId = request.ApplicationId
-            };
+            await LogAttemptInternalAsync(request, false, reason, null, null, cancellationToken);
+        }
 
-            // OrganizationId가 있는 경우에만 설정
-            if (request.OrganizationId.HasValue)
+        private async Task LogAttemptInternalAsync(AuthenticationRequest request, bool isSuccess, AuthenticationResult? reason, Guid? userId, Guid? sessionId, CancellationToken cancellationToken)
+        {
+            try
             {
-                attemptLog.OrganizationId = request.OrganizationId.Value;
+                var attemptLog = new AuthenticationAttemptLog
+                {
+                    Username = request.Username,
+                    UserId = userId,
+                    Method = request.Method,
+                    Provider = ProviderName,
+                    IpAddress = request.IpAddress ?? "Unknown",
+                    UserAgent = request.UserAgent,
+                    IsSuccess = isSuccess,
+                    FailureReason = reason,
+                    AttemptedAt = DateTime.UtcNow,
+                    ApplicationId = request.ApplicationId,
+                    OrganizationId = request.OrganizationId.GetValueOrDefault(),
+                    SessionId = sessionId
+                };
+                await _attemptLogRepository.AddAsync(attemptLog, cancellationToken);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
-
-            await _attemptLogRepository.AddAsync(attemptLog);
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to log authentication attempt for user: {Username}", request.Username);
+                // 로깅 실패가 전체 인증 흐름을 중단시켜서는 안 됩니다.
+            }
         }
     }
 }

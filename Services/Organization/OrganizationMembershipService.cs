@@ -142,7 +142,7 @@ namespace AuthHive.Auth.Services.Organization
 
                 // 3. 캐시 무효화: 데이터가 변경되었으므로, 관련된 캐시를 삭제하여 데이터 정합성을 유지합니다.
                 await InvalidateMemberCachesAsync(organizationId, connectedId, cancellationToken);
-                
+
                 // 4. 이벤트 발행: '멤버가 합류함' 이벤트를 발행하기 위해 UserId를 조회합니다.
                 var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(connectedId, cancellationToken);
                 if (connectedIdEntity?.UserId == null)
@@ -194,12 +194,17 @@ namespace AuthHive.Auth.Services.Organization
         {
             // IPrincipalAccessor를 통해 현재 요청을 수행하는 사용자의 ID를 직접 가져옵니다.
             var changedByConnectedId = _principalAccessor.ConnectedId;
+            if (changedByConnectedId == null)
+            {
+                // 401 Unauthorized 또는 403 Forbidden 반환
+                return ServiceResult<bool>.Unauthorized("User is not authenticated.");
+            }
 
             // 1. 권한 검증: 이 작업을 수행할 권한이 있는지 확인합니다.
-            var canChange = await _authorizationService.CanManageMemberRoleAsync(changedByConnectedId, targetConnectedId, newRole, cancellationToken);
+            var canChange = await _authorizationService.CanManageMemberRoleAsync(changedByConnectedId.Value, targetConnectedId, newRole, cancellationToken);
             if (!canChange)
             {
-                _logger.LogWarning("Permission denied: {ChangerId} tried to change role of {TargetId} in org {OrgId}", changedByConnectedId, targetConnectedId, organizationId);
+                _logger.LogWarning("Permission denied: {ChangerId} tried to change role of {TargetId} in org {OrgId}", changedByConnectedId.Value, targetConnectedId, organizationId);
                 return ServiceResult<bool>.Forbidden("You do not have permission to change this member's role.");
             }
 
@@ -224,7 +229,7 @@ namespace AuthHive.Auth.Services.Organization
             await _auditService.LogActionAsync(
                 AuditActionType.Update,
                 "Member Role Changed",
-                changedByConnectedId,
+                connectedId: changedByConnectedId.Value,
                 true,
                 errorMessage: null,
                 resourceType: "OrganizationMembership",
@@ -243,13 +248,17 @@ namespace AuthHive.Auth.Services.Organization
             Guid organizationId,
             Guid targetConnectedId,
             string reason,
-            CancellationToken cancellationToken = default) // 'removedByConnectedId' 파라미터 제거
+            CancellationToken cancellationToken = default)
         {
             // IPrincipalAccessor를 통해 현재 요청을 수행하는 사용자의 ID를 직접 가져옵니다.
             var removedByConnectedId = _principalAccessor.ConnectedId;
-
+            if (removedByConnectedId == null)
+            {
+                // 401 Unauthorized 또는 403 Forbidden 반환
+                return ServiceResult<bool>.Unauthorized("User is not authenticated.");
+            }
             // 1. 권한 검증: 멤버를 제거할 수 있는 관리자인지 확인합니다.
-            var canRemove = await _authorizationService.CanManageMembersAsync(removedByConnectedId, organizationId, cancellationToken);
+            var canRemove = await _authorizationService.CanManageMembersAsync(removedByConnectedId.Value, organizationId, cancellationToken);
             if (!canRemove)
             {
                 return ServiceResult<bool>.Forbidden("You do not have permission to remove members from this organization.");
@@ -277,7 +286,7 @@ namespace AuthHive.Auth.Services.Organization
             await _auditService.LogActionAsync(
                 AuditActionType.Delete,
                 "Member Removed",
-                removedByConnectedId,
+                connectedId: removedByConnectedId.Value,
                 true,
                 errorMessage: null,
                 resourceType: "OrganizationMembership",
@@ -288,9 +297,9 @@ namespace AuthHive.Auth.Services.Organization
             // 6. 성공 결과를 반환합니다.
             return ServiceResult<bool>.Success(true);
         }
-        
+
         #endregion
-        
+
         #region Private Helper Methods (내부 지원 메서드)
 
         /// <summary>
@@ -309,7 +318,7 @@ namespace AuthHive.Auth.Services.Organization
             await _cacheService.RemoveAsync(memberCacheKey, cancellationToken);
             await _cacheService.RemoveByPatternAsync(memberListCacheKeyPattern, cancellationToken);
         }
-        
+
         #endregion
 
         #region 미구현 메서드 (인터페이스 계약 유지를 위함)
@@ -324,7 +333,7 @@ namespace AuthHive.Auth.Services.Organization
         public Task<ServiceResult<OrganizationMemberStatistics>> GetStatisticsAsync(Guid organizationId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<ServiceResult<int>> CleanupInactiveMembersAsync(Guid organizationId, int inactiveDays, Guid cleanedByConnectedId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<ServiceResult<bool>> ChangeMembershipTypeAsync(Guid organizationId, Guid connectedId, OrganizationMembershipType newType, Guid changedByConnectedId, CancellationToken cancellationToken) => throw new NotImplementedException();
-        
+
         // 이 메서드들은 InvitationService로 책임이 이전되었으므로 여기서는 구현하지 않습니다.
         // 인터페이스에서 제거하는 것이 가장 좋습니다.
         public Task<ServiceResult<OrganizationMembershipDto>> InviteMemberAsync(Guid organizationId, string email, OrganizationMemberRole role, Guid invitedByConnectedId, DateTime? expiresAt = null, CancellationToken cancellationToken = default) => throw new NotSupportedException("Use IInvitationService to invite members.");

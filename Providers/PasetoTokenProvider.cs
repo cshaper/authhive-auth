@@ -10,14 +10,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Threading; // CancellationToken 사용을 위해 추가
+using System.Threading;
 using System.Threading.Tasks;
+using AuthHive.Core.Constants.Auth; // AuthConstants 사용을 위해 추가
 
 namespace AuthHive.Auth.Providers
 {
     /// <summary>
-    /// ITokenProvider의 PASETO v4.local 구현체입니다.
-    /// appsettings.json의 Paseto 섹션에서 설정을 읽어 토큰을 생성하고 검증합니다.
+    /// ITokenProvider의 PASETO v4.local 구현체입니다. - v16 Refactored
+    /// appsettings.json에서 설정을 읽고, AuthConstants.ClaimTypes를 준수하여 토큰을 생성/검증합니다.
     /// </summary>
     public class PasetoTokenProvider : ITokenProvider
     {
@@ -49,8 +50,8 @@ namespace AuthHive.Auth.Providers
             {
                 cancellationToken.ThrowIfCancellationRequested(); // 작업 취소 확인
 
-                var issuedAt = DateTime.UtcNow;
-                var expiresAt = issuedAt.Add(_accessTokenLifetime);
+                var now = DateTime.UtcNow;
+                var expiresAt = now.Add(_accessTokenLifetime);
 
                 var builder = new PasetoBuilder()
                     .UseV4(Purpose.Local)
@@ -58,16 +59,24 @@ namespace AuthHive.Auth.Providers
                     .Issuer(_issuer)
                     .Audience(_audience)
                     .Expiration(expiresAt)
-                    .IssuedAt(issuedAt)
-                    .Subject(userId.ToString())
-                    .AddClaim(ClaimTypes.NameIdentifier, userId.ToString())
-                    .AddClaim("connected_id", connectedId.ToString());
+                    .IssuedAt(now)
+                    .Subject(userId.ToString()) // 'sub' 클레임은 UserId를 사용
+                    .AddClaim(AuthConstants.ClaimTypes.ConnectedId, connectedId.ToString()); // 수정: "cid" 상수 사용
 
                 if (additionalClaims != null)
                 {
+                    // 중복될 수 있는 표준 클레임 목록
+                    var standardClaims = new HashSet<string>
+                    {
+                        AuthConstants.ClaimTypes.Subject,
+                        AuthConstants.ClaimTypes.ConnectedId,
+                        System.Security.Claims.ClaimTypes.NameIdentifier // "sub"와 동일하게 취급될 수 있음
+                    };
+
                     foreach (var claim in additionalClaims)
                     {
-                        if (claim.Type != "sub" && claim.Type != ClaimTypes.NameIdentifier && claim.Type != "connected_id")
+                        // 표준 클레임과 중복되지 않는 경우에만 추가
+                        if (!standardClaims.Contains(claim.Type))
                         {
                             builder.AddClaim(claim.Type, claim.Value);
                         }
@@ -80,7 +89,7 @@ namespace AuthHive.Auth.Providers
                 {
                     AccessToken = token,
                     ExpiresAt = expiresAt,
-                    IssuedAt = issuedAt,
+                    IssuedAt = now,
                     ExpiresIn = (int)_accessTokenLifetime.TotalSeconds
                 };
                 return Task.FromResult(ServiceResult<TokenInfo>.Success(tokenInfo));
@@ -91,6 +100,7 @@ namespace AuthHive.Auth.Providers
             }
             catch (Exception ex)
             {
+                // TODO: 프로덕션 환경에서는 민감한 예외 메시지를 로그에만 기록하고, 사용자에게는 일반적인 에러 메시지를 반환해야 합니다.
                 return Task.FromResult(ServiceResult<TokenInfo>.Failure($"Token generation failed: {ex.Message}"));
             }
         }
@@ -100,7 +110,7 @@ namespace AuthHive.Auth.Providers
         {
             try
             {
-                cancellationToken.ThrowIfCancellationRequested(); // 작업 취소 확인
+                cancellationToken.ThrowIfCancellationRequested();
 
                 var validationResult = new PasetoBuilder()
                     .UseV4(Purpose.Local)
@@ -112,10 +122,12 @@ namespace AuthHive.Auth.Providers
                 var pasetoClaims = validationResult.Paseto.Payload
                     .Select(p => new Claim(p.Key, p.Value?.ToString() ?? string.Empty))
                     .ToList();
-
-                if (!pasetoClaims.Any(c => c.Type == ClaimTypes.NameIdentifier) && validationResult.Paseto.Payload.ContainsKey("sub"))
+                
+                // 'sub' 클레임이 있는데 NameIdentifier 클레임이 없다면, 표준 호환성을 위해 추가해줍니다.
+                var subjectClaim = pasetoClaims.FirstOrDefault(c => c.Type == AuthConstants.ClaimTypes.Subject);
+                if (subjectClaim != null && !pasetoClaims.Any(c => c.Type == System.Security.Claims.ClaimTypes.NameIdentifier))
                 {
-                    pasetoClaims.Add(new Claim(ClaimTypes.NameIdentifier, validationResult.Paseto.Payload["sub"]?.ToString() ?? string.Empty));
+                    pasetoClaims.Add(new Claim(System.Security.Claims.ClaimTypes.NameIdentifier, subjectClaim.Value));
                 }
 
                 var identity = new ClaimsIdentity(pasetoClaims, "PASETO");
@@ -136,7 +148,7 @@ namespace AuthHive.Auth.Providers
         /// <inheritdoc />
         public Task<ServiceResult<string>> GenerateRefreshTokenAsync(Guid userId, CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested(); // 작업 취소 확인
+            cancellationToken.ThrowIfCancellationRequested();
             
             var randomNumber = new byte[32];
             using var rng = RandomNumberGenerator.Create();

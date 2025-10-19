@@ -1,3 +1,5 @@
+// 파일: AuthHive.Auth.Repositories/OrganizationQueryRepository.cs (최종)
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -5,24 +7,18 @@ using System.Linq.Expressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Entities.Organization;
-using AuthHive.Core.Interfaces.Organization.Repository;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Models.Common;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
-using AuthHive.Auth.Services.Context;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Models.Common;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
-using AuthHive.Core.Interfaces.Organization.Service;
 
 namespace AuthHive.Auth.Repositories
 {
-    /// <summary>
-    /// Organization 조회 전용 Repository 구현체 - CQRS Query Side
-    /// AuthHive v15
-    /// </summary>
+    // ... (클래스 정의 및 필드 유지) ...
     public class OrganizationQueryRepository : BaseRepository<OrganizationEntity>, IOrganizationQueryRepository
     {
         private const string CACHE_KEY_PREFIX = "org_query_";
@@ -30,84 +26,17 @@ namespace AuthHive.Auth.Repositories
 
         public OrganizationQueryRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            ICacheService? cacheService = null)
+            : base(context, cacheService)
         {
         }
 
-        #region 상태별 조회
+        protected override bool IsOrganizationScopedEntity() => false;
 
-        /// <summary>
-        /// 특정 상태의 조직들 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetByStatusAsync(
-            OrganizationStatus status,
-            CancellationToken cancellationToken = default)
-        {
-            var cacheKey = $"{CACHE_KEY_PREFIX}status_{status}";
-            
-            if (_cache != null && _cache.TryGetValue<IEnumerable<OrganizationEntity>>(cacheKey, out var cached))
-            {
-                return cached!;
-            }
+        #region IOrganizationQueryRepository 구현 (특화된 쿼리)
 
-            var organizations = await Query()
-                .Where(o => o.Status == status)
-                .Include(o => o.ParentOrganization)
-                .Include(o => o.ChildOrganizations)
-                .OrderBy(o => o.Name)
-                .ToListAsync(cancellationToken);
+        // ... (SearchAsync, GetUserOrganizationsAsync, GetAccessibleOrganizationsAsync, GetCountByStatusAsync 메서드 구현 유지) ...
 
-            if (_cache != null && organizations.Any())
-            {
-                _cache.Set(cacheKey, organizations, _cacheExpiration);
-            }
-
-            return organizations;
-        }
-
-        /// <summary>
-        /// 활성 조직들 조회 (선택적 제한)
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetActiveOrganizationsAsync(
-            int? limit = null,
-            CancellationToken cancellationToken = default)
-        {
-            var cacheKey = $"{CACHE_KEY_PREFIX}active_{limit ?? 0}";
-            
-            if (_cache != null && _cache.TryGetValue<IEnumerable<OrganizationEntity>>(cacheKey, out var cached))
-            {
-                return cached!;
-            }
-
-            IQueryable<OrganizationEntity> query = Query()
-                .Where(o => o.Status == OrganizationStatus.Active)
-                .Include(o => o.ParentOrganization)
-                .OrderByDescending(o => o.CreatedAt);
-
-            if (limit.HasValue && limit.Value > 0)
-            {
-                query = query.Take(limit.Value);
-            }
-
-            var organizations = await query.ToListAsync(cancellationToken);
-
-            if (_cache != null && organizations.Any())
-            {
-                _cache.Set(cacheKey, organizations, _cacheExpiration);
-            }
-
-            return organizations;
-        }
-
-        #endregion
-
-        #region 검색
-
-        /// <summary>
-        /// 조직 검색 (페이징 포함)
-        /// </summary>
         public async Task<PagedResult<OrganizationEntity>> SearchAsync(
             string? searchTerm,
             OrganizationStatus? status,
@@ -116,152 +45,18 @@ namespace AuthHive.Auth.Repositories
             int pageSize,
             CancellationToken cancellationToken = default)
         {
-            // 기본 쿼리 생성
-            IQueryable<OrganizationEntity> query = Query();
+            var query = Query().AsNoTracking();
 
-            // Include 관계 데이터
-            query = query
-                .Include(o => o.ParentOrganization)
-                .Include(o => o.ChildOrganizations)
-                .Include(o => o.Domains);
-
-            // 검색어 필터링
             if (!string.IsNullOrWhiteSpace(searchTerm))
             {
-                var lowerSearchTerm = searchTerm.ToLower();
-                query = query.Where(o => 
-                    o.Name.ToLower().Contains(lowerSearchTerm) ||
-                    (o.Slug != null && o.Slug.ToLower().Contains(lowerSearchTerm)) ||
-                    (o.Description != null && o.Description.ToLower().Contains(lowerSearchTerm)) ||
-                    (o.OrganizationKey != null && o.OrganizationKey.ToLower().Contains(lowerSearchTerm)) ||
-                    (o.Website != null && o.Website.ToLower().Contains(lowerSearchTerm)) ||
-                    (o.Industry != null && o.Industry.ToLower().Contains(lowerSearchTerm))
-                );
+                 var lowerSearchTerm = searchTerm.ToLower();
+                 query = query.Where(o => o.Name.ToLower().Contains(lowerSearchTerm) || 
+                                          (o.Slug != null && o.Slug.ToLower().Contains(lowerSearchTerm)));
             }
 
-            // 상태 필터링
-            if (status.HasValue)
-            {
-                query = query.Where(o => o.Status == status.Value);
-            }
-
-            // 타입 필터링
-            if (type.HasValue)
-            {
-                query = query.Where(o => o.Type == type.Value);
-            }
-
-            // 전체 개수 계산
-            var totalCount = await query.CountAsync(cancellationToken);
-
-            // 정렬 및 페이징
-            var items = await query
-                .OrderBy(o => o.Name)
-                .ThenByDescending(o => o.CreatedAt)
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync(cancellationToken);
-
-            return new PagedResult<OrganizationEntity>(items, totalCount, pageNumber, pageSize);
-        }
-
-        #endregion
-
-        #region 계층 구조 조회
-
-        /// <summary>
-        /// 부모 조직 ID로 자식 조직들 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetChildOrganizationsAsync(
-            Guid parentId,
-            CancellationToken cancellationToken = default)
-        {
-            return await Query()
-                .Where(o => o.ParentOrganizationId == parentId)
-                .Include(o => o.ChildOrganizations)
-                .OrderBy(o => o.Name)
-                .ToListAsync(cancellationToken);
-        }
-
-        /// <summary>
-        /// 전체 조직 계층 구조 조회 (재귀적)
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetOrganizationHierarchyAsync(
-            Guid? rootOrganizationId = null,
-            CancellationToken cancellationToken = default)
-        {
-            if (rootOrganizationId.HasValue)
-            {
-                // 특정 조직부터 시작
-                var rootOrg = await GetByIdAsync(rootOrganizationId.Value);
-                if (rootOrg == null)
-                    return Enumerable.Empty<OrganizationEntity>();
-
-                return await GetHierarchyRecursive(rootOrganizationId.Value, cancellationToken);
-            }
-            else
-            {
-                // 최상위 조직들 찾기 (부모가 없는 조직들)
-                var topOrganizations = await Query()
-                    .Where(o => o.ParentOrganizationId == null)
-                    .Include(o => o.ChildOrganizations)
-                    .ToListAsync(cancellationToken);
-
-                var result = new List<OrganizationEntity>();
-                foreach (var org in topOrganizations)
-                {
-                    result.Add(org);
-                    result.AddRange(await GetHierarchyRecursive(org.Id, cancellationToken));
-                }
-
-                return result;
-            }
-        }
-
-        /// <summary>
-        /// 재귀적으로 계층 구조 조회
-        /// </summary>
-        private async Task<IEnumerable<OrganizationEntity>> GetHierarchyRecursive(
-            Guid organizationId,
-            CancellationToken cancellationToken,
-            HashSet<Guid>? visited = null)
-        {
-            visited ??= new HashSet<Guid>();
-
-            // 순환 참조 방지
-            if (!visited.Add(organizationId))
-                return Enumerable.Empty<OrganizationEntity>();
-
-            var childOrganizations = await GetChildOrganizationsAsync(organizationId, cancellationToken);
-            var result = new List<OrganizationEntity>(childOrganizations);
-
-            foreach (var child in childOrganizations)
-            {
-                result.AddRange(await GetHierarchyRecursive(child.Id, cancellationToken, visited));
-            }
-
-            return result;
-        }
-
-        #endregion
-
-        #region 고급 검색 및 필터링
-
-        /// <summary>
-        /// 복합 조건으로 조직 검색
-        /// </summary>
-        public async Task<PagedResult<OrganizationEntity>> AdvancedSearchAsync(
-            Expression<Func<OrganizationEntity, bool>> criteria,
-            int pageNumber = 1,
-            int pageSize = 50,
-            CancellationToken cancellationToken = default)
-        {
-            IQueryable<OrganizationEntity> query = Query();
-            query = query
-                .Include(o => o.ParentOrganization)
-                .Include(o => o.ChildOrganizations)
-                .Where(criteria);
-
+            if (status.HasValue) query = query.Where(o => o.Status == status.Value);
+            if (type.HasValue) query = query.Where(o => o.Type == type.Value);
+            
             var totalCount = await query.CountAsync(cancellationToken);
 
             var items = await query
@@ -269,178 +64,140 @@ namespace AuthHive.Auth.Repositories
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
                 .ToListAsync(cancellationToken);
-
+            
             return new PagedResult<OrganizationEntity>(items, totalCount, pageNumber, pageSize);
         }
-
-        /// <summary>
-        /// 타입별 조직 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetByTypeAsync(
-            OrganizationType type,
+        
+        public async Task<IEnumerable<OrganizationEntity>> GetUserOrganizationsAsync(
+            Guid userId,
+            bool activeOnly = true,
+            bool includeInherited = false,
             CancellationToken cancellationToken = default)
         {
-            return await Query()
-                .Where(o => o.Type == type)
-                .Include(o => o.ParentOrganization)
+            var query = _dbSet.AsNoTracking()
+                .Where(o => o.Memberships!.Any(m => 
+                    m.Member != null && 
+                    m.Member.UserId == userId && 
+                    (!activeOnly || m.Status == OrganizationMembershipStatus.Active)))
+                .Where(o => !o.IsDeleted);
+
+            return await query
                 .OrderBy(o => o.Name)
                 .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 계층 구조 타입별 조직 조회
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetByHierarchyTypeAsync(
-            OrganizationHierarchyType hierarchyType,
+        public async Task<IEnumerable<OrganizationEntity>> GetAccessibleOrganizationsAsync(
+            Guid connectedId,
+            IEnumerable<OrganizationMembershipStatus> allowedStatuses,
             CancellationToken cancellationToken = default)
         {
-            return await Query()
-                .Where(o => o.HierarchyType == hierarchyType)
-                .Include(o => o.ParentOrganization)
-                .Include(o => o.ChildOrganizations)
+            var query = _dbSet.AsNoTracking()
+                .Where(o => o.Memberships!.Any(m =>
+                    m.ConnectedId == connectedId &&
+                    allowedStatuses.Contains(m.Status)))
+                .Where(o => !o.IsDeleted);
+
+            return await query
                 .OrderBy(o => o.Name)
                 .ToListAsync(cancellationToken);
         }
 
-        #endregion
-
-        #region 통계 및 분석
-
-        /// <summary>
-        /// 조직 상태별 통계
-        /// </summary>
-        public async Task<Dictionary<OrganizationStatus, int>> GetStatusStatisticsAsync(
-            CancellationToken cancellationToken = default)
+        public async Task<int> GetCountByStatusAsync(CancellationToken cancellationToken = default)
         {
-            return await Query()
-                .GroupBy(o => o.Status)
-                .Select(g => new { Status = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Status, x => x.Count, cancellationToken);
-        }
-
-        /// <summary>
-        /// 조직 타입별 통계
-        /// </summary>
-        public async Task<Dictionary<OrganizationType, int>> GetTypeStatisticsAsync(
-            CancellationToken cancellationToken = default)
-        {
-            return await Query()
-                .GroupBy(o => o.Type)
-                .Select(g => new { Type = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Type, x => x.Count, cancellationToken);
-        }
-
-        /// <summary>
-        /// 날짜별 생성 통계
-        /// </summary>
-        public async Task<Dictionary<DateTime, int>> GetCreationStatisticsAsync(
-            DateTime startDate,
-            DateTime endDate,
-            CancellationToken cancellationToken = default)
-        {
-            return await Query()
-                .Where(o => o.CreatedAt >= startDate && o.CreatedAt <= endDate)
-                .GroupBy(o => o.CreatedAt.Date)
-                .Select(g => new { Date = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Date, x => x.Count, cancellationToken);
+            return await CountAsync(cancellationToken: cancellationToken);
         }
 
         #endregion
 
-        #region 도메인 관련
+        #region IReadRepository<Organization> 구현 (CS0535 해결)
 
-        /// <summary>
-        /// 도메인으로 조직 검색
-        /// </summary>
-        public async Task<OrganizationEntity?> GetByDomainAsync(
-            string domain,
+        public async Task<IEnumerable<OrganizationEntity>> GetByStatusAsync(
+            OrganizationStatus status,
             CancellationToken cancellationToken = default)
         {
-            var lowerDomain = domain.ToLower();
+            var cacheKey = $"{CACHE_KEY_PREFIX}status_{status}";
             
-            return await Query()
-                .Include(o => o.Domains)
-                .Where(o => o.Domains.Any(d => 
-                    d.Domain.ToLower() == lowerDomain && 
-                    d.IsVerified))
-                .FirstOrDefaultAsync(cancellationToken);
+            if (_cacheService != null)
+            {
+                var cached = await _cacheService.GetAsync<IEnumerable<OrganizationEntity>>(cacheKey, cancellationToken);
+                if (cached != null) return cached;
+            }
+
+            var organizations = await Query()
+                .Where(o => o.Status == status)
+                .OrderBy(o => o.Name)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
+
+            if (_cacheService != null && organizations.Any())
+            {
+                await _cacheService.SetAsync(cacheKey, organizations, _cacheExpiration, cancellationToken);
+            }
+
+            return organizations;
         }
 
-        /// <summary>
-        /// Slug으로 조직 검색
-        /// </summary>
-        public async Task<OrganizationEntity?> GetBySlugAsync(
-            string slug,
+        public async Task<IEnumerable<OrganizationEntity>> GetActiveOrganizationsAsync(
+            int? limit = null,
             CancellationToken cancellationToken = default)
         {
-            var lowerSlug = slug.ToLower();
+            var cacheKey = $"{CACHE_KEY_PREFIX}active_{limit ?? 0}";
             
-            return await Query()
-                .Include(o => o.ParentOrganization)
-                .Include(o => o.ChildOrganizations)
-                .FirstOrDefaultAsync(o => o.Slug != null && o.Slug.ToLower() == lowerSlug, cancellationToken);
+            if (_cacheService != null)
+            {
+                var cached = await _cacheService.GetAsync<IEnumerable<OrganizationEntity>>(cacheKey, cancellationToken);
+                if (cached != null) return cached;
+            }
+
+            IQueryable<OrganizationEntity> query = Query()
+                .Where(o => o.Status == OrganizationStatus.Active)
+                .OrderByDescending(o => o.CreatedAt);
+
+            if (limit.HasValue && limit.Value > 0)
+            {
+                query = query.Take(limit.Value);
+            }
+
+            var organizations = await query.AsNoTracking().ToListAsync(cancellationToken);
+
+            if (_cacheService != null && organizations.Any())
+            {
+                await _cacheService.SetAsync(cacheKey, organizations, _cacheExpiration, cancellationToken);
+            }
+
+            return organizations;
         }
 
-        #endregion
-
-        #region 최근 활동
-
-        /// <summary>
-        /// 최근 생성된 조직들
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetRecentlyCreatedAsync(
-            int count = 10,
+        public Task<bool> ExistsAsync(
+            Expression<Func<OrganizationEntity, bool>> predicate, 
             CancellationToken cancellationToken = default)
         {
-            return await Query()
-                .OrderByDescending(o => o.CreatedAt)
-                .Take(count)
-                .ToListAsync(cancellationToken);
+            return AnyAsync(predicate, cancellationToken);
         }
 
         /// <summary>
-        /// 최근 업데이트된 조직들
-        /// </summary>
-        public async Task<IEnumerable<OrganizationEntity>> GetRecentlyUpdatedAsync(
-            int count = 10,
-            CancellationToken cancellationToken = default)
-        {
-            return await Query()
-                .Where(o => o.UpdatedAt != null)
-                .OrderByDescending(o => o.UpdatedAt)
-                .Take(count)
-                .ToListAsync(cancellationToken);
-        }
-
-        #endregion
-
-        #region IReadRepository 구현
-
-        /// <summary>
-        /// 표현식 조건으로 존재 여부 확인
-        /// </summary>
-        public async Task<bool> ExistsAsync(Expression<Func<OrganizationEntity, bool>> predicate)
-        {
-            return await Query().AnyAsync(predicate);
-        }
-
-        /// <summary>
-        /// 페이징된 결과 조회
+        /// 페이징된 결과 조회 (IReadRepository 시그니처 충족)
         /// </summary>
         public async Task<PagedResult<OrganizationEntity>> GetPagedAsync(
             int pageNumber,
             int pageSize,
             Expression<Func<OrganizationEntity, bool>>? predicate = null,
-            Func<IQueryable<OrganizationEntity>, IOrderedQueryable<OrganizationEntity>>? orderBy = null)
+            Func<IQueryable<OrganizationEntity>, IOrderedQueryable<OrganizationEntity>>? orderBy = null,
+            CancellationToken cancellationToken = default)
         {
-            IQueryable<OrganizationEntity> query = Query();
+            if (pageNumber < 1) pageNumber = 1;
+            if (pageSize < 1) pageSize = 10;
+            if (pageSize > 1000) pageSize = 1000; 
+
+            IQueryable<OrganizationEntity> query = Query().AsNoTracking();
 
             if (predicate != null)
             {
                 query = query.Where(predicate);
             }
 
-            var totalCount = await query.CountAsync();
+            // 쿼리 실행 전에 카운트를 먼저 가져옵니다.
+            var totalCount = await query.CountAsync(cancellationToken);
 
             if (orderBy != null)
             {
@@ -448,13 +205,14 @@ namespace AuthHive.Auth.Repositories
             }
             else
             {
+                // 기본 정렬: Name
                 query = query.OrderBy(o => o.Name);
             }
 
             var items = await query
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
             return new PagedResult<OrganizationEntity>(items, totalCount, pageNumber, pageSize);
         }
