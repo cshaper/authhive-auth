@@ -32,13 +32,15 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             IOrganizationContext organizationContext,
             ILogger<UserProfileRepository> logger,
-            ICacheService? cacheService = null) 
+            ICacheService? cacheService = null)
             : base(context) // ⭐️ BaseRepository에 ICacheService를 전달
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
 
+        protected override bool IsOrganizationScopedEntity() => true;
+        
         #region 기본 조회
 
         /// <summary>ConnectedId로 프로필 조회 (캐시 활용)</summary>
@@ -49,7 +51,7 @@ namespace AuthHive.Auth.Repositories
         /// <param name="connectedId">ConnectedId 엔티티의 ID</param>
         /// <param name="cancellationToken">취소 토큰</param>
 
- /// <summary>
+        /// <summary>
         /// ConnectedId를 통해 UserProfile을 조회합니다. (ICacheService 활용)
         /// </summary>
         public async Task<UserProfile?> GetByConnectedIdAsync(
@@ -74,7 +76,7 @@ namespace AuthHive.Auth.Repositories
             // 2. 데이터베이스 조회
             var connectedIdEntity = await _context.ConnectedIds
                 .AsNoTracking()
-                .Include(c => c.User)! 
+                .Include(c => c.User)!
                 .ThenInclude(u => u!.UserProfile)
                 .FirstOrDefaultAsync(c => c.Id == connectedId && !c.IsDeleted, cancellationToken);
 
@@ -84,7 +86,7 @@ namespace AuthHive.Auth.Repositories
             if (profile != null && _cacheService != null)
             {
                 // TTL 15분은 BaseRepository의 기본 TTL을 사용하거나 명시
-                await _cacheService.SetAsync(cacheKey, profile, TimeSpan.FromMinutes(15)); 
+                await _cacheService.SetAsync(cacheKey, profile, TimeSpan.FromMinutes(15));
             }
 
             return profile;

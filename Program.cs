@@ -30,6 +30,8 @@ using AuthHive.Core.Interfaces.Infra.UserExperience;
 using Amazon.SimpleEmail;
 using AuthHive.Infrastructure.Services.UserExperience;
 using AuthHive.Auth.Services.ConnectedId;
+using AuthHive.Core.Interfaces.Security;
+
 
 
 
@@ -92,7 +94,7 @@ try
     // Providers
     builder.Services.AddScoped<ITokenProvider, PasetoTokenProvider>();
     builder.Services.AddSingleton<ITokenService, TokenService>();
-    builder.Services.AddScoped<IPasswordProvider, Argon2PasswordProvider>();
+    builder.Services.AddSingleton<IPasswordHashProvider, Argon2PasswordHashProvider>();
 
     // Contexts
     builder.Services.AddScoped<IOrganizationContext, OrganizationContext>();
@@ -103,7 +105,7 @@ try
     builder.Services.AddScoped<IOrganizationService, OrganizationService>();
     builder.Services.AddScoped<IOrganizationHierarchyService, OrganizationHierarchyService>();
     builder.Services.AddScoped<IOrganizationSettingsService, OrganizationSettingsService>();
-    
+
     builder.Services.AddScoped<IPlanRestrictionService, PlanRestrictionService>();
     builder.Services.AddTransient<ICacheWarmupStrategy, PermissionCacheWarmupStrategy>();
     // Handlers

@@ -43,9 +43,6 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 감사 로그 검색 - BaseRepository의 기능을 활용하여 최적화
         /// </summary>
-        /// <summary>
-        /// 감사 로그 검색 - BaseRepository의 기능을 활용하여 최적화
-        /// </summary>
         public async Task<PagedResult<AuditLog>> SearchAsync(
             Guid? organizationId,
             Guid? userId,

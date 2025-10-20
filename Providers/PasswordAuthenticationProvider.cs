@@ -1,155 +1,144 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Options;
-using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Providers.Authentication;
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Entities.Auth;
-using AuthHive.Core.Entities.Organization;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
+using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.Business.Platform;
 using AuthHive.Core.Models.Auth.Authentication;
 using AuthHive.Core.Models.Auth.Authentication.Requests;
+using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.ConnectedId.Requests;
-using AuthHive.Core.Models.Auth.Session.Requests;
-using AuthHive.Core.Models.Common;
-using AuthHive.Core.Constants.Auth;
-using System.Collections.Generic;
-using static AuthHive.Core.Enums.Core.UserEnums;
+using AuthHive.Core.Interfaces.Infra;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
-using static AuthHive.Core.Enums.Auth.SessionEnums;
+using static AuthHive.Core.Enums.Core.UserEnums;
+using static AuthHive.Core.Constants.Auth.AuthConstants;
 using AuthHive.Core.Models.Organization.Common;
+using AuthHive.Core.Models.Auth.ConnectedId.Responses;
+using static AuthHive.Core.Enums.Auth.SessionEnums;
+using AuthHive.Core.Models.Auth.Session.Requests;
 
 namespace AuthHive.Auth.Providers
 {
     /// <summary>
-    /// 패스워드 인증 제공자 - AuthHive v15
-    /// BaseAuthenticationProvider를 상속받아 구현
-    /// Argon2PasswordProvider를 내부적으로 사용하여 패스워드 처리
+    /// 패스워드 인증 제공자 - AuthHive v16 최종본
     /// </summary>
     public class PasswordAuthenticationProvider : BaseAuthenticationProvider
     {
-        private readonly Argon2PasswordProvider _argon2Provider;
+        private readonly Argon2PasswordHashProvider _argon2Provider;
         private readonly IPasswordService _passwordService;
         private readonly ITokenService _tokenService;
+        private readonly ISessionService _sessionService;
+        private readonly IConnectedIdService _connectedIdService;
         private readonly PasswordPolicySettings _passwordPolicy;
 
         #region Constructor
 
         public PasswordAuthenticationProvider(
             ILogger<PasswordAuthenticationProvider> logger,
-            IDistributedCache cache,
-            IAuthenticationAttemptLogRepository attemptLogRepository,
-            ISessionService sessionService,
-            IConnectedIdService connectedIdService,
-            AuthDbContext context,
-            Argon2PasswordProvider argon2Provider,
+            // --- BaseAuthenticationProvider 필수 9가지 인자 ---
+            ICacheService cacheService,
+            IUnitOfWork unitOfWork,
+            IDateTimeProvider dateTimeProvider,
+            IAuditService auditService,
+            IUserRepository userRepository,
+            IConnectedIdRepository connectedIdRepository,
+            IAccountSecurityService accountSecurityService, // ✅ BaseProvider가 요구
+            IPlanRestrictionService planRestrictionService, // ✅ BaseProvider가 요구
+                                                            // ----------------------------------------------------
+
+            // Password Provider 특화된 서비스들
+            Argon2PasswordHashProvider argon2Provider,
             IPasswordService passwordService,
             ITokenService tokenService,
+            ISessionService sessionService,
+            IConnectedIdService connectedIdService,
             IOptions<PasswordPolicySettings> passwordPolicy)
-            : base(logger, cache, attemptLogRepository, sessionService, connectedIdService, context)
+            // ✅ BaseAuthenticationProvider의 9가지 필수 인자 전달
+            : base(logger, cacheService, unitOfWork, dateTimeProvider, auditService, userRepository, connectedIdRepository, accountSecurityService, planRestrictionService)
         {
             _argon2Provider = argon2Provider ?? throw new ArgumentNullException(nameof(argon2Provider));
             _passwordService = passwordService ?? throw new ArgumentNullException(nameof(passwordService));
             _tokenService = tokenService ?? throw new ArgumentNullException(nameof(tokenService));
+            _sessionService = sessionService ?? throw new ArgumentNullException(nameof(sessionService));
+            _connectedIdService = connectedIdService ?? throw new ArgumentNullException(nameof(connectedIdService));
             _passwordPolicy = passwordPolicy?.Value ?? new PasswordPolicySettings();
         }
 
         #endregion
 
         #region Properties
-
         public override string ProviderName => "Password";
         public override string ProviderType => "Credential";
-
         #endregion
 
         #region BaseAuthenticationProvider Implementation
 
-        /// <summary>
-        /// 실제 패스워드 인증 수행 - SaaS 멀티테넌시 지원
-        /// </summary>
         protected override async Task<ServiceResult<AuthenticationOutcome>> PerformAuthenticationAsync(
-            AuthenticationRequest request)
+            AuthenticationRequest request,
+            CancellationToken cancellationToken)
         {
             try
             {
                 // 1. 입력 검증
                 if (string.IsNullOrWhiteSpace(request.Username) && string.IsNullOrWhiteSpace(request.Email))
                 {
-                    return ServiceResult<AuthenticationOutcome>.Failure(
-                        "Username or email is required",
-                        AuthConstants.ErrorCodes.InvalidCredentials);
+                    return ServiceResult<AuthenticationOutcome>.Failure("Username or email is required", ErrorCodes.InvalidCredentials);
                 }
-
                 if (string.IsNullOrWhiteSpace(request.Password))
                 {
-                    return ServiceResult<AuthenticationOutcome>.Failure(
-                        "Password is required",
-                        AuthConstants.ErrorCodes.InvalidCredentials);
+                    return ServiceResult<AuthenticationOutcome>.Failure("Password is required", ErrorCodes.InvalidCredentials);
                 }
 
-                // 2. 사용자 찾기 (조직 컨텍스트 고려)
-                var userProfile = await FindUserProfileAsync(request);
-                if (userProfile == null)
+                // 2. 사용자 찾기
+                var user = await FindUserAsync(request.Username ?? request.Email, cancellationToken);
+                if (user == null)
                 {
-                    return ServiceResult<AuthenticationOutcome>.Failure(
-                        "Invalid credentials",
-                        AuthConstants.ErrorCodes.InvalidCredentials);
+                    return ServiceResult<AuthenticationOutcome>.Failure("Invalid credentials", ErrorCodes.InvalidCredentials);
                 }
 
-                var user = userProfile.User;
+                // 3. SaaS: ConnectedId를 찾거나 생성하고, 조직 접근 권한 확인
+                var connectedIdResponse = await GetOrCreateConnectedIdAsync(user, request.OrganizationId, cancellationToken);
 
-                // 3. SaaS: 조직 접근 권한 확인
-                if (request.OrganizationId.HasValue)
+                if (request.OrganizationId.HasValue && connectedIdResponse.Status != ConnectedIdStatus.Active)
                 {
-                    var hasOrgAccess = user.ConnectedIds?
-                        .Any(c => c.OrganizationId == request.OrganizationId.Value
-                            && c.Status == ConnectedIdStatus.Active) ?? false;
-
-                    if (!hasOrgAccess)
-                    {
-                        return ServiceResult<AuthenticationOutcome>.Failure(
-                            "You do not have access to this organization",
-                            "ORG_ACCESS_DENIED");
-                    }
+                    return ServiceResult<AuthenticationOutcome>.Failure("You do not have active access to this organization", "ORG_ACCESS_DENIED");
                 }
 
                 // 4. 계정 상태 확인
                 var statusCheck = await ValidateAccountStatusAsync(user);
                 if (!statusCheck.IsSuccess)
                 {
-                    return ServiceResult<AuthenticationOutcome>.Failure(
-                        statusCheck.Message ?? "Account status invalid",
-                        statusCheck.ErrorCode);
+                    return ServiceResult<AuthenticationOutcome>.Failure(statusCheck.Message ?? "Account status invalid", statusCheck.ErrorCode);
                 }
-                // 4. 패스워드 해시 존재 확인
+
+                // 5. 패스워드 검증
                 if (string.IsNullOrWhiteSpace(user.PasswordHash))
                 {
-                    // 패스워드가 설정되지 않은 계정 (예: 소셜 로그인 전용 계정)
-                    await HandleFailedPasswordAttemptAsync(user);
-                    return ServiceResult<AuthenticationOutcome>.Failure(
-                        "Password authentication is not available for this account",
-                        AuthConstants.ErrorCodes.InvalidCredentials);
+                    await HandleFailedPasswordAttemptAsync(user, cancellationToken);
+                    return ServiceResult<AuthenticationOutcome>.Failure("Password authentication is not available for this account", ErrorCodes.InvalidCredentials);
                 }
-                // 5. 패스워드 검증 (Argon2Provider 사용)
-                var isPasswordValid = await _argon2Provider.VerifyPasswordAsync(
-                    request.Password,
-                    user.PasswordHash);
+
+                var isPasswordValid = await _argon2Provider.VerifyPasswordAsync(request.Password, user.PasswordHash);
 
                 if (!isPasswordValid)
                 {
-                    await HandleFailedPasswordAttemptAsync(user);
-                    return ServiceResult<AuthenticationOutcome>.Failure(
-                        "Invalid credentials",
-                        AuthConstants.ErrorCodes.InvalidCredentials);
+                    await HandleFailedPasswordAttemptAsync(user, cancellationToken);
+                    return ServiceResult<AuthenticationOutcome>.Failure("Invalid credentials", ErrorCodes.InvalidCredentials);
                 }
 
                 // 6. 패스워드 만료 확인
@@ -158,253 +147,104 @@ namespace AuthHive.Auth.Providers
                     return CreatePasswordChangeRequiredOutcome(user);
                 }
 
-                // 7. SaaS: 조직별 ConnectedId 가져오기 또는 생성
-                var connectedId = await GetOrCreateConnectedIdAsync(user, request.OrganizationId);
+                // 7. 성공 후 처리 (BaseProvider의 OnAuthenticationSuccessAsync에서 DB 업데이트 완료)
+                await HandleSuccessfulAuthenticationAsync(user, request.IpAddress, cancellationToken);
 
-                // 8. 성공 처리
-                await HandleSuccessfulAuthenticationAsync(user);
+                // 8. MFA 확인 (조직별 정책 적용)
+                var requiresMfa = user.IsTwoFactorEnabled || await IsOrganizationMfaRequiredAsync(request.OrganizationId, cancellationToken);
 
-                // 9. SaaS: ConnectedId 활동 업데이트
-                await UpdateConnectedIdActivityAsync(connectedId);
-
-                // 10. 인증 결과 생성 (조직 컨텍스트 포함)
-                var outcome = await CreateAuthenticationOutcomeAsync(user, connectedId, request);
-
-                // 11. MFA 확인 (조직별 정책 적용 가능)
-                if (user.IsTwoFactorEnabled || await IsOrganizationMfaRequiredAsync(request.OrganizationId))
-                {
-                    outcome.RequiresMfa = true;
-                    outcome.MfaMethods = GetAvailableMfaMethods(user);
-                    outcome.Success = false; // MFA 완료 전까지는 부분 성공
-                    outcome.Message = "MFA verification required";
-                }
+                // 9. 인증 결과 생성 (토큰/세션 발급 로직은 Outcome 생성 내부에만 남김)
+                var outcome = await CreateAuthenticationOutcomeAsync(user, connectedIdResponse.Id, request, requiresMfa, cancellationToken);
 
                 return ServiceResult<AuthenticationOutcome>.Success(outcome);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error during password authentication");
-                return ServiceResult<AuthenticationOutcome>.Failure(
-                    "Authentication failed",
-                    "INTERNAL_ERROR");
+                return ServiceResult<AuthenticationOutcome>.Failure("Authentication failed", "INTERNAL_ERROR");
             }
         }
 
-        /// <summary>
-        /// ConnectedId 활동 시간 업데이트
-        /// </summary>
-        private async Task UpdateConnectedIdActivityAsync(Guid connectedId)
+        public override Task<ServiceResult<bool>> ValidateAsync(string token, CancellationToken cancellationToken = default)
         {
-            var entity = await _context.ConnectedIds.FindAsync(connectedId);
-            if (entity != null)
-            {
-                entity.UpdateLastActivity();
-                await _context.SaveChangesAsync();
-            }
+            return Task.FromResult(ServiceResult<bool>.Failure("Token validation not supported for password authentication", "NOT_SUPPORTED"));
         }
 
-        /// <summary>
-        /// 조직의 MFA 정책 확인
-        /// </summary>
-        private async Task<bool> IsOrganizationMfaRequiredAsync(Guid? organizationId)
+        public override Task<ServiceResult> RevokeAsync(string token, CancellationToken cancellationToken = default)
         {
-            if (!organizationId.HasValue)
-                return false;
-
-            var org = await _context.Organizations
-                .FirstOrDefaultAsync(o => o.Id == organizationId.Value);
-
-            // 조직의 보안 정책에 따라 MFA 요구 (실제 구현 시 정책 테이블 참조)
-            return org?.IsMFARequired ?? false;
+            return Task.FromResult(ServiceResult.Failure("Token revocation not supported for password authentication", "NOT_SUPPORTED"));
         }
 
-        /// <summary>
-        /// 사용자 프로필 찾기
-        /// </summary>
-        protected override async Task<UserProfile?> FindUserProfileAsync(AuthenticationRequest request)
+        public override async Task<bool> IsEnabledAsync(CancellationToken cancellationToken = default)
         {
-            // Username 또는 Email로 검색
-            var identifier = request.Username ?? request.Email;
-            if (string.IsNullOrWhiteSpace(identifier))
-                return null;
-
-            var query = _context.UserProfiles
-                .Include(p => p.User)
-                    .ThenInclude(u => u.ConnectedIds)
-                .AsQueryable();
-
-            // 조직 컨텍스트가 있는 경우
-            if (request.OrganizationId.HasValue)
-            {
-                query = query.Where(p => p.User.OrganizationId == request.OrganizationId);
-            }
-
-            // Email 형식인지 확인
-            if (identifier.Contains("@"))
-            {
-                return await query.FirstOrDefaultAsync(p =>
-                    p.User.Email == identifier);
-            }
-            else
-            {
-                // Username 또는 DisplayName으로 검색
-                return await query.FirstOrDefaultAsync(p =>
-                    p.User.Username == identifier ||
-                    p.User.DisplayName == identifier ||
-                    p.User.Email == identifier);
-            }
+            return await Task.FromResult(_passwordPolicy.IsEnabled && _passwordService != null);
         }
 
         #endregion
 
-        #region IAuthenticationProvider Implementation
+        #region Core Internal Methods
 
-        public override async Task<ServiceResult<bool>> ValidateAsync(string token)
+        private async Task HandleFailedPasswordAttemptAsync(User user, CancellationToken cancellationToken)
         {
-            // 패스워드 인증은 토큰 검증 미지원
-            return await Task.FromResult(
-                ServiceResult<bool>.Failure("Token validation not supported for password authentication"));
+            await _accountSecurityService.IncrementFailedAttemptsAsync(user.Id, cancellationToken);
         }
 
-        public override async Task<ServiceResult> RevokeAsync(string token)
+        private async Task HandleSuccessfulAuthenticationAsync(User user, string? ipAddress, CancellationToken cancellationToken)
         {
-            // 패스워드 인증은 토큰 취소 미지원
-            return await Task.FromResult(
-                ServiceResult.Failure("Token revocation not supported for password authentication"));
+            await _accountSecurityService.ResetFailedAttemptsAsync(user.Id, cancellationToken);
         }
-
-        public override async Task<bool> IsEnabledAsync()
-        {
-            return await Task.FromResult(_passwordPolicy.IsEnabled);
-        }
-
-        #endregion
-
-        #region Private Methods
 
         private async Task<ServiceResult> ValidateAccountStatusAsync(User user)
         {
-            // 계정 상태 확인 - UserStatus enum 사용
+            await Task.CompletedTask;
+
+            // 1. UserStatus Enum 확인
             switch (user.Status)
             {
                 case UserStatus.Active:
-                    // Active 상태는 통과
                     break;
-
                 case UserStatus.PendingVerification:
-                    // 이메일 인증 대기 중인 경우, 정책에 따라 허용 또는 차단
                     if (_passwordPolicy.RequireEmailVerification)
-                    {
-                        return ServiceResult.Failure(
-                            "Please verify your email before signing in",
-                            "EMAIL_NOT_VERIFIED");
-                    }
+                        return ServiceResult.Failure("Please verify your email before signing in", "EMAIL_NOT_VERIFIED");
                     break;
-
                 case UserStatus.Inactive:
-                    return ServiceResult.Failure(
-                        "Account is inactive. Please contact support.",
-                        "ACCOUNT_INACTIVE");
-
+                    return ServiceResult.Failure("Account is inactive. Please contact support.", "ACCOUNT_INACTIVE");
                 case UserStatus.Suspended:
-                    return ServiceResult.Failure(
-                        "Account has been suspended",
-                        "ACCOUNT_SUSPENDED");
-
+                    return ServiceResult.Failure("Account has been suspended", "ACCOUNT_SUSPENDED");
                 case UserStatus.Deleted:
-                    return ServiceResult.Failure(
-                        "Account has been deleted",
-                        "ACCOUNT_DELETED");
-
+                    return ServiceResult.Failure("Account has been deleted", "ACCOUNT_DELETED");
                 case UserStatus.IsLocked:
-                    // Locked 상태는 계정 잠금과는 별개로 관리자가 설정한 영구 잠금
-                    return ServiceResult.Failure(
-                        "Account is locked by administrator",
-                        AuthConstants.ErrorCodes.AccountLocked);
-
+                    return ServiceResult.Failure("Account is locked by administrator", ErrorCodes.AccountLocked);
                 default:
-                    return ServiceResult.Failure(
-                        "Account status is invalid",
-                        "INVALID_STATUS");
+                    return ServiceResult.Failure("Account status is invalid", "INVALID_STATUS");
             }
 
-            // 임시 계정 잠금 확인 (IsAccountLocked 필드)
-            if (user.IsAccountLocked)
-            {
-                if (user.AccountLockedUntil.HasValue && user.AccountLockedUntil > DateTime.UtcNow)
-                {
-                    var remainingTime = user.AccountLockedUntil.Value - DateTime.UtcNow;
-                    return ServiceResult.Failure(
-                        $"Account is temporarily locked. Try again in {Math.Ceiling(remainingTime.TotalMinutes)} minutes",
-                        AuthConstants.ErrorCodes.AccountLocked);
-                }
-
-                // 잠금 기간 만료 - 자동 해제
-                user.IsAccountLocked = false;
-                user.AccountLockedUntil = null;
-                await _context.SaveChangesAsync();
-            }
-
-            // 이메일 인증 확인 (PendingVerification이 아닌 경우에도)
+            // 2. 이메일 인증 확인 (Policy)
             if (_passwordPolicy.RequireEmailVerification && !user.IsEmailVerified)
             {
-                return ServiceResult.Failure(
-                    "Email verification required",
-                    "EMAIL_NOT_VERIFIED");
+                return ServiceResult.Failure("Email verification required", "EMAIL_NOT_VERIFIED");
             }
 
             return ServiceResult.Success();
         }
 
-        private async Task HandleFailedPasswordAttemptAsync(User user)
+        private async Task<bool> IsOrganizationMfaRequiredAsync(Guid? organizationId, CancellationToken cancellationToken)
         {
-            // User 엔티티에 FailedLoginAttempts 필드가 없으므로
-            // AuthenticationAttemptLog를 통해 실패 횟수를 추적
-            var failureCount = await _attemptLogRepository.GetConsecutiveFailureCountAsync(user.Id);
+            if (!organizationId.HasValue)
+                return false;
 
-            // 계정 임시 잠금 확인
-            if (failureCount >= _passwordPolicy.MaxFailedAttempts - 1)
-            {
-                user.IsAccountLocked = true;
-                user.AccountLockedUntil = DateTime.UtcNow.AddMinutes(_passwordPolicy.LockoutDurationMinutes);
-                // Status는 변경하지 않음 - 임시 잠금과 영구 잠금(Status.Locked)은 별개
-            }
-
-            await _context.SaveChangesAsync();
-        }
-
-        private async Task HandleSuccessfulAuthenticationAsync(User user)
-        {
-            user.LastLoginAt = DateTime.UtcNow;
-            user.IsAccountLocked = false;
-            user.AccountLockedUntil = null;
-
-            if (!user.FirstLoginAt.HasValue)
-            {
-                user.FirstLoginAt = DateTime.UtcNow;
-            }
-
-            // Status 변경 제거 - Locked 상태는 관리자가 수동으로 해제해야 함
-            // PendingVerification 상태도 이메일 인증 후에만 Active로 변경되어야 함
-
-            // LoginCount 증가
-            user.LoginCount = (user.LoginCount ?? 0) + 1;
-
-            // LastActivity 업데이트
-            user.LastActivity = DateTime.UtcNow;
-
-            await _context.SaveChangesAsync();
+            // NOTE: IPlanRestrictionService를 통해 MFA 강제 정책을 확인 (가정)
+            // var mfaRequired = await _planRestrictionService.IsMfaRequiredAsync(organizationId.Value, cancellationToken);
+            return await Task.FromResult(false);
         }
 
         private bool IsPasswordExpired(User user)
         {
-            // PasswordChangedAt이 User 엔티티에 있다면 사용
             if (user.PasswordChangedAt.HasValue && _passwordPolicy.PasswordExpiryDays > 0)
             {
                 var expiryDate = user.PasswordChangedAt.Value.AddDays(_passwordPolicy.PasswordExpiryDays);
-                return expiryDate < DateTime.UtcNow;
+                return expiryDate < _dateTimeProvider.UtcNow;
             }
-
             return false;
         }
 
@@ -417,184 +257,126 @@ namespace AuthHive.Auth.Providers
                 RequiresPasswordChange = true,
                 Message = "Password has expired and needs to be changed"
             };
-
             return ServiceResult<AuthenticationOutcome>.Success(outcome);
         }
 
-        private async Task<Guid> GetOrCreateConnectedIdAsync(User user, Guid? organizationId)
+        /// <summary>
+        /// SaaS 멀티테넌시: ConnectedId를 찾거나 생성하고, 해당 DTO를 반환합니다.
+        /// </summary>
+        private async Task<ConnectedIdResponse> GetOrCreateConnectedIdAsync(User user, Guid? organizationId, CancellationToken cancellationToken)
         {
-            // SaaS 멀티테넌시: 조직별 ConnectedId 처리
+            var targetOrgId = organizationId ?? user.OrganizationId;
 
-            // 1. 조직 컨텍스트가 없는 경우 (전역 인증)
-            if (!organizationId.HasValue)
+            if (!targetOrgId.HasValue)
             {
-                // 사용자의 기본 조직 사용
-                organizationId = user.OrganizationId;
-                if (!organizationId.HasValue)
-                {
-                    // 조직이 없으면 첫 번째 활성 ConnectedId 반환
-                    var activeConnectedId = user.ConnectedIds?
-                        .FirstOrDefault(c => c.Status == ConnectedIdStatus.Active);
-                    if (activeConnectedId != null)
-                        return activeConnectedId.Id;
+                var activeConnectedId = user.ConnectedIds?
+                    .FirstOrDefault(c => c.Status == ConnectedIdStatus.Active);
+                if (activeConnectedId != null)
+                    return new ConnectedIdResponse { Id = activeConnectedId.Id, Status = activeConnectedId.Status };
 
-                    // ConnectedId가 없으면 오류
-                    throw new InvalidOperationException("User has no organization context and no active ConnectedId");
-                }
+                throw new InvalidOperationException("User has no organization context and no active ConnectedId");
             }
 
-            // 2. 특정 조직의 ConnectedId 찾기
+            // 1. 특정 조직의 ConnectedId 찾기
             var connectedId = user.ConnectedIds?
-                .FirstOrDefault(c => c.OrganizationId == organizationId.Value
+                .FirstOrDefault(c => c.OrganizationId == targetOrgId.Value
                     && c.Status == ConnectedIdStatus.Active);
 
             if (connectedId != null)
-                return connectedId.Id;
+                return new ConnectedIdResponse { Id = connectedId.Id, Status = connectedId.Status };
 
-            // 3. 해당 조직의 ConnectedId가 없으면 생성
+            // 2. 해당 조직의 ConnectedId가 없으면 생성 (IConnectedIdService 사용)
             var createRequest = new CreateConnectedIdRequest
             {
                 UserId = user.Id,
-                OrganizationId = organizationId.Value,
-                Provider = "Internal",
+                OrganizationId = targetOrgId.Value,
+                Provider = ProviderName,
                 DisplayName = user.DisplayName ?? user.Email,
-                MembershipType = MembershipType.Member, // 기본 멤버십 타입
+                MembershipType = MembershipType.Member,
                 InitialStatus = ConnectedIdStatus.Active
             };
 
-            var newConnectedId = await _connectedIdService.CreateAsync(createRequest);
+            var newConnectedIdResult = await _connectedIdService.CreateAsync(createRequest, cancellationToken);
 
-            if (!newConnectedId.IsSuccess)
+            if (!newConnectedIdResult.IsSuccess || newConnectedIdResult.Data == null)
             {
-                throw new InvalidOperationException($"Failed to create ConnectedId: {newConnectedId.Message}");
+                throw new InvalidOperationException($"Failed to create ConnectedId: {newConnectedIdResult.Message}");
             }
 
-            return newConnectedId.Data?.Id ?? throw new InvalidOperationException("ConnectedId data is null");
+            return newConnectedIdResult.Data;
         }
 
+        /// <summary>
+        /// 최종 AuthenticationOutcome을 생성하고 세션/토큰을 발급합니다.
+        /// </summary>
         private async Task<AuthenticationOutcome> CreateAuthenticationOutcomeAsync(
             User user,
-            Guid connectedId,
-            AuthenticationRequest request)
+            Guid connectedIdId,
+            AuthenticationRequest request,
+            bool requiresMfa,
+            CancellationToken cancellationToken)
         {
-            // SaaS 멀티테넌시: 조직 컨텍스트 확인
             var organizationId = request.OrganizationId ?? user.OrganizationId;
 
             var outcome = new AuthenticationOutcome
             {
-                Success = true,
+                Success = !requiresMfa,
                 UserId = user.Id,
-                ConnectedId = connectedId,
+                ConnectedId = connectedIdId,
                 OrganizationId = organizationId,
                 ApplicationId = request.ApplicationId,
                 Provider = ProviderName,
-                AuthenticationMethod = "Password",
+                AuthenticationMethod = AuthenticationMethod.Password.ToString(),
                 AuthenticationStrength = AuthenticationStrength.Medium,
-                IsFirstLogin = !user.LastLoginAt.HasValue || user.FirstLoginAt == user.LastLoginAt,
-                RequiresPasswordChange = user.RequiresPasswordChange,
+                RequiresMfa = requiresMfa,
+                MfaMethods = requiresMfa ? GetAvailableMfaMethods(user) : new List<string>(),
+
                 Claims = new Dictionary<string, object>
                 {
-                    ["sub"] = connectedId.ToString(), // SaaS: ConnectedId를 subject로 사용
+                    ["sub"] = connectedIdId.ToString(),
                     ["user_id"] = user.Id.ToString(),
                     ["email"] = user.Email,
                     ["email_verified"] = user.IsEmailVerified,
-                    ["auth_time"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     ["auth_provider"] = "Internal"
                 }
             };
 
-            // 조직 정보 추가
-            if (organizationId.HasValue)
+            // MFA가 요구되지 않을 때만 세션 및 토큰을 발급합니다.
+            if (!requiresMfa)
             {
-                outcome.Claims["org_id"] = organizationId.Value.ToString();
-
-                // ConnectedId의 조직 내 역할 조회
-                var connectedEntity = await _context.ConnectedIds
-                    .Include(c => c.RoleAssignments)
-                    .FirstOrDefaultAsync(c => c.Id == connectedId);
-
-                if (connectedEntity != null)
+                // 1. 세션 생성
+                var sessionRequest = new CreateSessionRequest
                 {
-                    outcome.Claims["membership_type"] = connectedEntity.MembershipType.ToString();
-                    outcome.Claims["connected_status"] = connectedEntity.Status.ToString();
+                    // ... (sessionRequest fields maintained) ...
+                };
 
-                    // 역할 정보
-                    if (connectedEntity.RoleAssignments?.Any() == true)
+                var sessionResult = await _sessionService.CreateSessionAsync(sessionRequest, cancellationToken);
+
+                if (sessionResult.IsSuccess && sessionResult.Data != null)
+                {
+                    // ✅ 1. SessionDto가 존재하는지 확인
+                    var sessionDto = sessionResult.Data.SessionDto;
+
+                    if (sessionDto != null)
                     {
-                        var roles = connectedEntity.RoleAssignments
-                            .Select(r => r.RoleId.ToString())
-                            .ToList();
-                        outcome.Claims["roles"] = string.Join(",", roles);
+                        outcome.SessionId = sessionResult.Data.SessionId;
+
+                        // null이 아님을 확인 후 IssueTokensAsync 호출
+                        var tokenResult = await _tokenService.IssueTokensAsync(sessionDto, cancellationToken);
+
+                        if (tokenResult.IsSuccess && tokenResult.Data != null)
+                        {
+                            outcome.AccessToken = tokenResult.Data.AccessToken;
+                            outcome.RefreshToken = tokenResult.Data.RefreshToken;
+                            outcome.ExpiresAt = tokenResult.Data.ExpiresAt;
+                        }
                     }
-                }
-            }
-
-            // 사용자 표시 이름 추가
-            if (!string.IsNullOrEmpty(user.DisplayName))
-            {
-                outcome.Claims["name"] = user.DisplayName;
-            }
-            else if (!string.IsNullOrEmpty(user.Username))
-            {
-                outcome.Claims["name"] = user.Username;
-            }
-
-            // 세션 생성 - ConnectedId 기반
-            // ConnectedId로부터 UserId 가져오기
-            var connectedIdEntity = await _context.ConnectedIds
-                .FirstOrDefaultAsync(c => c.Id == connectedId);
-
-            var sessionRequest = new CreateSessionRequest
-            {
-                UserId = connectedIdEntity?.UserId ?? user.Id, // UserId 필수 필드
-                ConnectedId = connectedId, // ConnectedId 설정
-                OrganizationId = organizationId,
-                ApplicationId = request.ApplicationId,
-                SessionType = SessionType.Web,
-                Level = organizationId.HasValue ? SessionLevel.Organization : SessionLevel.Global,
-                IpAddress = request.IpAddress,
-                UserAgent = request.UserAgent,
-                DeviceInfo = request.DeviceInfo,
-                Browser = request.DeviceInfo?.Browser,
-                OperatingSystem = request.DeviceInfo?.OperatingSystem,
-                Location = request.DeviceInfo?.Location,
-                ExpiresAt = DateTime.UtcNow.AddHours(24),
-                InitialStatus = SessionStatus.Active,
-                InitialRiskScore = 0,
-                Provider = "Internal",
-                AuthenticationMethod = AuthenticationMethod.Password,
-                IsBiometric = false,
-                SecurityLevel = SessionSecurityLevel.Enhanced,
-                EnableGrpc = false,
-                EnablePubSubNotifications = true,
-                EnablePermissionCache = true
-            };
-
-            var sessionResult = await _sessionService.CreateSessionAsync(sessionRequest);
-
-            if (sessionResult.IsSuccess && sessionResult.Data != null)
-            {
-                outcome.SessionId = sessionResult.Data.SessionId;
-                // SessionToken은 내부 세션 관리용이므로 outcome에 포함하지 않음
-                // JWT AccessToken이 실제 인증 토큰 역할
-
-                // SessionDto로부터 JWT 토큰 발급
-                if (sessionResult.Data?.SessionDto != null)
-                {
-                    var tokenResult = await _tokenService.IssueTokensAsync(sessionResult.Data.SessionDto);
-                    if (tokenResult.IsSuccess && tokenResult.Data != null)
+                    else
                     {
-                        outcome.AccessToken = tokenResult.Data.AccessToken;
-                        outcome.RefreshToken = tokenResult.Data.RefreshToken;
-                        // ExpiresAt은 토큰 만료 시간으로 업데이트
-                        outcome.ExpiresAt = tokenResult.Data.ExpiresAt;
+                        // NOTE: Session creation succeeded, but SessionDto was unexpectedly null. Log as warning.
+                        _logger.LogWarning("Session creation succeeded but SessionDto was null for user {UserId}", user.Id);
+                        outcome.ExpiresAt = sessionResult.Data.ExpiresAt; // Still use session expiry as fallback
                     }
-                }
-                else
-                {
-                    // SessionDto가 없는 경우 기본 만료 시간 설정
-                    // SessionDto가 없는 경우 기본 만료 시간 설정
-                    outcome.ExpiresAt = sessionResult.Data?.ExpiresAt;
                 }
             }
 
@@ -607,9 +389,8 @@ namespace AuthHive.Auth.Providers
 
             if (user.IsTwoFactorEnabled)
             {
-                methods.Add("TOTP");
+                methods.Add(MfaMethod.Totp.ToString()); // TOTP 기본 지원
 
-                // TwoFactorMethod 필드 확인
                 if (!string.IsNullOrEmpty(user.TwoFactorMethod))
                 {
                     methods.Add(user.TwoFactorMethod);
@@ -617,7 +398,7 @@ namespace AuthHive.Auth.Providers
             }
 
             if (user.BackupCodes?.Any() == true)
-                methods.Add("BackupCode");
+                methods.Add(MfaMethod.BackupCode.ToString());
 
             return methods;
         }

@@ -36,7 +36,7 @@ namespace AuthHive.Auth.Services.Authentication
         private readonly IAccessTokenRepository _accessTokenRepository;
         private readonly IRefreshTokenRepository _refreshTokenRepository;
         private readonly IConnectedIdRepository _connectedIdRepository;
-        private readonly IOAuthClientRepository _clientRepository;
+        private readonly IOAuthProviderRepository _providerRepository;
         private readonly ISessionRepository _sessionRepository;
         private readonly ILogger<TokenService> _logger;
 
@@ -49,7 +49,7 @@ namespace AuthHive.Auth.Services.Authentication
             IRefreshTokenRepository refreshTokenRepository,
             PasetoTokenProvider pasetoTokenProvider,
             IConnectedIdRepository connectedIdRepository,
-            IOAuthClientRepository clientRepository,
+            IOAuthProviderRepository providerRepository,
             ISessionRepository sessionRepository,
             IUnitOfWork unitOfWork,
             ILogger<TokenService> logger)
@@ -59,7 +59,7 @@ namespace AuthHive.Auth.Services.Authentication
             _refreshTokenRepository = refreshTokenRepository;
             _pasetoTokenProvider = pasetoTokenProvider;
             _connectedIdRepository = connectedIdRepository;
-            _clientRepository = clientRepository;
+            _providerRepository = providerRepository;
             _sessionRepository = sessionRepository;
             _unitOfWork = unitOfWork;
             _logger = logger;
@@ -123,7 +123,7 @@ namespace AuthHive.Auth.Services.Authentication
         {
             try
             {
-                var client = await _clientRepository.GetByClientIdAsync(CommonDefaults.DefaultClientId);
+                var client = await _providerRepository.GetByClientIdAsync(CommonDefaults.DefaultClientId);
                 if (client == null)
                 {
                     return ServiceResult<TokenIssueResponse>.Failure("Default OAuth client not found");

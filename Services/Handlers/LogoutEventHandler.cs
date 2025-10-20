@@ -914,7 +914,7 @@ namespace AuthHive.Auth.Services.Handlers
                     eventType,
                     description,
                     userId,
-                    MapSecuritySeverityToAuditSeverity(severity),
+                    MapSecuritySeverityToAuditEventSeverity(severity),
                     new Dictionary<string, object>
                     {
                         ["EventType"] = eventType,
@@ -927,7 +927,7 @@ namespace AuthHive.Auth.Services.Handlers
             }
         }
 
-        private AuditEventSeverity MapSecuritySeverityToAuditSeverity(SecuritySeverity severity)
+        private AuditEventSeverity MapSecuritySeverityToAuditEventSeverity(SecuritySeverity severity)
         {
             return severity switch
             {

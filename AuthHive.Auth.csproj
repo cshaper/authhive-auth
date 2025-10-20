@@ -42,5 +42,6 @@
   <ItemGroup>
     <ProjectReference Include="..\AuthHive.Core\AuthHive.Core.csproj" />
     <ProjectReference Include="..\AuthHive.Infrastructure\AuthHive.Infrastructure.csproj" />
+    <ProjectReference Include="..\AuthHive.Infra\AuthHive.Infra.csproj" />
   </ItemGroup>
 </Project>

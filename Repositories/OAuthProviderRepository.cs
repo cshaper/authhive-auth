@@ -1,4 +1,3 @@
-// Path: AuthHive.Auth/Repositories/OAuthProviderRepository.cs
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,24 +9,22 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
-using AuthHive.Core.Interfaces.Organization.Service;
-using AuthHive.Core.Models.Auth.Authentication;
+using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// OAuth Provider 설정 관리 리포지토리 구현
+    /// OAuth Provider 설정 관리 리포지토리 구현 (v17 - 리팩토링)
     /// 외부 OAuth Provider (Google, GitHub 등) 연동 설정 관리
-    /// OAuthClient 엔티티를 활용하되, 특별한 prefix로 구분
     /// </summary>
-    public class OAuthProviderRepository : BaseRepository<OAuthClient>, IOAuthProviderRepository
+    public class OAuthProviderRepository : BaseRepository<OAuthProvider>, IOAuthProviderRepository
     {
         private readonly ILogger<OAuthProviderRepository> _logger;
-        private const string PROVIDER_PREFIX = "PROVIDER_"; // 외부 Provider 구분용 prefix
+        private readonly IDateTimeProvider _dateTimeProvider;
         
         // JSON 직렬화 옵션
         private static readonly JsonSerializerOptions _jsonOptions = new()
@@ -38,13 +35,16 @@ namespace AuthHive.Auth.Repositories
 
         public OAuthProviderRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache,
+            ICacheService cacheService,
+            IDateTimeProvider dateTimeProvider,
             ILogger<OAuthProviderRepository> logger) 
-            : base(context, organizationContext, cache)
+            : base(context, cacheService)
         {
+            _dateTimeProvider = dateTimeProvider;
             _logger = logger;
         }
+
+        protected override bool IsOrganizationScopedEntity() => true;
 
         /// <summary>
         /// OAuth Provider 설정 저장 (신규 또는 업데이트)
@@ -57,49 +57,36 @@ namespace AuthHive.Auth.Repositories
         {
             try
             {
-                // Provider별 고유 ClientId 생성 (내부 관리용)
-                var internalClientId = $"{PROVIDER_PREFIX}{organizationId}_{provider}";
-                
-                // 기존 설정 확인
-                var existingEntity = await Query()
-                    .FirstOrDefaultAsync(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId == internalClientId &&
-                        !o.IsDeleted, 
-                        cancellationToken);
+                var providerName = provider.ToString();
+                var existingEntity = await QueryForOrganization(organizationId)
+                    .FirstOrDefaultAsync(o => o.Provider == providerName, cancellationToken);
 
                 if (existingEntity != null)
                 {
                     // 업데이트
-                    MapToEntity(configuration, existingEntity, provider);
-                    existingEntity.UpdatedAt = DateTime.UtcNow;
-                    await UpdateAsync(existingEntity);
+                    MapToEntity(configuration, existingEntity);
+                    existingEntity.UpdatedAt = _dateTimeProvider.UtcNow;
+                    await UpdateAsync(existingEntity, cancellationToken);
                 }
                 else
                 {
                     // 신규 생성
-                    existingEntity = new OAuthClient
+                    existingEntity = new OAuthProvider
                     {
                         Id = Guid.NewGuid(),
                         OrganizationId = organizationId,
-                        ApplicationId = Guid.Empty, // Provider 설정은 특정 App과 무관
-                        ClientId = internalClientId,
-                        ClientName = $"{provider} OAuth Provider",
-                        Description = $"External OAuth Provider Configuration for {provider}",
-                        ClientType = OAuthClientType.Public, // 외부 Provider는 Public으로 표시
-                        CreatedAt = DateTime.UtcNow,
-                        IsActive = configuration.IsEnabled,
-                        RequireClientSecret = !string.IsNullOrEmpty(configuration.ClientSecret)
+                        Provider = providerName,
+                        CreatedAt = _dateTimeProvider.UtcNow,
+                        CreatedBy = Guid.Empty // TODO: 현재 요청을 수행하는 사용자 ID를 주입받아 설정해야 합니다.
                     };
                     
-                    MapToEntity(configuration, existingEntity, provider);
-                    await AddAsync(existingEntity);
+                    MapToEntity(configuration, existingEntity);
+                    await AddAsync(existingEntity, cancellationToken);
                 }
 
                 await _context.SaveChangesAsync(cancellationToken);
                 
-                // 캐시 무효화
-                InvalidateCache(organizationId, provider);
+                await InvalidateCacheAsync(organizationId, provider, cancellationToken);
                 
                 _logger.LogInformation(
                     "OAuth provider {Provider} configuration saved for organization {OrganizationId}", 
@@ -126,32 +113,25 @@ namespace AuthHive.Auth.Repositories
         {
             try
             {
-                // 캐시 확인
                 var cacheKey = GetCacheKey(organizationId, provider);
-                if (_cache != null && _cache.TryGetValue(cacheKey, out OAuthProviderConfiguration? cached))
+                if (_cacheService != null)
                 {
-                    return cached;
+                    var cached = await _cacheService.GetAsync<OAuthProviderConfiguration>(cacheKey, cancellationToken);
+                    if (cached != null) return cached;
                 }
 
-                var internalClientId = $"{PROVIDER_PREFIX}{organizationId}_{provider}";
-                
-                var entity = await Query()
+                var providerName = provider.ToString();
+                var entity = await QueryForOrganization(organizationId)
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId == internalClientId &&
-                        !o.IsDeleted, 
-                        cancellationToken);
+                    .FirstOrDefaultAsync(o => o.Provider == providerName, cancellationToken);
 
-                if (entity == null)
-                    return null;
+                if (entity == null) return null;
 
-                var configuration = MapToConfiguration(entity, provider);
+                var configuration = MapToConfiguration(entity);
                 
-                // 캐시 저장
-                if (_cache != null && configuration != null)
+                if (_cacheService != null && configuration != null)
                 {
-                    _cache.Set(cacheKey, configuration, TimeSpan.FromMinutes(15));
+                    await _cacheService.SetAsync(cacheKey, configuration, TimeSpan.FromMinutes(15), cancellationToken);
                 }
 
                 return configuration;
@@ -175,36 +155,18 @@ namespace AuthHive.Auth.Repositories
         {
             try
             {
-                var query = Query()
-                    .AsNoTracking()
-                    .Where(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId.StartsWith(PROVIDER_PREFIX) &&
-                        !o.IsDeleted);
+                var query = QueryForOrganization(organizationId).AsNoTracking();
 
                 if (!includeDisabled)
                 {
-                    query = query.Where(o => o.IsActive);
+                    query = query.Where(o => o.IsEnabled);
                 }
 
                 var entities = await query.ToListAsync(cancellationToken);
                 
-                var configurations = new List<OAuthProviderConfiguration>();
-                foreach (var entity in entities)
-                {
-                    // ClientId에서 Provider 추출
-                    var provider = ExtractProviderFromClientId(entity.ClientId);
-                    if (provider.HasValue)
-                    {
-                        var config = MapToConfiguration(entity, provider.Value);
-                        if (config != null)
-                        {
-                            configurations.Add(config);
-                        }
-                    }
-                }
-
-                return configurations;
+                return entities.Select(MapToConfiguration)
+                               .Where(config => config != null)
+                               .ToList()!;
             }
             catch (Exception ex)
             {
@@ -225,30 +187,16 @@ namespace AuthHive.Auth.Repositories
         {
             try
             {
-                var internalClientId = $"{PROVIDER_PREFIX}{organizationId}_{provider}";
-                
-                var entity = await Query()
-                    .FirstOrDefaultAsync(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId == internalClientId &&
-                        !o.IsDeleted, 
-                        cancellationToken);
+                var providerName = provider.ToString();
+                var entity = await QueryForOrganization(organizationId)
+                    .FirstOrDefaultAsync(o => o.Provider == providerName, cancellationToken);
 
-                if (entity == null)
-                {
-                    return false;
-                }
+                if (entity == null) return false;
 
-                // Soft delete
-                entity.IsDeleted = true;
-                entity.DeletedAt = DateTime.UtcNow;
-                entity.IsActive = false;
-                
-                await UpdateAsync(entity);
+                await DeleteAsync(entity, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
 
-                // 캐시 무효화
-                InvalidateCache(organizationId, provider);
+                await InvalidateCacheAsync(organizationId, provider, cancellationToken);
 
                 _logger.LogInformation(
                     "OAuth provider {Provider} configuration removed for organization {OrganizationId}", 
@@ -265,293 +213,122 @@ namespace AuthHive.Auth.Repositories
             }
         }
 
-        /// <summary>
-        /// OAuth Provider 활성화/비활성화
-        /// </summary>
-        public async Task<bool> SetEnabledAsync(
-            Guid organizationId,
-            SSOProvider provider,
-            bool isEnabled,
-            CancellationToken cancellationToken = default)
+        public async Task<bool> SetEnabledAsync(Guid organizationId, SSOProvider provider, bool isEnabled, CancellationToken cancellationToken = default)
         {
-            try
-            {
-                var internalClientId = $"{PROVIDER_PREFIX}{organizationId}_{provider}";
-                
-                var entity = await Query()
-                    .FirstOrDefaultAsync(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId == internalClientId &&
-                        !o.IsDeleted, 
-                        cancellationToken);
+            var providerName = provider.ToString();
+            var entity = await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(o => o.Provider == providerName, cancellationToken);
 
-                if (entity == null)
+            if (entity == null) return false;
+
+            entity.IsEnabled = isEnabled;
+            entity.UpdatedAt = _dateTimeProvider.UtcNow;
+            
+            await UpdateAsync(entity, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+            
+            await InvalidateCacheAsync(organizationId, provider, cancellationToken);
+            
+            return true;
+        }
+
+        public async Task<int> GetEnabledProviderCountAsync(Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            return await QueryForOrganization(organizationId)
+                .CountAsync(o => o.IsEnabled, cancellationToken);
+        }
+        
+        public async Task<OAuthProviderConfiguration?> GetByClientIdAsync(string clientId, CancellationToken cancellationToken = default)
+        {
+             var entity = await Query()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.ClientId == clientId && p.IsEnabled, cancellationToken);
+
+             return entity != null ? MapToConfiguration(entity) : null;
+        }
+
+        public async Task<Dictionary<SSOProvider, int>> GetProviderCountsAsync(Guid organizationId, CancellationToken cancellationToken = default)
+        {
+            var counts = await QueryForOrganization(organizationId)
+                .GroupBy(p => p.Provider)
+                .Select(g => new { ProviderName = g.Key, Count = g.Count() })
+                .ToListAsync(cancellationToken);
+            
+            var result = new Dictionary<SSOProvider, int>();
+            foreach(var item in counts)
+            {
+                if(Enum.TryParse<SSOProvider>(item.ProviderName, true, out var providerEnum))
                 {
-                    return false;
+                    result[providerEnum] = item.Count;
                 }
-
-                entity.IsActive = isEnabled;
-                entity.UpdatedAt = DateTime.UtcNow;
-                
-                await UpdateAsync(entity);
-                await _context.SaveChangesAsync(cancellationToken);
-
-                // 캐시 무효화
-                InvalidateCache(organizationId, provider);
-
-                _logger.LogInformation(
-                    "OAuth provider {Provider} {Status} for organization {OrganizationId}", 
-                    provider, isEnabled ? "enabled" : "disabled", organizationId);
-
-                return true;
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, 
-                    "Failed to set OAuth provider {Provider} enabled status for organization {OrganizationId}", 
-                    provider, organizationId);
-                throw;
-            }
+            return result;
         }
 
-        /// <summary>
-        /// 조직의 활성화된 Provider 개수 조회
-        /// </summary>
-        public async Task<int> GetEnabledProviderCountAsync(
-            Guid organizationId,
-            CancellationToken cancellationToken = default)
+        public async Task<OAuthProvider?> GetByProviderNameAsync(Guid organizationId, string providerName, CancellationToken cancellationToken = default)
         {
-            try
-            {
-                return await Query()
-                    .CountAsync(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId.StartsWith(PROVIDER_PREFIX) &&
-                        o.IsActive && 
-                        !o.IsDeleted, 
-                        cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, 
-                    "Failed to get enabled provider count for organization {OrganizationId}", 
-                    organizationId);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Client ID로 설정 조회 (OAuth 콜백 처리용)
-        /// 실제 외부 Provider의 Client ID로 조회
-        /// </summary>
-        public async Task<OAuthProviderConfiguration?> GetByClientIdAsync(
-            string clientId,
-            CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                // 실제 Client ID가 저장된 Description 필드에서 검색
-                var entity = await Query()
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(o => 
-                        o.ClientId.StartsWith(PROVIDER_PREFIX) &&
-                        o.Description != null && 
-                        o.Description.Contains(clientId) &&
-                        !o.IsDeleted, 
-                        cancellationToken);
-
-                if (entity == null)
-                    return null;
-
-                var provider = ExtractProviderFromClientId(entity.ClientId);
-                return provider.HasValue ? MapToConfiguration(entity, provider.Value) : null;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, 
-                    "Failed to get OAuth configuration for client ID {ClientId}", 
-                    clientId);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Provider별 설정 개수 조회
-        /// </summary>
-        public async Task<Dictionary<SSOProvider, int>> GetProviderCountsAsync(
-            Guid organizationId,
-            CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var entities = await Query()
-                    .Where(o => 
-                        o.OrganizationId == organizationId && 
-                        o.ClientId.StartsWith(PROVIDER_PREFIX) &&
-                        o.IsActive && 
-                        !o.IsDeleted)
-                    .Select(o => o.ClientId)
-                    .ToListAsync(cancellationToken);
-
-                var result = new Dictionary<SSOProvider, int>();
-                
-                foreach (var clientId in entities)
-                {
-                    var provider = ExtractProviderFromClientId(clientId);
-                    if (provider.HasValue)
-                    {
-                        result[provider.Value] = result.GetValueOrDefault(provider.Value) + 1;
-                    }
-                }
-
-                return result;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, 
-                    "Failed to get provider counts for organization {OrganizationId}", 
-                    organizationId);
-                throw;
-            }
+            return await QueryForOrganization(organizationId)
+                .FirstOrDefaultAsync(o => o.Provider.Equals(providerName, StringComparison.OrdinalIgnoreCase), cancellationToken);
         }
 
         #region Private Helper Methods
 
-        /// <summary>
-        /// Configuration을 Entity로 매핑
-        /// </summary>
-        private void MapToEntity(OAuthProviderConfiguration config, OAuthClient entity, SSOProvider provider)
+        private void MapToEntity(OAuthProviderConfiguration config, OAuthProvider entity)
         {
-            // 실제 Client ID와 Secret은 특별한 방식으로 저장
-            var configData = new Dictionary<string, object>
+            entity.ClientId = config.ClientId;
+            entity.ClientSecretEncrypted = config.ClientSecret ?? string.Empty; // TODO: Encrypt the secret before saving
+            entity.IsEnabled = config.IsEnabled;
+            entity.Scopes = string.Join(" ", config.Scopes);
+
+            // AdditionalSettings에서 Endpoint 정보 추출
+            config.AdditionalSettings.TryGetValue("AuthorizationEndpoint", out var authEndpoint);
+            config.AdditionalSettings.TryGetValue("TokenEndpoint", out var tokenEndpoint);
+            config.AdditionalSettings.TryGetValue("UserInfoEndpoint", out var userInfoEndpoint);
+
+            entity.AuthorizationEndpoint = authEndpoint ?? string.Empty;
+            entity.TokenEndpoint = tokenEndpoint ?? string.Empty;
+            entity.UserInfoEndpoint = userInfoEndpoint ?? string.Empty;
+        }
+
+        private OAuthProviderConfiguration? MapToConfiguration(OAuthProvider entity)
+        {
+            if (!Enum.TryParse<SSOProvider>(entity.Provider, true, out var providerEnum))
             {
-                ["provider"] = provider.ToString(),
-                ["clientId"] = config.ClientId,
-                ["redirectUri"] = config.RedirectUri ?? string.Empty
+                _logger.LogWarning("Could not parse SSOProvider from string: {Provider}", entity.Provider);
+                return null;
+            }
+
+            return new OAuthProviderConfiguration
+            {
+                Provider = providerEnum,
+                IsEnabled = entity.IsEnabled,
+                ClientId = entity.ClientId,
+                ClientSecret = entity.ClientSecretEncrypted, // TODO: Decrypt the secret before returning
+                Scopes = entity.Scopes.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList(),
+                AdditionalSettings = new Dictionary<string, string>
+                {
+                    { "AuthorizationEndpoint", entity.AuthorizationEndpoint },
+                    { "TokenEndpoint", entity.TokenEndpoint },
+                    { "UserInfoEndpoint", entity.UserInfoEndpoint }
+                }
             };
-
-            // ClientSecretHash에 실제 Client Secret 저장 (암호화 필요)
-            entity.ClientSecretHash = config.ClientSecret; // TODO: 실제로는 암호화 필요
-            
-            // Scopes를 AllowedScopes에 저장
-            entity.AllowedScopes = JsonSerializer.Serialize(config.Scopes, _jsonOptions);
-            
-            // AdditionalSettings를 AllowedGrantTypes에 저장 (필드 재활용)
-            entity.AllowedGrantTypes = JsonSerializer.Serialize(config.AdditionalSettings, _jsonOptions);
-            
-            // RedirectUri 저장
-            if (!string.IsNullOrEmpty(config.RedirectUri))
-            {
-                entity.RedirectUris = JsonSerializer.Serialize(new[] { config.RedirectUri }, _jsonOptions);
-            }
-            
-            // 실제 Client ID를 Description에 저장 (검색용)
-            entity.Description = $"ClientId:{config.ClientId}|Provider:{provider}";
-            
-            entity.IsActive = config.IsEnabled;
         }
 
-        /// <summary>
-        /// Entity를 Configuration으로 매핑
-        /// </summary>
-        private OAuthProviderConfiguration? MapToConfiguration(OAuthClient entity, SSOProvider provider)
+        private async Task InvalidateCacheAsync(Guid organizationId, SSOProvider provider, CancellationToken cancellationToken = default)
         {
-            try
+            if (_cacheService != null)
             {
-                var config = new OAuthProviderConfiguration
-                {
-                    Provider = provider,
-                    IsEnabled = entity.IsActive
-                };
-
-                // ClientSecretHash에서 Client Secret 복원 (복호화 필요)
-                config.ClientSecret = entity.ClientSecretHash; // TODO: 실제로는 복호화 필요
-                
-                // Description에서 실제 Client ID 추출
-                if (!string.IsNullOrEmpty(entity.Description))
-                {
-                    var parts = entity.Description.Split('|');
-                    foreach (var part in parts)
-                    {
-                        if (part.StartsWith("ClientId:"))
-                        {
-                            config.ClientId = part.Substring("ClientId:".Length);
-                            break;
-                        }
-                    }
-                }
-
-                // Scopes 복원
-                if (!string.IsNullOrEmpty(entity.AllowedScopes))
-                {
-                    config.Scopes = JsonSerializer.Deserialize<List<string>>(entity.AllowedScopes, _jsonOptions) 
-                        ?? new List<string>();
-                }
-
-                // RedirectUri 복원
-                if (!string.IsNullOrEmpty(entity.RedirectUris))
-                {
-                    var uris = JsonSerializer.Deserialize<List<string>>(entity.RedirectUris, _jsonOptions);
-                    config.RedirectUri = uris?.FirstOrDefault();
-                }
-
-                // AdditionalSettings 복원
-                if (!string.IsNullOrEmpty(entity.AllowedGrantTypes))
-                {
-                    config.AdditionalSettings = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                        entity.AllowedGrantTypes, _jsonOptions) 
-                        ?? new Dictionary<string, string>();
-                }
-
-                return config;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to map entity to configuration for provider {Provider}", provider);
-                return null;
+                var cacheKey = GetCacheKey(organizationId, provider);
+                await _cacheService.RemoveAsync(cacheKey, cancellationToken);
             }
         }
 
-        /// <summary>
-        /// ClientId에서 Provider 추출
-        /// </summary>
-        private SSOProvider? ExtractProviderFromClientId(string clientId)
-        {
-            if (!clientId.StartsWith(PROVIDER_PREFIX))
-                return null;
-
-            var parts = clientId.Substring(PROVIDER_PREFIX.Length).Split('_');
-            if (parts.Length >= 2)
-            {
-                if (Enum.TryParse<SSOProvider>(parts[1], out var provider))
-                {
-                    return provider;
-                }
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// 캐시 키 생성
-        /// </summary>
         private string GetCacheKey(Guid organizationId, SSOProvider provider)
         {
             return $"OAuthProvider:{organizationId}:{provider}";
         }
 
-        /// <summary>
-        /// 캐시 무효화
-        /// </summary>
-        private void InvalidateCache(Guid organizationId, SSOProvider provider)
-        {
-            if (_cache != null)
-            {
-                var cacheKey = GetCacheKey(organizationId, provider);
-                _cache.Remove(cacheKey);
-            }
-        }
-
         #endregion
     }
 }
+

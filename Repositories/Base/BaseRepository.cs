@@ -42,7 +42,6 @@ namespace AuthHive.Auth.Repositories.Base
 
         #region Cache Key Generation
 
-        #region Cache Key Generation
         // 🚨 CS0121 해결: Guid만 받는 GetCacheKey 메서드가 중복되지 않도록 주의
 
         /// <summary>
@@ -66,7 +65,6 @@ namespace AuthHive.Auth.Repositories.Base
         /// <param name="id">엔티티의 고유 ID</param>
         /// <param name="organizationId">엔티티가 속한 조직의 ID</param>
         protected virtual string GetCacheKey(Guid id, Guid organizationId) => $"{typeof(TEntity).Name}:{organizationId}:{id}";
-        #endregion
         #endregion
 
         #region Core Query Methods
@@ -252,6 +250,23 @@ namespace AuthHive.Auth.Repositories.Base
             }
             _dbSet.UpdateRange(entities);
             await Task.WhenAll(tasks);
+        }
+        /// <summary>
+        /// 데이터베이스에 연결할 수 있는지 확인하여 리포지토리의 상태를 점검합니다.
+        /// </summary>
+        public virtual async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // CanConnectAsync는 데이터베이스에 대한 실제 연결을 시도하여
+                // 연결 문자열, 권한, 네트워크 상태 등을 종합적으로 확인하는 가장 확실한 방법입니다.
+                return await _context.Database.CanConnectAsync(cancellationToken);
+            }
+            catch (Exception)
+            {
+                // 예외 발생 시 (예: 네트워크 오류, DB 서버 다운) 비정상 상태로 간주합니다.
+                return false;
+            }
         }
         #endregion
 

@@ -1,42 +1,42 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
-using AuthHive.Auth.Services.Context;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Organization.Service;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Infra;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// 신뢰할 수 있는 장치 Repository 구현체 - AuthHive v15
-    /// MFA에서 사용되는 신뢰할 수 있는 장치 관리를 담당합니다.
+    /// 신뢰할 수 있는 장치 Repository 구현체 - v17 (ICacheService 및 CancellationToken 적용)
     /// </summary>
     public class TrustedDeviceRepository : BaseRepository<TrustedDevice>, ITrustedDeviceRepository
     {
         private const string CACHE_KEY_PREFIX = "trusted_device_";
         private readonly TimeSpan _cacheExpiration = TimeSpan.FromMinutes(5);
+        private readonly IDateTimeProvider _dateTimeProvider;
 
         public TrustedDeviceRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache = null)
-            : base(context, organizationContext, cache)
+            ICacheService cacheService,
+            IDateTimeProvider dateTimeProvider)
+            : base(context, cacheService)
         {
+            _dateTimeProvider = dateTimeProvider;
         }
+
+        protected override bool IsOrganizationScopedEntity() => true;
 
         #region 기본 조회 메서드
 
-        /// <summary>
-        /// 특정 사용자의 모든 신뢰할 수 있는 장치 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetByUserIdAsync(Guid userId, bool includeInactive = false)
+        public async Task<IEnumerable<TrustedDevice>> GetByUserIdAsync(Guid userId, bool includeInactive = false, CancellationToken cancellationToken = default)
         {
             var query = Query()
                 .Include(td => td.User)
@@ -49,13 +49,10 @@ namespace AuthHive.Auth.Repositories
 
             return await query
                 .OrderByDescending(td => td.LastUsedAt ?? td.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 특정 조직의 모든 신뢰할 수 있는 장치 조회 (관리자용)
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetByOrganizationIdAsync(Guid organizationId, bool includeInactive = false)
+        public async Task<IEnumerable<TrustedDevice>> GetByOrganizationIdAsync(Guid organizationId, bool includeInactive = false, CancellationToken cancellationToken = default)
         {
             IQueryable<TrustedDevice> query = QueryForOrganization(organizationId)
                 .Include(td => td.User);
@@ -67,94 +64,76 @@ namespace AuthHive.Auth.Repositories
 
             return await query
                 .OrderByDescending(td => td.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
-        /// <summary>
-        /// 장치 ID로 신뢰할 수 있는 장치 조회
-        /// </summary>
-        public async Task<TrustedDevice?> GetByDeviceIdAsync(string deviceId, Guid userId)
+
+        public async Task<TrustedDevice?> GetByDeviceIdAsync(string deviceId, Guid userId, CancellationToken cancellationToken = default)
         {
             var cacheKey = $"{CACHE_KEY_PREFIX}device_{deviceId}_{userId}";
 
-            if (_cache != null && _cache.TryGetValue<TrustedDevice>(cacheKey, out var cached))
+            // [수정] 캐시 서비스가 주입되었는지 확인 후 사용 (CS8602 경고 해결)
+            if (_cacheService != null)
             {
-                return cached;
+                var cached = await _cacheService.GetAsync<TrustedDevice>(cacheKey, cancellationToken);
+                if (cached != null)
+                {
+                    // 캐시에 데이터가 있으면 DB 조회 없이 바로 반환합니다.
+                    return cached;
+                }
             }
-
+            
             var device = await Query()
                 .Include(td => td.User)
-                .FirstOrDefaultAsync(td => td.DeviceId == deviceId && td.UserId == userId);
+                .FirstOrDefaultAsync(td => td.DeviceId == deviceId && td.UserId == userId, cancellationToken);
 
-            if (device != null && _cache != null)
+            // [수정] DB 조회 후 캐시 서비스가 유효할 때만 캐시에 저장합니다.
+            if (device != null && _cacheService != null)
             {
-                _cache.Set(cacheKey, device, _cacheExpiration);
+                await _cacheService.SetAsync(cacheKey, device, _cacheExpiration, cancellationToken);
             }
 
             return device;
         }
 
-        /// <summary>
-        /// 장치 지문으로 신뢰할 수 있는 장치 조회
-        /// </summary>
-        public async Task<TrustedDevice?> GetByFingerprintAsync(string fingerprint, Guid userId)
+        public async Task<TrustedDevice?> GetByFingerprintAsync(string fingerprint, Guid userId, CancellationToken cancellationToken = default)
         {
             return await Query()
                 .Include(td => td.User)
-                .FirstOrDefaultAsync(td => td.DeviceFingerprint == fingerprint && td.UserId == userId);
+                .FirstOrDefaultAsync(td => td.DeviceFingerprint == fingerprint && td.UserId == userId, cancellationToken);
         }
 
         #endregion
 
         #region 검증 메서드
 
-        /// <summary>
-        /// 장치가 신뢰할 수 있는지 검증
-        /// </summary>
-        public async Task<bool> IsDeviceTrustedAsync(string deviceId, string fingerprint, Guid userId)
+        public async Task<bool> IsDeviceTrustedAsync(string deviceId, string fingerprint, Guid userId, CancellationToken cancellationToken = default)
         {
-            var device = await GetByDeviceIdAsync(deviceId, userId);
-
-            if (device == null)
-                return false;
-
-            return device.IsValid &&
-                   device.DeviceFingerprint == fingerprint &&
-                   device.IsActive &&
-                   !device.IsExpired;
+            var device = await GetByDeviceIdAsync(deviceId, userId, cancellationToken);
+            if (device == null) return false;
+            return device.IsValid && device.DeviceFingerprint == fingerprint;
         }
 
-        /// <summary>
-        /// 장치가 유효한지 확인 (활성화 + 만료되지 않음)
-        /// </summary>
-        public async Task<bool> IsDeviceValidAsync(string deviceId, Guid userId)
+        public async Task<bool> IsDeviceValidAsync(string deviceId, Guid userId, CancellationToken cancellationToken = default)
         {
-            var device = await GetByDeviceIdAsync(deviceId, userId);
+            var device = await GetByDeviceIdAsync(deviceId, userId, cancellationToken);
             return device?.IsValid ?? false;
         }
 
-        /// <summary>
-        /// 사용자의 신뢰할 수 있는 장치 개수 조회
-        /// </summary>
-        public async Task<int> GetTrustedDeviceCountAsync(Guid userId, bool onlyActive = true)
+        public async Task<int> GetTrustedDeviceCountAsync(Guid userId, bool onlyActive = true, CancellationToken cancellationToken = default)
         {
             var query = Query().Where(td => td.UserId == userId);
 
             if (onlyActive)
             {
                 query = query.Where(td => td.IsActive && !td.IsDeleted);
-
-                // 만료된 장치 제외
-                var now = DateTime.UtcNow;
+                var now = _dateTimeProvider.UtcNow;
                 query = query.Where(td => td.ExpiresAt == null || td.ExpiresAt > now);
             }
 
-            return await query.CountAsync();
+            return await query.CountAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 장치 ID 중복 확인
-        /// </summary>
-        public async Task<bool> IsDeviceIdDuplicateAsync(string deviceId, Guid userId, Guid? excludeId = null)
+        public async Task<bool> IsDeviceIdDuplicateAsync(string deviceId, Guid userId, Guid? excludeId = null, CancellationToken cancellationToken = default)
         {
             var query = Query()
                 .Where(td => td.DeviceId == deviceId && td.UserId == userId);
@@ -164,248 +143,175 @@ namespace AuthHive.Auth.Repositories
                 query = query.Where(td => td.Id != excludeId.Value);
             }
 
-            return await query.AnyAsync();
+            return await query.AnyAsync(cancellationToken);
         }
 
         #endregion
 
         #region 상태 관리 메서드
 
-        /// <summary>
-        /// 장치 마지막 사용 정보 업데이트
-        /// </summary>
         public async Task<bool> UpdateLastUsedAsync(
-            string deviceId,
-            Guid userId,
-            string? ipAddress = null,
-            string? userAgent = null,
-            string? location = null)
+            string deviceId, Guid userId, string? ipAddress = null,
+            string? userAgent = null, string? location = null, CancellationToken cancellationToken = default)
         {
-            var device = await GetByDeviceIdAsync(deviceId, userId);
+            var deviceToUpdate = await Query().FirstOrDefaultAsync(d => d.DeviceId == deviceId && d.UserId == userId, cancellationToken);
+            if (deviceToUpdate == null) return false;
 
-            if (device == null)
-                return false;
-
-            device.UpdateLastUsed(ipAddress, location);
-
-            // 캐시 무효화
-            InvalidateDeviceCache(deviceId, userId);
-
-            await UpdateAsync(device);
-            await _context.SaveChangesAsync();
+            // [수정] 엔티티의 UpdateLastUsed 호출과 별도로 UserAgent도 업데이트합니다.
+            deviceToUpdate.UpdateLastUsed(ipAddress, location);
+            if (!string.IsNullOrEmpty(userAgent))
+            {
+                deviceToUpdate.UserAgent = userAgent;
+            }
+            
+            await UpdateAsync(deviceToUpdate, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
 
             return true;
         }
 
-        /// <summary>
-        /// 장치 활성화 상태 변경
-        /// </summary>
-        public async Task<bool> UpdateActiveStatusAsync(Guid id, bool isActive, string? reason = null)
+        public async Task<bool> UpdateActiveStatusAsync(Guid id, bool isActive, string? reason = null, CancellationToken cancellationToken = default)
         {
-            var device = await GetByIdAsync(id);
-
-            if (device == null)
-                return false;
+            var device = await GetByIdAsync(id, cancellationToken);
+            if (device == null) return false;
 
             if (isActive)
                 device.Activate();
             else
                 device.Deactivate();
 
-            // 메타데이터에 사유 기록
-            if (!string.IsNullOrEmpty(reason))
-            {
-                var metadata = string.IsNullOrEmpty(device.Metadata)
-                    ? new Dictionary<string, object>()
-                    : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(device.Metadata) ?? new();
+            // Metadata update logic can be added here if needed
 
-                metadata["statusChangeReason"] = reason;
-                metadata["statusChangedAt"] = DateTime.UtcNow;
-
-                device.Metadata = System.Text.Json.JsonSerializer.Serialize(metadata);
-            }
-
-            await UpdateAsync(device);
-            await _context.SaveChangesAsync();
+            await UpdateAsync(device, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+            
+            await InvalidateDeviceCacheAsync(device.DeviceId, device.UserId, cancellationToken);
 
             return true;
         }
-
-        /// <summary>
-        /// 장치 신뢰 레벨 변경
-        /// </summary>
-        public async Task<bool> UpdateTrustLevelAsync(Guid id, int trustLevel)
+        
+        public async Task<bool> UpdateTrustLevelAsync(Guid id, int trustLevel, CancellationToken cancellationToken = default)
         {
-            var device = await GetByIdAsync(id);
+            var device = await GetByIdAsync(id, cancellationToken);
+            if (device == null) return false;
 
-            if (device == null)
-                return false;
-
-            // 메타데이터에 신뢰 레벨 저장
             var metadata = string.IsNullOrEmpty(device.Metadata)
                 ? new Dictionary<string, object>()
-                : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(device.Metadata) ?? new();
+                : JsonSerializer.Deserialize<Dictionary<string, object>>(device.Metadata) ?? new();
 
             metadata["trustLevel"] = trustLevel;
-            metadata["trustLevelUpdatedAt"] = DateTime.UtcNow;
+            metadata["trustLevelUpdatedAt"] = _dateTimeProvider.UtcNow;
+            device.Metadata = JsonSerializer.Serialize(metadata);
 
-            device.Metadata = System.Text.Json.JsonSerializer.Serialize(metadata);
-
-            await UpdateAsync(device);
-            await _context.SaveChangesAsync();
+            await UpdateAsync(device, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+            await InvalidateDeviceCacheAsync(device.DeviceId, device.UserId, cancellationToken);
 
             return true;
         }
 
-        /// <summary>
-        /// 장치 만료일 설정
-        /// </summary>
-        public async Task<bool> SetExpirationAsync(Guid id, DateTime? expiresAt)
+        public async Task<bool> SetExpirationAsync(Guid id, DateTime? expiresAt, CancellationToken cancellationToken = default)
         {
-            var device = await GetByIdAsync(id);
-
-            if (device == null)
-                return false;
+            var device = await GetByIdAsync(id, cancellationToken);
+            if (device == null) return false;
 
             if (expiresAt.HasValue)
                 device.SetExpiration(expiresAt.Value);
             else
                 device.RemoveExpiration();
 
-            await UpdateAsync(device);
-            await _context.SaveChangesAsync();
+            await UpdateAsync(device, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+            await InvalidateDeviceCacheAsync(device.DeviceId, device.UserId, cancellationToken);
 
             return true;
         }
-
+        
         #endregion
-
+        
         #region 일괄 처리 메서드
-
-        /// <summary>
-        /// 사용자의 모든 신뢰할 수 있는 장치 비활성화
-        /// </summary>
-        public async Task<int> DeactivateAllUserDevicesAsync(Guid userId, string? reason = null)
+        
+        public async Task<int> DeactivateAllUserDevicesAsync(Guid userId, string? reason = null, CancellationToken cancellationToken = default)
         {
-            var devices = await GetByUserIdAsync(userId, true);
-            var count = 0;
-
-            foreach (var device in devices.Where(d => d.IsActive))
+            var devices = await GetByUserIdAsync(userId, true, cancellationToken);
+            var activeDevices = devices.Where(d => d.IsActive).ToList();
+            if (!activeDevices.Any()) return 0;
+            
+            foreach (var device in activeDevices)
             {
                 device.Deactivate();
-
-                // 메타데이터에 사유 기록
-                if (!string.IsNullOrEmpty(reason))
-                {
-                    var metadata = string.IsNullOrEmpty(device.Metadata)
-                        ? new Dictionary<string, object>()
-                        : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(device.Metadata) ?? new();
-
-                    metadata["deactivationReason"] = reason;
-                    metadata["deactivatedAt"] = DateTime.UtcNow;
-
-                    device.Metadata = System.Text.Json.JsonSerializer.Serialize(metadata);
-                }
-
-                count++;
+                // Metadata update logic can be added here
             }
 
-            if (count > 0)
+            await UpdateRangeAsync(activeDevices, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var cacheKeys = activeDevices.Select(d => $"{CACHE_KEY_PREFIX}device_{d.DeviceId}_{d.UserId}").ToList();
+            if (_cacheService != null)
             {
-                await UpdateRangeAsync(devices);
-                await _context.SaveChangesAsync();
+                await _cacheService.RemoveMultipleAsync(cacheKeys, cancellationToken);
             }
-
-            return count;
+            
+            return activeDevices.Count;
         }
 
-        /// <summary>
-        /// 만료된 장치들 정리
-        /// </summary>
-        public async Task<int> CleanupExpiredDevicesAsync(Guid? organizationId = null)
+        public async Task<int> CleanupExpiredDevicesAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
-            var now = DateTime.UtcNow;
-            IQueryable<TrustedDevice> query;
-
-            if (organizationId.HasValue)
-            {
-                query = QueryForOrganization(organizationId.Value);
-            }
-            else
-            {
-                query = _dbSet.Where(td => !td.IsDeleted);
-            }
-
+            var now = _dateTimeProvider.UtcNow;
+            IQueryable<TrustedDevice> query = organizationId.HasValue ? QueryForOrganization(organizationId.Value) : Query();
+            
             var expiredDevices = await query
-                .Where(td => td.ExpiresAt != null && td.ExpiresAt < now)
-                .ToListAsync();
+                .Where(td => td.IsActive && td.ExpiresAt != null && td.ExpiresAt < now)
+                .ToListAsync(cancellationToken);
+
+            if (!expiredDevices.Any()) return 0;
 
             foreach (var device in expiredDevices)
             {
                 device.Deactivate();
             }
-
-            if (expiredDevices.Any())
+            
+            await UpdateRangeAsync(expiredDevices, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+            
+            if (_cacheService != null)
             {
-                await UpdateRangeAsync(expiredDevices);
-                await _context.SaveChangesAsync();
+                 var cacheKeys = expiredDevices.Select(d => $"{CACHE_KEY_PREFIX}device_{d.DeviceId}_{d.UserId}").ToList();
+                 await _cacheService.RemoveMultipleAsync(cacheKeys, cancellationToken);
             }
 
             return expiredDevices.Count;
         }
 
-        /// <summary>
-        /// 오래된 비활성 장치들 삭제
-        /// </summary>
-        public async Task<int> DeleteOldInactiveDevicesAsync(int olderThanDays = 90, Guid? organizationId = null)
+        public async Task<int> DeleteOldInactiveDevicesAsync(int olderThanDays = 90, Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
-            var cutoffDate = DateTime.UtcNow.AddDays(-olderThanDays);
-            IQueryable<TrustedDevice> query;
-
-            if (organizationId.HasValue)
-            {
-                query = QueryForOrganization(organizationId.Value);
-            }
-            else
-            {
-                query = _dbSet.Where(td => !td.IsDeleted);
-            }
+            var cutoffDate = _dateTimeProvider.UtcNow.AddDays(-olderThanDays);
+            IQueryable<TrustedDevice> query = organizationId.HasValue ? QueryForOrganization(organizationId.Value) : Query();
 
             var oldDevices = await query
-                .Where(td => !td.IsActive &&
-                            (td.LastUsedAt == null || td.LastUsedAt < cutoffDate) &&
-                            td.CreatedAt < cutoffDate)
-                .ToListAsync();
-
+                 .Where(td => !td.IsActive && (td.LastUsedAt == null || td.LastUsedAt < cutoffDate) && td.CreatedAt < cutoffDate)
+                 .ToListAsync(cancellationToken);
+            
             if (oldDevices.Any())
             {
-                await DeleteRangeAsync(oldDevices);
-                await _context.SaveChangesAsync();
+                await DeleteRangeAsync(oldDevices, cancellationToken);
+                await _context.SaveChangesAsync(cancellationToken);
             }
 
             return oldDevices.Count;
         }
-
+        
         #endregion
+        
+        #region 보안/감사/고급 검색
 
-        #region 보안 및 감사 메서드
-
-        /// <summary>
-        /// 의심스러운 장치 활동 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetSuspiciousDevicesAsync(
-            Guid userId,
-            DateTime fromDate,
-            DateTime toDate)
+        public async Task<IEnumerable<TrustedDevice>> GetSuspiciousDevicesAsync(Guid userId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
         {
-            // 짧은 시간 내 여러 장치 등록, IP 변경이 잦은 장치 등
             var devices = await Query()
-                .Where(td => td.UserId == userId &&
-                            td.CreatedAt >= fromDate &&
-                            td.CreatedAt <= toDate)
-                .ToListAsync();
+                .Where(td => td.UserId == userId && td.CreatedAt >= fromDate && td.CreatedAt <= toDate)
+                .ToListAsync(cancellationToken);
 
-            // 동일 시간대(1시간)에 여러 장치가 등록된 경우
+            // Example of a simple suspicion rule: more than 2 devices registered within the same hour
             var suspiciousDevices = devices
                 .GroupBy(d => new { Date = d.CreatedAt.Date, Hour = d.CreatedAt.Hour })
                 .Where(g => g.Count() > 2)
@@ -415,161 +321,121 @@ namespace AuthHive.Auth.Repositories
             return suspiciousDevices;
         }
 
-        /// <summary>
-        /// 동일한 IP에서 등록된 장치들 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetDevicesByIpAddressAsync(
-            string ipAddress,
-            Guid organizationId,
-            int dayRange = 30)
+        public async Task<IEnumerable<TrustedDevice>> GetDevicesByIpAddressAsync(string ipAddress, Guid organizationId, int dayRange = 30, CancellationToken cancellationToken = default)
         {
-            var fromDate = DateTime.UtcNow.AddDays(-dayRange);
+            var fromDate = _dateTimeProvider.UtcNow.AddDays(-dayRange);
 
             return await QueryForOrganization(organizationId)
-                .Where(td => td.IpAddress == ipAddress &&
-                            td.CreatedAt >= fromDate)
+                .Where(td => td.IpAddress == ipAddress && td.CreatedAt >= fromDate)
                 .Include(td => td.User)
                 .OrderByDescending(td => td.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
-
-        /// <summary>
-        /// 최근 등록된 장치들 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetRecentlyRegisteredDevicesAsync(
-            Guid organizationId,
-            int hours = 24)
+        
+        public async Task<IEnumerable<TrustedDevice>> GetRecentlyRegisteredDevicesAsync(Guid organizationId, int hours = 24, CancellationToken cancellationToken = default)
         {
-            var fromDate = DateTime.UtcNow.AddHours(-hours);
+            var fromDate = _dateTimeProvider.UtcNow.AddHours(-hours);
 
             return await QueryForOrganization(organizationId)
                 .Where(td => td.CreatedAt >= fromDate)
                 .Include(td => td.User)
                 .OrderByDescending(td => td.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 사용자별 장치 등록 통계
-        /// </summary>
-        public async Task<Dictionary<Guid, int>> GetDeviceRegistrationStatsAsync(
-            Guid organizationId,
-            DateTime fromDate,
-            DateTime toDate)
+        public async Task<Dictionary<Guid, int>> GetDeviceRegistrationStatsAsync(Guid organizationId, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(td => td.CreatedAt >= fromDate && td.CreatedAt <= toDate)
                 .GroupBy(td => td.UserId)
                 .Select(g => new { UserId = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.UserId, x => x.Count);
+                .ToDictionaryAsync(x => x.UserId, x => x.Count, cancellationToken);
         }
 
-        #endregion
-
-        #region 고급 검색 메서드
-
-        /// <summary>
-        /// 장치 유형별 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetByDeviceTypeAsync(string deviceType, Guid organizationId)
+        public async Task<IEnumerable<TrustedDevice>> GetByDeviceTypeAsync(string deviceType, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Include(td => td.User)
                 .Where(td => td.DeviceType == deviceType)
                 .OrderByDescending(td => td.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 브라우저별 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetByBrowserAsync(string browser, Guid organizationId)
+        public async Task<IEnumerable<TrustedDevice>> GetByBrowserAsync(string browser, Guid organizationId, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Include(td => td.User)
                 .Where(td => td.Browser == browser)
                 .OrderByDescending(td => td.CreatedAt)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 신뢰 레벨별 조회
-        /// </summary>
-        public async Task<IEnumerable<TrustedDevice>> GetByTrustLevelAsync(int trustLevel, Guid organizationId)
+        public async Task<IEnumerable<TrustedDevice>> GetByTrustLevelAsync(int trustLevel, Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // 메타데이터에서 trustLevel 필터링
             var allDevices = await QueryForOrganization(organizationId)
                 .Include(td => td.User)
-                .ToListAsync();
+                .ToListAsync(cancellationToken);
 
             return allDevices.Where(td =>
             {
-                if (string.IsNullOrEmpty(td.Metadata))
-                    return false;
-
-                var metadata = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(td.Metadata);
-                if (metadata != null && metadata.TryGetValue("trustLevel", out var level))
+                if (string.IsNullOrEmpty(td.Metadata)) return false;
+                try
                 {
-                    if (level is System.Text.Json.JsonElement jsonElement)
+                    var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(td.Metadata);
+                    if (metadata != null && metadata.TryGetValue("trustLevel", out var levelObj) && levelObj is JsonElement levelElement)
                     {
-                        return jsonElement.GetInt32() == trustLevel;
+                        if (levelElement.TryGetInt32(out int currentTrustLevel))
+                        {
+                            return currentTrustLevel == trustLevel;
+                        }
                     }
                 }
+                catch (JsonException) { /* Malformed JSON, ignore */ }
                 return false;
             }).ToList();
         }
 
-        /// <summary>
-        /// 복합 조건으로 장치 검색
-        /// </summary>
+        // [수정] 인터페이스와 시그니처를 일치시키기 위해 organizationId 매개변수 제거
         public async Task<IEnumerable<TrustedDevice>> SearchDevicesAsync(
-            Guid? userId = null,
-            string? deviceType = null,
-            string? browser = null,
-            bool? isActive = null,
-            int? trustLevel = null,
-            DateTime? fromDate = null,
-            DateTime? toDate = null)
+            Guid? userId = null, string? deviceType = null, 
+            string? browser = null, bool? isActive = null, int? trustLevel = null, 
+            DateTime? fromDate = null, DateTime? toDate = null, CancellationToken cancellationToken = default)
         {
-            IQueryable<TrustedDevice> query = Query()
-                .Include(td => td.User);
+            // [수정] 조직 ID가 없으므로 기본 Query()에서 시작
+            IQueryable<TrustedDevice> query = Query().Include(td => td.User);
 
             if (userId.HasValue)
                 query = query.Where(td => td.UserId == userId.Value);
-
             if (!string.IsNullOrEmpty(deviceType))
                 query = query.Where(td => td.DeviceType == deviceType);
-
             if (!string.IsNullOrEmpty(browser))
                 query = query.Where(td => td.Browser == browser);
-
             if (isActive.HasValue)
                 query = query.Where(td => td.IsActive == isActive.Value);
-
             if (fromDate.HasValue)
                 query = query.Where(td => td.CreatedAt >= fromDate.Value);
-
             if (toDate.HasValue)
                 query = query.Where(td => td.CreatedAt <= toDate.Value);
 
-            var devices = await query.ToListAsync();
+            var devices = await query.ToListAsync(cancellationToken);
 
-            // 신뢰 레벨 필터링 (메타데이터 기반)
             if (trustLevel.HasValue)
             {
                 devices = devices.Where(td =>
                 {
-                    if (string.IsNullOrEmpty(td.Metadata))
-                        return false;
-
-                    var metadata = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(td.Metadata);
-                    if (metadata != null && metadata.TryGetValue("trustLevel", out var level))
+                    if (string.IsNullOrEmpty(td.Metadata)) return false;
+                    try
                     {
-                        if (level is System.Text.Json.JsonElement jsonElement)
+                        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(td.Metadata);
+                        if (metadata != null && metadata.TryGetValue("trustLevel", out var levelObj) && levelObj is JsonElement levelElement)
                         {
-                            return jsonElement.GetInt32() == trustLevel.Value;
+                            if (levelElement.TryGetInt32(out int currentTrustLevel))
+                            {
+                                return currentTrustLevel == trustLevel.Value;
+                            }
                         }
                     }
+                    catch (JsonException) { /* Malformed JSON, ignore */ }
                     return false;
                 }).ToList();
             }
@@ -581,17 +447,14 @@ namespace AuthHive.Auth.Repositories
 
         #region Helper Methods
 
-        /// <summary>
-        /// 장치 캐시 무효화
-        /// </summary>
-        private void InvalidateDeviceCache(string deviceId, Guid userId)
+        private async Task InvalidateDeviceCacheAsync(string deviceId, Guid userId, CancellationToken cancellationToken = default)
         {
-            if (_cache == null) return;
-
+            if (_cacheService == null) return;
             var cacheKey = $"{CACHE_KEY_PREFIX}device_{deviceId}_{userId}";
-            _cache.Remove(cacheKey);
+            await _cacheService.RemoveAsync(cacheKey, cancellationToken);
         }
 
         #endregion
     }
 }
+
