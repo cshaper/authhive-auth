@@ -10,12 +10,15 @@ using System.Linq.Expressions;
 using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
 using AuthHive.Core.Entities.Business.Platform;
 using AuthHive.Core.Models.Auth.Authentication;
+using AuthHive.Core.Entities.Base;
+using AuthHive.Core.Interfaces.Base;
 
 namespace AuthHive.Auth.Data.Context
 {
     public class AuthDbContext : DbContext
     {
         private readonly IHttpContextAccessor? _httpContextAccessor;
+        private readonly IPrincipalAccessor _principalAccessor;
         // 테넌트 격리를 위한 현재 조직 ID
         public Guid? CurrentOrganizationId { get; set; }
         public Guid? CurrentConnectedId { get; set; }
@@ -49,7 +52,7 @@ namespace AuthHive.Auth.Data.Context
         #endregion
 
         #region OAuth & Tokens
-        public DbSet<OAuthClient> OAuthClients { get; set; }
+        public DbSet<OAuthProvider> OAuthProviders { get; set; }
         public DbSet<AccessToken> AccessTokens { get; set; }
         public DbSet<RefreshToken> RefreshTokens { get; set; }
         #endregion
@@ -82,9 +85,14 @@ namespace AuthHive.Auth.Data.Context
         public DbSet<SystemConfiguration> SystemConfigurations { get; set; }
         #endregion
 
-        public AuthDbContext(DbContextOptions<AuthDbContext> options, IHttpContextAccessor? httpContextAccessor = null)
+        // [FIX CS8618] IPrincipalAccessor를 생성자 주입으로 받아 _principalAccessor 필드를 초기화합니다.
+        public AuthDbContext(
+            DbContextOptions<AuthDbContext> options,
+            IPrincipalAccessor principalAccessor, // <-- 수정됨: IPrincipalAccessor 주입 추가
+            IHttpContextAccessor? httpContextAccessor = null)
             : base(options)
         {
+            _principalAccessor = principalAccessor; // <-- 수정됨: 필드 초기화
             _httpContextAccessor = httpContextAccessor;
         }
 
@@ -97,13 +105,17 @@ namespace AuthHive.Auth.Data.Context
                     .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
             }
         }
+        // AuthDbContext.cs
+
+        // (IPrincipalAccessor _principalAccessor; 필드 및 생성자 주입 필요)
+
 
         public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
             // Auditable 엔티티 자동 처리
             var entries = ChangeTracker.Entries()
                 .Where(e => e.Entity is Core.Entities.Base.AuditableEntity ||
-                           e.Entity is Core.Entities.Base.SystemAuditableEntity);
+                            e.Entity is Core.Entities.Base.SystemAuditableEntity);
 
             foreach (var entry in entries)
             {
@@ -164,6 +176,32 @@ namespace AuthHive.Auth.Data.Context
         {
             base.OnModelCreating(modelBuilder);
 
+            // 1. 현재 사용자의 OrganizationId 가져오기
+            // 참고: 이 값은 HTTP 요청 컨텍스트에서만 유효하며, 백그라운드 작업 시에는
+            // 수동으로 필터를 비활성화해야 할 수 있습니다. (예: .IgnoreQueryFilters())
+            var currentOrganizationId = _principalAccessor.OrganizationId; // IPrincipalAccessor에서 가져온다고 가정
+
+            // 2. AuditableEntity를 상속하는 모든 엔티티를 찾습니다.
+            var organizationScopedEntities = modelBuilder.Model.GetEntityTypes()
+                .Where(e => typeof(AuditableEntity).IsAssignableFrom(e.ClrType));
+
+            foreach (var entityType in organizationScopedEntities)
+            {
+                // 람다 파라미터 생성 (예: e)
+                var parameter = Expression.Parameter(entityType.ClrType, "e");
+
+                // 속성 접근 (예: e.OrganizationId)
+                var property = Expression.Property(parameter, nameof(AuditableEntity.OrganizationId));
+
+                // 값 비교 (예: e.OrganizationId == currentOrganizationId)
+                var body = Expression.Equal(property, Expression.Constant(currentOrganizationId));
+
+                // 람다 생성 (예: e => e.OrganizationId == currentOrganizationId)
+                var lambda = Expression.Lambda(body, parameter);
+
+                // 3. 해당 엔티티에 Global Query Filter 설정
+                modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+            }
             // PostgreSQL 스키마 설정
             modelBuilder.HasDefaultSchema("auth");
 
@@ -224,7 +262,7 @@ namespace AuthHive.Auth.Data.Context
                 // Create a unique index on PlanKey to prevent duplicate plan identifiers.
                 // This is critical for the business logic.
                 entity.HasIndex(e => e.PlanKey)
-                      .IsUnique();
+                    .IsUnique();
 
                 // Create an index on PlanType for faster filtering by plan type.
                 entity.HasIndex(e => e.PlanType);
@@ -232,67 +270,67 @@ namespace AuthHive.Auth.Data.Context
                 entity.HasIndex(e => new { e.IsAvailable, e.DisplayOrder });
                 // --- Property Configurations ---
                 entity.Property(e => e.PlanKey)
-                      .IsRequired()
-                      .HasMaxLength(50);
+                    .IsRequired()
+                    .HasMaxLength(50);
 
                 entity.Property(e => e.PlanName)
-                      .IsRequired()
-                      .HasMaxLength(100);
+                    .IsRequired()
+                    .HasMaxLength(100);
 
                 entity.Property(e => e.MonthlyPrice)
-                      .HasColumnType("decimal(18,2)")
-                      .IsRequired();
+                    .HasColumnType("decimal(18,2)")
+                    .IsRequired();
 
                 entity.Property(e => e.YearlyPrice)
-                      .HasColumnType("decimal(18,2)");
+                    .HasColumnType("decimal(18,2)");
 
                 entity.Property(e => e.ExcessMAURate)
-                      .HasColumnType("decimal(18,4)")
-                      .IsRequired();
+                    .HasColumnType("decimal(18,4)")
+                    .IsRequired();
 
                 entity.Property(e => e.ExcessStorageRate)
-                      .HasColumnType("decimal(18,4)")
-                      .IsRequired();
+                    .HasColumnType("decimal(18,4)")
+                    .IsRequired();
 
                 entity.Property(e => e.RateLimitHandling)
-                      .IsRequired()
-                      .HasMaxLength(50);
+                    .IsRequired()
+                    .HasMaxLength(50);
 
                 // --- Default Values ---
 
                 entity.Property(e => e.SignupBonusPoints)
-                      .IsRequired()
-                      .HasDefaultValue(0);
+                    .IsRequired()
+                    .HasDefaultValue(0);
 
                 entity.Property(e => e.TrialDays)
-                      .IsRequired()
-                      .HasDefaultValue(0);
+                    .IsRequired()
+                    .HasDefaultValue(0);
 
                 entity.Property(e => e.DisplayOrder)
-                      .IsRequired()
-                      .HasDefaultValue(0);
+                    .IsRequired()
+                    .HasDefaultValue(0);
 
                 entity.Property(e => e.IsAvailable)
-                      .IsRequired()
-                      .HasDefaultValue(true);
+                    .IsRequired()
+                    .HasDefaultValue(true);
 
                 entity.Property(e => e.IsRecommended)
-                      .IsRequired()
-                      .HasDefaultValue(false);
+                    .IsRequired()
+                    .HasDefaultValue(false);
 
                 // --- Relationships ---
 
                 // Defines the one-to-many relationship between OrganizationPlan and PlanFeature.
                 entity.HasMany(p => p.Features)
-                      .WithOne(f => f.Plan)
-                      .HasForeignKey(f => f.PlanId)
-                      .OnDelete(DeleteBehavior.Cascade); // If a plan is deleted, its features are also deleted.
+                    .WithOne(f => f.Plan)
+                    .HasForeignKey(f => f.PlanId)
+                    .OnDelete(DeleteBehavior.Cascade); // If a plan is deleted, its features are also deleted.
 
                 // Defines the one-to-many relationship between OrganizationPlan and PlanSubscription.
                 entity.HasMany(p => p.Subscriptions)
-                      .WithOne(s => s.Plan)
-                      .HasForeignKey(s => s.PlanId)
-                      .OnDelete(DeleteBehavior.Restrict); // Prevent deleting a plan if it has active subscriptions.
+                    .WithOne(s => s.Plan)
+                    .HasForeignKey(s => s.PlanId)
+                    .OnDelete(DeleteBehavior.Restrict); // Prevent deleting a plan if it has active subscriptions.
 
                 // Note: For PostgreSQL, the [Column(TypeName = "jsonb")] attribute is often sufficient.
                 // If you need more specific JSON handling, you can add it here.
@@ -498,7 +536,8 @@ namespace AuthHive.Auth.Data.Context
                 entity.ToTable("organizations");
                 entity.HasIndex(o => o.Name);
                 entity.HasIndex(o => o.Slug).IsUnique();
-                entity.HasIndex(o => o.ParentOrganizationId);
+                // [FIX CS1061] 'ParentOrganizationId'를 'ParentId'로 수정합니다.
+                entity.HasIndex(o => o.ParentId); // <-- 수정됨
                 entity.HasIndex(o => o.CreatedAt);
             });
 
@@ -604,12 +643,13 @@ namespace AuthHive.Auth.Data.Context
             #endregion
 
             #region OAuth & Token 설정
-            modelBuilder.Entity<OAuthClient>(entity =>
+            modelBuilder.Entity<OAuthProvider>(entity =>
             {
                 entity.ToTable("oauth_clients");
                 entity.HasIndex(c => c.ClientId).IsUnique();
                 entity.HasIndex(c => c.OrganizationId);
-                entity.HasIndex(c => c.IsActive);
+                // [FIX CS1061] 'IsActive'를 'IsEnabled'로 수정합니다.
+                entity.HasIndex(c => c.IsEnabled); // <-- 수정됨
             });
 
             modelBuilder.Entity<AccessToken>(entity =>
@@ -643,7 +683,7 @@ namespace AuthHive.Auth.Data.Context
                     .HasFilter("\"IsActive\" = true"); // 활성 토큰의 만료 체크용
             });
             #endregion
-            
+
             #region Audit 설정
             modelBuilder.Entity<AuditLog>(entity =>
             {

@@ -216,7 +216,7 @@ namespace AuthHive.Auth.Repositories
         }
 
         #endregion
-        
+
         #region 애플리케이션/프로젝트 조회
 
         /// <summary>
@@ -304,13 +304,13 @@ namespace AuthHive.Auth.Repositories
             {
                 invitation.UpdatedByConnectedId = updatedByConnectedId.Value;
             }
-            
+
             await InvalidateInvitationCacheAsync(invitation, cancellationToken);
             return true;
         }
 
         #endregion
-        
+
         #region 비율 제한 및 분석
 
         /// <summary>
@@ -350,7 +350,9 @@ namespace AuthHive.Auth.Repositories
 
             var acceptedInvitationDates = await baseQuery
                 .Where(i => i.Status == InvitationStatus.Accepted && i.AcceptedAt.HasValue)
-                .Select(i => new { i.CreatedAt, AcceptedAt = i.AcceptedAt.Value }) // Null이 아닌 값만 선택
+                // [FIX CS8629] 삼항 연산자를 사용하여 컴파일러가 null이 아님을 확신하도록 수정
+                // .Where() 절에서 이미 null이 아님을 보장했으므로 DateTime.MinValue는 실제 사용되지 않습니다.
+                .Select(i => new { i.CreatedAt, AcceptedAt = i.AcceptedAt.HasValue ? i.AcceptedAt.Value : DateTime.MinValue })
                 .ToListAsync(cancellationToken);
 
             var stats = new InvitationStatistics
@@ -378,7 +380,6 @@ namespace AuthHive.Auth.Repositories
 
             return stats;
         }
-
         #endregion
 
         #region 유지보수 작업
@@ -448,13 +449,13 @@ namespace AuthHive.Auth.Repositories
                     .SetProperty(i => i.UpdatedAt, now)
                     .SetProperty(i => i.UpdatedByConnectedId, cancelledByConnectedId),
                     cancellationToken);
-            
+
             // TODO: 캐시 무효화. 변경된 엔티티를 다시 조회하거나, 더 넓은 범위의 캐시를 무효화해야 함.
             if (affectedRows > 0)
             {
-                 _logger.LogWarning("BulkCancelAsync executed. A broad cache invalidation strategy might be needed.");
+                _logger.LogWarning("BulkCancelAsync executed. A broad cache invalidation strategy might be needed.");
             }
-            
+
             return affectedRows;
         }
 
@@ -502,7 +503,7 @@ namespace AuthHive.Auth.Repositories
         private async Task InvalidateInvitationCacheAsync(Invitation invitation, CancellationToken cancellationToken)
         {
             if (_cacheService == null) return;
-            
+
             var tasks = new List<Task>
             {
                 // ID 기반 캐시 (BaseRepository의 InvalidateCacheAsync 호출)
