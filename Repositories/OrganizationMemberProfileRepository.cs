@@ -12,6 +12,7 @@ using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Auth.Extensions;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -753,25 +754,5 @@ namespace AuthHive.Auth.Repositories
         #endregion
     }
 
-    /// <summary>
-    /// 동적 LINQ 쿼리 생성을 위한 Predicate 빌더 유틸리티 클래스입니다.
-    /// </summary>
-    internal static class PredicateBuilder
-    {
-        public static Expression<Func<T, bool>> True<T>() { return f => true; }
-        public static Expression<Func<T, bool>> False<T>() { return f => false; }
-
-        public static Expression<Func<T, bool>> Or<T>(this Expression<Func<T, bool>> expr1, Expression<Func<T, bool>> expr2)
-        {
-            var invokedExpr = Expression.Invoke(expr2, expr1.Parameters.Cast<Expression>());
-            return Expression.Lambda<Func<T, bool>>(Expression.OrElse(expr1.Body, invokedExpr), expr1.Parameters);
-        }
-
-        public static Expression<Func<T, bool>> And<T>(this Expression<Func<T, bool>> expr1, Expression<Func<T, bool>> expr2)
-        {
-            var invokedExpr = Expression.Invoke(expr2, expr1.Parameters.Cast<Expression>());
-            return Expression.Lambda<Func<T, bool>>(Expression.AndAlso(expr1.Body, invokedExpr), expr1.Parameters);
-        }
-    }
 }
 

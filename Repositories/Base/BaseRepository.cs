@@ -9,6 +9,7 @@ using AuthHive.Core.Entities.Base;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Auth.Data.Context;
+using AuthHive.Auth.Extensions;
 
 namespace AuthHive.Auth.Repositories.Base
 {
@@ -317,23 +318,4 @@ namespace AuthHive.Auth.Repositories.Base
         #endregion
     }
 
-    /// <summary>
-    /// 통계 쿼리에서 람다 표현식의 속성 이름을 문자열로 안전하게 가져오기 위한 확장 메서드입니다.
-    /// </summary>
-    public static class ExpressionExtensions
-    {
-        public static string GetPropertyName<T, TProperty>(this Expression<Func<T, TProperty>> expression)
-        {
-            if (expression.Body is MemberExpression memberExpression)
-            {
-                return memberExpression.Member.Name;
-            }
-            // Convert(x.Enum)과 같은 경우를 처리
-            if (expression.Body is UnaryExpression unaryExpression && unaryExpression.Operand is MemberExpression operand)
-            {
-                return operand.Member.Name;
-            }
-            throw new ArgumentException("Expression must be a member expression");
-        }
-    }
 }

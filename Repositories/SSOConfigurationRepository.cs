@@ -9,30 +9,41 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Models.Auth.Authentication;
 using AuthHive.Core.Models.Auth.Authentication.Common;
+using AuthHive.Core.Models.Auth.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Repositories
 {
-    /// <summary>
-    /// SSO 설정 관리 리포지토리 구현
-    /// 엔터프라이즈 SSO(SAML, OIDC) 설정 관리
-    /// </summary>
     public class SSOConfigurationRepository : BaseRepository<SamlConfiguration>, ISSOConfigurationRepository
     {
         private readonly ILogger<SSOConfigurationRepository> _logger;
+        private readonly IDateTimeProvider _dateTimeProvider;
+        private readonly Guid? _currentConnectedId;
+
+        // 생성자 수정
         public SSOConfigurationRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,  // ADD THIS
-            ILogger<SSOConfigurationRepository> logger)
-            : base(context, organizationContext, null)  // null for cache
+            ICacheService cacheService,
+            ILogger<SSOConfigurationRepository> logger,
+            IDateTimeProvider dateTimeProvider,
+            IConnectedIdContext connectedIdContext) // ✅ 현재 사용자 ID 주입
+            : base(context, cacheService)
         {
-            _logger = logger;
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _dateTimeProvider = dateTimeProvider ?? throw new ArgumentNullException(nameof(dateTimeProvider));
+            _currentConnectedId = connectedIdContext?.ConnectedId;
         }
-
+        /// <summary>
+        /// SSO 설정은 조직 범위 엔티티입니다.
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity() => true;
         /// <summary>
         /// SSO 설정 저장
         /// </summary>
@@ -411,22 +422,14 @@ namespace AuthHive.Auth.Repositories
         /// SSO 사용 통계 조회
         /// </summary>
         public async Task<SSOUsageStatistics> GetUsageStatisticsAsync(
-            Guid organizationId,
-            DateTime from,
-            DateTime to,
-            CancellationToken cancellationToken = default)
+                   Guid organizationId, DateTime from, DateTime to, CancellationToken cancellationToken = default)
         {
             try
             {
-                // AuthenticationAttemptLog에서 SSO 로그인 통계 조회
-                var attempts = await _context.AuthenticationAttemptLogs
-                    .AsNoTracking()
-                    .Where(a =>
-                        a.OrganizationId == organizationId &&
-                        (a.Method == AuthenticationMethod.SAML ||
-                         a.Method == AuthenticationMethod.OAuth) &&
-                        a.AttemptedAt >= from &&
-                        a.AttemptedAt <= to)
+                var attempts = await _context.AuthenticationAttemptLogs.AsNoTracking()
+                    .Where(a => a.OrganizationId == organizationId &&
+                                 (a.Method == AuthenticationMethod.SAML || a.Method == AuthenticationMethod.OAuth) &&
+                                 a.AttemptedAt >= from && a.AttemptedAt <= to)
                     .ToListAsync(cancellationToken);
 
                 var statistics = new SSOUsageStatistics
@@ -435,26 +438,25 @@ namespace AuthHive.Auth.Repositories
                     SuccessfulLogins = attempts.Count(a => a.IsSuccess),
                     FailedLogins = attempts.Count(a => !a.IsSuccess),
                     UniqueUsers = attempts.Select(a => a.UserId).Distinct().Count(),
-                    LastLoginAt = attempts.OrderByDescending(a => a.AttemptedAt).FirstOrDefault()?.AttemptedAt,
+                    // 👇👇👇 LastLoginAt 대신 LastUsedAt 사용 (혹은 둘 다 필요한지 확인) 👇👇👇
+                    // LastLoginAt = attempts.OrderByDescending(a => a.AttemptedAt).FirstOrDefault()?.AttemptedAt,
+                    LastUsedAt = attempts.Max(a => (DateTime?)a.AttemptedAt), // LastUsedAt 사용 예시
+                    LastSuccessfulLogin = attempts.Where(a => a.IsSuccess).Max(a => (DateTime?)a.AttemptedAt),
+                    LastFailedLogin = attempts.Where(a => !a.IsSuccess).Max(a => (DateTime?)a.AttemptedAt),
                     LoginsByDay = attempts
                         .GroupBy(a => a.AttemptedAt.Date)
-                        .ToDictionary(
-                            g => g.Key.ToString("yyyy-MM-dd"),
-                            g => g.Count()
-                        )
+                        .ToDictionary(g => g.Key.ToString("yyyy-MM-dd"), g => g.Count())
+                    // ... (SSOUsageStatistics의 다른 필드들도 채우는 로직 추가) ...
                 };
 
                 return statistics;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Failed to get SSO usage statistics for organization {OrganizationId}",
-                    organizationId);
+                _logger.LogError(ex, "Failed to get SSO usage statistics for organization {OrganizationId}", organizationId);
                 throw;
             }
         }
-
         #region Private Helper Methods
 
 

@@ -35,8 +35,8 @@ namespace AuthHive.Auth.Providers
         protected readonly IAuditService _auditService;
         protected readonly IUserRepository _userRepository;
         protected readonly IConnectedIdRepository _connectedIdRepository; // ConnectedId 조회를 위해 유지
-        protected readonly IAccountSecurityService _accountSecurityService; 
-        protected readonly IPlanRestrictionService _planRestrictionService; 
+        protected readonly IAccountSecurityService _accountSecurityService;
+        protected readonly IPlanRestrictionService _planRestrictionService;
 
         public abstract string ProviderName { get; }
         public abstract string ProviderType { get; }
@@ -88,7 +88,7 @@ namespace AuthHive.Auth.Providers
                     await LogAuthenticationAttemptAsync(request, authResult, AuthenticationResult.AccountLocked, cancellationToken);
                     return authResult;
                 }
-                
+
                 // 3. 하위 클래스에서 실제 인증 수행 (Template Method Pattern)
                 // ✅ 이 시점에서 ConnectedId와 UserId만 확보합니다. 토큰/세션 발급은 상위 계층에서 처리.
                 authResult = await PerformAuthenticationAsync(request, cancellationToken);
@@ -117,12 +117,12 @@ namespace AuthHive.Auth.Providers
 
             // 5. 최종 감사 로그 기록
             await LogAuthenticationAttemptAsync(
-                request, 
-                authResult, 
-                authResult.IsSuccess ? null : AuthenticationResult.InvalidCredentials, 
-                cancellationToken, 
+                request,
+                authResult,
+                authResult.IsSuccess ? null : AuthenticationResult.InvalidCredentials,
+                cancellationToken,
                 stopwatch.ElapsedMilliseconds);
-            
+
             return authResult;
         }
 
@@ -151,7 +151,7 @@ namespace AuthHive.Auth.Providers
             var key = $"rate_limit:auth:{request.IpAddress}";
             var attemptsString = await _cacheService.GetAsync<string>(key, cancellationToken);
             int attempts = int.TryParse(attemptsString, out int a) ? a : 0;
-            
+
             if (attempts >= 10)
             {
                 _logger.LogWarning("Rate limit exceeded for IP address: {IpAddress}", request.IpAddress);
@@ -167,15 +167,15 @@ namespace AuthHive.Auth.Providers
         /// </summary>
         protected virtual async Task<AccountLockStatus> CheckAccountLockAsync(AuthenticationRequest request, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrEmpty(request.Username)) 
+            if (string.IsNullOrEmpty(request.Username))
                 return new AccountLockStatus { IsLocked = false };
-            
+
             var user = await FindUserAsync(request.Username, cancellationToken);
             if (user == null)
             {
                 return new AccountLockStatus { IsLocked = false };
             }
-            
+
             // NOTE: IAccountSecurityService의 GetAccountLockStatusAsync가 CancellationToken을 받도록 가정합니다.
             var statusResult = await _accountSecurityService.GetAccountLockStatusAsync(user.Id);
 
@@ -184,7 +184,7 @@ namespace AuthHive.Auth.Providers
                 _logger.LogWarning("Failed to retrieve account lock status for user {UserId}. Assuming account is not locked.", user.Id);
                 return new AccountLockStatus { IsLocked = false };
             }
-            
+
             return statusResult.Data;
         }
 
@@ -197,16 +197,15 @@ namespace AuthHive.Auth.Providers
             {
                 await UpdateConnectedIdLastLoginAsync(outcome.ConnectedId.Value, _dateTimeProvider.UtcNow, cancellationToken);
             }
-            
+
             if (outcome.UserId.HasValue)
             {
                 // Last Login 업데이트 (User Repository는 IP 주소를 포함한 업데이트를 지원한다고 가정)
-                await _userRepository.UpdateLastLoginAsync(
-                    outcome.UserId.Value, 
-                    _dateTimeProvider.UtcNow, 
-                    ipAddress, 
-                    cancellationToken);
-                
+                await _userRepository.UpdateUserLastLoginAsync(
+               outcome.UserId.Value,
+               _dateTimeProvider.UtcNow,
+               ipAddress,
+               cancellationToken);
                 // 성공 시, 실패 카운트 초기화 (IAccountSecurityService에 위임)
                 // NOTE: IAccountSecurityService의 ResetFailedAttemptsAsync도 CancellationToken을 받도록 가정합니다.
                 await _accountSecurityService.ResetFailedAttemptsAsync(outcome.UserId.Value, cancellationToken);
@@ -257,10 +256,11 @@ namespace AuthHive.Auth.Providers
         {
             if (string.IsNullOrEmpty(usernameOrEmail)) return null;
 
-            var user = await _userRepository.GetByUsernameAsync(usernameOrEmail, cancellationToken: cancellationToken);
+            var user = await _userRepository.FindByUsernameAsync(usernameOrEmail, cancellationToken: cancellationToken);
+
             if (user == null && usernameOrEmail.Contains('@'))
             {
-                user = await _userRepository.GetByEmailAsync(usernameOrEmail, cancellationToken: cancellationToken);
+                user = await _userRepository.FindByEmailAsync(usernameOrEmail, cancellationToken: cancellationToken);
             }
             return user;
         }
@@ -273,7 +273,7 @@ namespace AuthHive.Auth.Providers
             {
                 connectedIdEntity.LastActiveAt = lastLogin;
                 // NOTE: IConnectedIdRepository가 UpdateAsync 메서드를 지원한다고 가정합니다.
-                await _connectedIdRepository.UpdateAsync(connectedIdEntity, cancellationToken); 
+                await _connectedIdRepository.UpdateAsync(connectedIdEntity, cancellationToken);
             }
         }
     }
