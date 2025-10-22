@@ -18,7 +18,8 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 using AuthHive.Core.Constants.Auth;
-using AuthHive.Core.Interfaces.User.Repository; // AuthConstants 사용을 위해 추가
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.Security; // AuthConstants 사용을 위해 추가
 
 namespace AuthHive.Auth.Providers.Authentication
 {
@@ -29,7 +30,7 @@ namespace AuthHive.Auth.Providers.Authentication
     public class PasetoAuthenticationProvider : IAuthenticationProvider
     {
         private readonly ITokenProvider _tokenProvider;
-        private readonly IPasswordProvider _passwordProvider;
+        private readonly IPasswordHashProvider _passwordProvider;
         private readonly IApiKeyProvider _apiKeyProvider;
         private readonly IMfaService _mfaService;
         private readonly ILogger<PasetoAuthenticationProvider> _logger;
@@ -48,7 +49,7 @@ namespace AuthHive.Auth.Providers.Authentication
         public PasetoAuthenticationProvider(
             // 기존 의존성
             ITokenProvider tokenProvider,
-            IPasswordProvider passwordProvider,
+            IPasswordHashProvider passwordProvider,
             IApiKeyProvider apiKeyProvider,
             IMfaService mfaService,
             ILogger<PasetoAuthenticationProvider> logger,

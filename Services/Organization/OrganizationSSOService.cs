@@ -140,25 +140,28 @@ namespace AuthHive.Auth.Services.Organization
                 }
 
                 var now = _dateTimeProvider.UtcNow;
-                var ssoEntity = new SamlConfiguration // 엔티티 생성
-                {
-                    Id = Guid.NewGuid(),
-                    OrganizationId = organizationId,
-                    Protocol = request.SSOType.ToString(),
-                    Provider = request.ProviderName.ToString(),
-                    DisplayName = request.DisplayName,
-                    IsEnabled = request.ActivateImmediately,
-                    IsDefault = false, // 기본값 설정은 별도 메서드 사용 권장
-                    Priority = request.Priority,
-                    EnableAutoProvisioning = request.AutoCreateUsers,
-                    DefaultRoleId = request.DefaultRoleId,
-                    IconUrl = request.IconUrl,
-                    AttributeMapping = request.AttributeMapping ?? "{}", // Null 대신 기본값
-                    AllowedDomains = request.AllowedDomains != null ? JsonSerializer.Serialize(request.AllowedDomains) : "[]",
-                    GroupMapping = request.GroupMapping ?? "{}", // Null 대신 기본값
-                    CreatedAt = now,
-                    CreatedByConnectedId = configuredByConnectedId
-                };
+                // ✅ [수정] new(organizationId) public 생성자를 먼저 호출합니다.
+                var ssoEntity = new SamlConfiguration(organizationId); // 엔티티 생성
+
+                // ✅ [수정] 속성은 객체 생성 후에 개별적으로 할당합니다.
+                ssoEntity.Protocol = request.SSOType.ToString();
+                ssoEntity.Provider = request.ProviderName.ToString();
+                ssoEntity.DisplayName = request.DisplayName;
+                ssoEntity.IsEnabled = request.ActivateImmediately;
+                ssoEntity.IsDefault = false; // 기본값 설정은 별도 메서드 사용 권장
+                ssoEntity.Priority = request.Priority;
+                ssoEntity.EnableAutoProvisioning = request.AutoCreateUsers;
+                ssoEntity.DefaultRoleId = request.DefaultRoleId;
+                ssoEntity.IconUrl = request.IconUrl;
+                ssoEntity.AttributeMapping = request.AttributeMapping ?? "{}"; // Null 대신 기본값
+                ssoEntity.AllowedDomains = request.AllowedDomains != null ? JsonSerializer.Serialize(request.AllowedDomains) : "[]";
+                ssoEntity.GroupMapping = request.GroupMapping ?? "{}"; // Null 대신 기본값
+
+                // ✅ [참고] Id, OrganizationId, CreatedAt은 
+                // 부모 엔티티와 SamlConfiguration 생성자에서 자동으로 설정됩니다.
+                // 따라서 CreatedByConnectedId만 설정해주면 됩니다.
+                // ssoEntity.CreatedAt = now; // (자동 설정됨)
+                ssoEntity.CreatedByConnectedId = configuredByConnectedId;
                 ParseAndApplyConfiguration(request.Configuration, ssoEntity); // JSON 설정 파싱 및 적용
 
                 // 요청에서 기본값으로 설정하려 할 경우

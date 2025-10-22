@@ -20,6 +20,7 @@ using static AuthHive.Core.Enums.Core.UserEnums;
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Auth.Middleware;
+using AuthHive.Core.Interfaces.Security;
 
 namespace AuthHive.Auth.Services
 {
@@ -36,7 +37,7 @@ namespace AuthHive.Auth.Services
         private readonly IEventBus _eventBus;
         private readonly IPlanRestrictionService _planRestrictionService;
         private readonly IPrincipalAccessor _principalAccessor;
-        private readonly IPasswordProvider _passwordProvider; // 비밀번호 해싱을 위해 추가
+        private readonly IPasswordHashProvider _passwordProvider; // 비밀번호 해싱을 위해 추가
 
         public UserService(
             IUserRepository userRepository,
@@ -45,7 +46,7 @@ namespace AuthHive.Auth.Services
             IEventBus eventBus,
             IPlanRestrictionService planRestrictionService,
             IPrincipalAccessor principalAccessor,
-            IPasswordProvider passwordProvider) // 의존성 주입 추가
+            IPasswordHashProvider passwordProvider) // 의존성 주입 추가
         {
             _userRepository = userRepository;
             _unitOfWork = unitOfWork;

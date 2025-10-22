@@ -70,12 +70,7 @@ namespace AuthHive.Auth.Repositories
                 else
                 {
                     // 신규 생성
-                    existingEntity = new SamlConfiguration
-                    {
-                        Id = Guid.NewGuid(),
-                        OrganizationId = organizationId,
-                        CreatedAt = DateTime.UtcNow
-                    };
+                    existingEntity = new SamlConfiguration(organizationId);
 
                     MapToEntity(configuration, existingEntity);
                     await _context.SamlConfigurations.AddAsync(existingEntity, cancellationToken);
