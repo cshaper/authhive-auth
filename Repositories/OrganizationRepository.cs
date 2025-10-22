@@ -10,10 +10,12 @@ using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Organization.Repository;
-using AuthHive.Core.Interfaces.Organization.Service;
+// REFACTORED: IOrganizationContextService is no longer injected into the base repository
+// using AuthHive.Core.Interfaces.Organization.Service; 
 using AuthHive.Core.Constants.Auth; // RoleConstants 사용을 위해 추가
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
+// REFACTORED: IMemoryCache is no longer used. ICacheService is used instead.
+// using Microsoft.Extensions.Caching.Memory; 
 using OrgEntity = AuthHive.Core.Entities.Organization.Organization;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 
@@ -25,14 +27,23 @@ namespace AuthHive.Auth.Repositories.Organization
     /// </summary>
     public class OrganizationRepository : BaseRepository<OrgEntity>, IOrganizationRepository
     {
-        // 생성자: BaseRepository의 생성자에 필요한 의존성 주입
+        /// <summary>
+        /// [FIXED] 생성자: BaseRepository v16 원칙에 따라 AuthDbContext와 ICacheService만 주입받습니다.
+        /// IOrganizationContext 의존성을 제거합니다.
+        /// </summary>
         public OrganizationRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
-            ICacheService? cacheService = null)
-            : base(context, organizationContext, cacheService)
+            ICacheService? cacheService = null) // REFACTORED: IOrganizationContext 제거
+            : base(context, cacheService) // [FIXED] CS1729: BaseRepository 생성자 시그니처 수정
         {
         }
+
+        /// <summary>
+        /// [FIXED] CS0534: 이 리포지토리가 다루는 엔티티(Organization)가
+        /// 조직 범위에 속하는지(조직 ID로 필터링되어야 하는지) 여부를 결정합니다.
+        /// Organization은 그 자체로 조직 범위의 루트이므로 true입니다.
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity() => true;
 
         /// <summary>
         /// 조직 키(samsung-semiconduct)로 조직 정보를 조회합니다.
@@ -46,8 +57,8 @@ namespace AuthHive.Auth.Repositories.Organization
             if (string.IsNullOrWhiteSpace(organizationKey))
                 return null;
 
-            // 2️⃣ 캐시 키 생성: 조직 컨텍스트를 포함한 고유 키
-            string cacheKey = GetCacheKey("GetByOrganizationKey", organizationKey);
+            // 2️⃣ 캐시 키 생성: [FIXED] BaseRepository의 GetCacheKey(string) 사용
+            string cacheKey = GetCacheKey($"OrganizationKey:{organizationKey.ToLowerInvariant()}");
 
             // 3️⃣ 캐시 조회: ICacheService를 통해 비동기적으로 조회
             if (_cacheService != null)
@@ -60,9 +71,9 @@ namespace AuthHive.Auth.Repositories.Organization
             // 4️⃣ DB 조회: 관련 엔티티 포함하여 조직 정보 조회
             var organization = await Query()
                 .Include(o => o.ChildOrganizations.Where(c => !c.IsDeleted)) // 자식 조직 중 삭제되지 않은 것만 포함
-                .Include(o => o.Capabilities)        // 기능 정보 포함
-                .Include(o => o.Domains)             // 도메인 정보 포함
-                .Include(o => o.SSOConfigurations)   // SSO 설정 포함
+                .Include(o => o.Capabilities)           // 기능 정보 포함
+                .Include(o => o.Domains)                // 도메인 정보 포함
+                .Include(o => o.SSOConfigurations)      // SSO 설정 포함
                 .FirstOrDefaultAsync(o => o.OrganizationKey == organizationKey, cancellationToken); // 조직 키로 조회
 
             // 5️⃣ 캐시 저장: 조회된 조직 정보를 TTL과 함께 저장
@@ -91,7 +102,7 @@ namespace AuthHive.Auth.Repositories.Organization
 
         /// <summary>
         /// 특정 조직 키(도메인 모델의 속성값)가 이미 존재하는지 확인합니다.
-        /// organizationKey(키)	"acme-corp"(키의 값)
+        /// organizationKey(키)  "acme-corp"(키의 값)
         /// 선택적으로 특정 ID를 제외할 수 있으며, 요청 취소를 지원합니다.
         /// </summary>
         public async Task<bool> IsOrganizationKeyExistsAsync(
@@ -143,10 +154,10 @@ namespace AuthHive.Auth.Repositories.Organization
             CancellationToken cancellationToken = default)
         {
             return await Query()
-                .Where(o => o.ParentId == parentId)               // 1️⃣ 부모 ID 기준 필터링
-                .OrderBy(o => o.SortOrder)                        // 2️⃣ 정렬 우선순위
-                .ThenBy(o => o.Name)                              // 3️⃣ 이름 기준 보조 정렬
-                .ToListAsync(cancellationToken);                  // 4️⃣ 취소 토큰 전달
+                .Where(o => o.ParentId == parentId)              // 1️⃣ 부모 ID 기준 필터링
+                .OrderBy(o => o.SortOrder)                       // 2️⃣ 정렬 우선순위
+                .ThenBy(o => o.Name)                             // 3️⃣ 이름 기준 보조 정렬
+                .ToListAsync(cancellationToken);                 // 4️⃣ 취소 토큰 전달
         }
         /// <summary>
         /// 특정 조직의 모든 하위 조직(자식, 손자 등) 목록을 재귀적으로 조회합니다.
@@ -206,9 +217,10 @@ namespace AuthHive.Auth.Repositories.Organization
 
             // 2️⃣ Slug, 정책 등 기본값 설정
             // OrganizationKey(Slug)가 요청에서 제공되지 않은 경우, 기본 명칭을 기반으로 생성합니다.
-            if (string.IsNullOrWhiteSpace(entity.Slug))
+            // REFACTORED: entity.Slug -> entity.OrganizationKey
+            if (string.IsNullOrWhiteSpace(entity.OrganizationKey)) 
             {
-                entity.Slug = GenerateSlug(entity.Name);
+                entity.OrganizationKey = GenerateSlug(entity.Name);
             }
 
             // PolicyInheritanceMode가 설정되지 않은 경우, 기본값(Inherit)으로 초기화합니다.
@@ -332,15 +344,15 @@ namespace AuthHive.Auth.Repositories.Organization
 
                 // ConnectedId와 User 연결 및 상태 필터링
                 .Join(_context.ConnectedIds.Where(c => c.UserId == userId && c.Status == ConnectedIdStatus.Active), // Context -> _context로 수정
-                      cir => cir.ConnectedId,
-                      c => c.Id,
-                      (cir, c) => c.OrganizationId)
+                    cir => cir.ConnectedId,
+                    c => c.Id,
+                    (cir, c) => c.OrganizationId)
 
                 // Organization 필터링 (Organization 자체의 활성 상태 & Soft Delete 되지 않음)
                 .Join(_context.Organizations.Where(o => o.Status == OrganizationStatus.Active && !o.IsDeleted), // Context -> _context로 수정
-                      orgId => orgId,
-                      org => org.Id,
-                      (orgId, org) => org.Id)
+                    orgId => orgId,
+                    org => org.Id,
+                    (orgId, org) => org.Id)
 
                 .Distinct()
                 .CountAsync(cancellationToken);
@@ -358,7 +370,7 @@ namespace AuthHive.Auth.Repositories.Organization
             var children = await Query()
                 .Where(o => o.ParentId == parentId)
                 .OrderBy(o => o.SortOrder).ThenBy(o => o.Name)
-                .ToListAsync();
+                .ToListAsync(cancellationToken); // [FIXED] CancellationToken 전달
 
             result.AddRange(children);
 
@@ -375,7 +387,7 @@ namespace AuthHive.Auth.Repositories.Organization
         {
             if (entity.ParentId.HasValue)
             {
-                var parent = await GetByIdAsync(entity.ParentId.Value);
+                var parent = await GetByIdAsync(entity.ParentId.Value, cancellationToken); // [FIXED] CancellationToken 전달
                 if (parent != null)
                 {
                     entity.Path = $"{parent.Path}/{entity.Id}";
@@ -388,22 +400,23 @@ namespace AuthHive.Auth.Repositories.Organization
                 entity.Level = 0;
             }
 
-            var children = await GetDescendantsAsync(entity.Id);
+            var children = await GetDescendantsAsync(entity.Id, cancellationToken); // [FIXED] CancellationToken 전달
             foreach (var child in children)
             {
-                await UpdateHierarchyPathAsync(child);
-                await base.UpdateAsync(child);
+                // [FIXED] CancellationToken 전달
+                await UpdateHierarchyPathAsync(child, cancellationToken); 
+                await base.UpdateAsync(child, cancellationToken);
             }
         }
 
-        private async Task ValidateOrganizationDepthAsync(OrgEntity parent)
+        private Task ValidateOrganizationDepthAsync(OrgEntity parent)
         {
             const int maxDepth = 10; // 예시: 최대 깊이를 10으로 설정
             if (parent.Level >= maxDepth - 1)
             {
                 throw new InvalidOperationException($"Organization hierarchy depth cannot exceed {maxDepth} levels.");
             }
-            await Task.CompletedTask;
+            return Task.CompletedTask;
         }
 
         private string GenerateSlug(string name)
@@ -421,38 +434,32 @@ namespace AuthHive.Auth.Repositories.Organization
         /// <param name="cancellationToken">취소 토큰</param>
         private async Task InvalidateOrganizationCacheAsync(OrgEntity entity, CancellationToken cancellationToken = default)
         {
-            // [수정] _cache 대신 _cacheService 사용
-            if (_cacheService == null) return;
+            if (_cacheService == null || entity == null) return;
 
-            // 1. ID 기반 캐시 무효화 (예: GetByIdAsync에서 사용하는 캐시)
-            // BaseRepository의 GetById 쿼리 키를 사용한다고 가정
-            string idCacheKey = GetCacheKey("GetById", entity.Id);
-            await _cacheService.RemoveAsync(idCacheKey, cancellationToken);
+            var tasks = new List<Task>();
+            
+            // 1. ID 기반 캐시 무효화 (GetByIdAsync에서 사용하는 캐시)
+            // [FIXED] BaseRepository의 GetCacheKey(Guid id) 사용
+            tasks.Add(_cacheService.RemoveAsync(GetCacheKey(entity.Id), cancellationToken));
 
             // 2. Key 기반 캐시 무효화 (GetByOrganizationKeyAsync에서 사용하는 캐시)
-            // [수정] _cache.Remove 대신 _cacheService.RemoveAsync 사용
-            string keyCacheKey = GetOrganizationCacheKey("GetByOrganizationKey", entity.OrganizationKey);
-            await _cacheService.RemoveAsync(keyCacheKey, cancellationToken);
+            // [FIXED] BaseRepository의 GetCacheKey(string keySuffix) 사용
+            if (!string.IsNullOrWhiteSpace(entity.OrganizationKey))
+            {
+                tasks.Add(_cacheService.RemoveAsync(GetCacheKey($"OrganizationKey:{entity.OrganizationKey.ToLowerInvariant()}"), cancellationToken));
+            }
 
             // 3. 부모 조직의 캐시 무효화 (계층 트리 조회/직속 자식 목록 캐시가 변경되었을 가능성)
             if (entity.ParentId.HasValue)
             {
                 // 부모 조직의 GetById 캐시 무효화
-                string parentIdCacheKey = GetCacheKey("GetById", entity.ParentId.Value);
-                await _cacheService.RemoveAsync(parentIdCacheKey, cancellationToken);
-
-                // 부모 조직의 하위 계층 캐시 무효화 (GetDescendantsAsync 등)
-                // OrganizationHierarchyService에서 더 광범위하게 처리해야 하지만, 여기서도 상위 캐시를 무효화합니다.
-                // GetOrganizationCacheKey("GetDirectChildren", entity.ParentId.Value) 등의 키도 필요할 수 있습니다.
+                // [FIXED] BaseRepository의 GetCacheKey(Guid id) 사용
+                tasks.Add(_cacheService.RemoveAsync(GetCacheKey(entity.ParentId.Value), cancellationToken));
             }
+            
+            await Task.WhenAll(tasks);
         }
 
-        private readonly MemoryCacheEntryOptions _organizationCacheOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30),
-            SlidingExpiration = TimeSpan.FromMinutes(10),
-            Priority = CacheItemPriority.High
-        };
         #endregion
     }
 }

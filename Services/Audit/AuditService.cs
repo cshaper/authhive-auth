@@ -42,7 +42,7 @@ namespace AuthHive.Auth.Services.Audit
         private readonly IRoleRepository _roleRepository;
         private readonly IUnitOfWork _unitOfWork;
         private readonly ICacheService _cacheService; 
-        private readonly IEventBus _eventBus; // 이벤트 발행을 위해 IEventBus 추가
+        private readonly IEventBus _eventBus; 
         private readonly ILogger<AuditService> _logger;
 
         // 캐시 키 상수
@@ -58,8 +58,8 @@ namespace AuthHive.Auth.Services.Audit
             IConnectedIdRepository connectedIdRepository,
             IRoleRepository roleRepository,
             IUnitOfWork unitOfWork,
-            ICacheService cacheService, // 의존성 주입 변경
-            IEventBus eventBus,         // 의존성 주입 추가
+            ICacheService cacheService,
+            IEventBus eventBus, 
             ILogger<AuditService> logger)
         {
             _auditLogRepository = auditLogRepository ?? throw new ArgumentNullException(nameof(auditLogRepository));
@@ -1874,14 +1874,14 @@ namespace AuthHive.Auth.Services.Audit
                             && a.Timestamp >= startDate
                             && a.Timestamp <= endDate
                             && (a.ActionType == AuditActionType.Grant || a.ActionType == AuditActionType.Revoke))
-                .CountAsync(cancellationToken); // ✅ 2. CancellationToken 전달
+                .CountAsync(cancellationToken);
         }
         private async Task GenerateGeneralComplianceData(
             ComplianceReport report,
             Guid organizationId,
             DateTime startDate,
             DateTime endDate,
-            CancellationToken cancellationToken = default) // ✅ 1. CancellationToken 파라미터 추가
+            CancellationToken cancellationToken = default) 
         {
             // 일반 컴플라이언스 데이터 수집 (전체 로그 카운트)
             report.Data["totalLogs"] = await _auditLogRepository.Query()

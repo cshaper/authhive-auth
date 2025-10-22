@@ -1,752 +1,493 @@
+using Microsoft.EntityFrameworkCore;
+using AuthHive.Core.Entities.PlatformApplications;
+using AuthHive.Core.Interfaces.PlatformApplication.Repository;
+using AuthHive.Auth.Repositories.Base;
+using AuthHive.Auth.Data.Context;
+using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Models.Common;
+using AuthHive.Core.Interfaces.Base;
+// using AuthHive.Core.Interfaces.Organization.Service; // IOrganizationContext 제거
+using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService 추가
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
-using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
-using AuthHive.Auth.Data.Context;
-using AuthHive.Auth.Repositories.Base;
-using AuthHive.Core.Entities.PlatformApplications;
-using AuthHive.Core.Interfaces.PlatformApplication.Repository;
-using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Models.Common;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Organization.Service;
+using System.Threading; // CancellationToken 추가
+using System.Threading.Tasks;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// 플랫폼 애플리케이션 접근 템플릿 저장소 구현 - AuthHive v15
-    /// BaseRepository 통합 후 최적화 버전
+    /// 플랫폼 애플리케이션 접근 템플릿 저장소 구현 - AuthHive v16
+    /// [FIXED] BaseRepository 상속, ICacheService 사용, CancellationToken 적용
     /// </summary>
-    public class PlatformApplicationAccessTemplateRepository : BaseRepository<PlatformApplicationAccessTemplate>, IPlatformApplicationAccessTemplateRepository
+    public class PlatformApplicationAccessTemplateRepository
+        : BaseRepository<PlatformApplicationAccessTemplate>, IPlatformApplicationAccessTemplateRepository
     {
         private readonly ILogger<PlatformApplicationAccessTemplateRepository> _logger;
-        private readonly MemoryCacheEntryOptions _templateCacheOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1),
-            SlidingExpiration = TimeSpan.FromMinutes(15),
-            Priority = CacheItemPriority.High
-        };
+
+        // 캐시 옵션은 ICacheService 구현 내에서 관리되므로 제거
+        // private readonly MemoryCacheEntryOptions _templateCacheOptions = new() ...
 
         public PlatformApplicationAccessTemplateRepository(
             AuthDbContext context,
-            IOrganizationContext organizationContext,
+            // IOrganizationContext organizationContext, // 제거됨
             ILogger<PlatformApplicationAccessTemplateRepository> logger,
-            IMemoryCache? cache = null) : base(context, organizationContext, cache)
+            ICacheService? cacheService = null) // IMemoryCache -> ICacheService?
+            : base(context, cacheService) // BaseRepository 생성자 호출 수정
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        #region 기본 조회
+        /// <summary>
+        /// [FIXED] BaseRepository 추상 메서드 구현. 템플릿은 조직 범위에 속함 (true).
+        /// </summary>
+        protected override bool IsOrganizationScopedEntity() => true;
 
-        /// <summary>템플릿 이름으로 조회 (현재 조직 컨텍스트 사용)</summary>
-        public async Task<PlatformApplicationAccessTemplate?> GetByNameAsync(string name)
-        {
-            return await Query()
-                .Include(t => t.DefaultRole)
-                .FirstOrDefaultAsync(t => t.Name == name);
-        }
+        #region 기본 조회 (CancellationToken 추가)
 
-        /// <summary>특정 조직의 템플릿 이름으로 조회 (관리자 전용)</summary>
-        public async Task<PlatformApplicationAccessTemplate?> GetByNameAsync(Guid organizationId, string name)
+        /// <summary>조직 ID로 템플릿 목록 조회</summary>
+        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetByOrganizationIdAsync(
+            Guid organizationId, CancellationToken cancellationToken = default)
         {
+             // TODO: 캐싱 추가 고려 (조직별 템플릿 목록)
             return await QueryForOrganization(organizationId)
                 .Include(t => t.DefaultRole)
-                .FirstOrDefaultAsync(t => t.Name == name);
+                .OrderBy(t => t.Priority)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
+        }
+
+        /// <summary>템플릿 이름으로 조회 (특정 조직)</summary>
+        public async Task<PlatformApplicationAccessTemplate?> GetByNameAsync(
+            Guid organizationId, string name, CancellationToken cancellationToken = default)
+        {
+             // TODO: 캐싱 추가 고려 (조직 ID + 이름 기준)
+            return await QueryForOrganization(organizationId)
+                .Include(t => t.DefaultRole)
+                .AsNoTracking() // 읽기 전용
+                .FirstOrDefaultAsync(t => t.Name == name, cancellationToken);
         }
 
         /// <summary>접근 레벨별 템플릿 조회</summary>
         public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetByLevelAsync(
-            Guid organizationId, ApplicationAccessLevel level, bool activeOnly = true)
+            Guid organizationId, ApplicationAccessLevel level, bool activeOnly = true, CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId).Where(t => t.Level == level);
             if (activeOnly) query = query.Where(t => t.IsActive);
-            
+
             return await query
                 .Include(t => t.DefaultRole)
                 .OrderBy(t => t.Priority)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         /// <summary>기본 역할 ID로 템플릿 조회</summary>
-        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetByDefaultRoleAsync(Guid defaultRoleId)
+        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetByDefaultRoleAsync(
+            Guid defaultRoleId, CancellationToken cancellationToken = default)
         {
-            return await Query()
+            // 이 쿼리는 특정 조직에 국한되지 않음 (전체 DB 검색)
+            return await Query() // Query() 사용 (IsDeleted=false 포함)
                 .Where(t => t.DefaultRoleId == defaultRoleId)
                 .Include(t => t.DefaultRole)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         /// <summary>템플릿 이름 중복 확인</summary>
-        public async Task<bool> NameExistsAsync(Guid organizationId, string name, Guid? excludeTemplateId = null)
+        public async Task<bool> NameExistsAsync(
+            Guid organizationId, string name, Guid? excludeTemplateId = null, CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId).Where(t => t.Name == name);
             if (excludeTemplateId.HasValue) query = query.Where(t => t.Id != excludeTemplateId.Value);
-            return await query.AnyAsync();
+            return await query.AnyAsync(cancellationToken);
         }
 
         #endregion
 
-        #region 템플릿 관리
+        #region 템플릿 관리 (CancellationToken 추가)
 
-        /// <summary>템플릿 생성 (권한 패턴 검증 포함)</summary>
+        /// <summary>템플릿 생성 (Repository는 단순 추가만 담당)</summary>
         public async Task<PlatformApplicationAccessTemplate> CreateTemplateAsync(
-            PlatformApplicationAccessTemplate template, bool validatePermissions = true)
+            PlatformApplicationAccessTemplate template, CancellationToken cancellationToken = default)
         {
-            if (validatePermissions)
-            {
-                var patterns = JsonSerializer.Deserialize<List<string>>(template.PermissionPatterns ?? "[]");
-                var validation = await ValidatePermissionPatternsAsync(patterns ?? new List<string>());
-                if (!validation.IsValid)
-                {
-                    throw new InvalidOperationException($"Invalid permission patterns: {string.Join(", ", validation.Errors)}");
-                }
-            }
+            // 권한 패턴 검증은 서비스 계층 책임
+            // template.Id = template.Id == Guid.Empty ? Guid.NewGuid() : template.Id; // ID는 BaseEntity가 처리
+            // template.CreatedAt = DateTime.UtcNow; // Interceptor가 처리
 
-            var entry = await _context.PlatformApplicationAccessTemplates.AddAsync(template);
-            await _context.SaveChangesAsync();
-
-            // 캐시 무효화
-            InvalidateOrganizationCache(template.OrganizationId);
-
-            _logger.LogInformation("Created access template {TemplateId} for organization {OrganizationId}", 
-                template.Id, template.OrganizationId);
-
-            return entry.Entity;
+            var created = await AddAsync(template, cancellationToken); // BaseRepository.AddAsync 사용
+            // 캐시 무효화 (BaseRepository.AddAsync는 캐시 무효화를 하지 않음)
+            await InvalidateOrganizationCacheAsync(created.OrganizationId, cancellationToken);
+            return created;
         }
 
-        /// <summary>템플릿 업데이트</summary>
+        /// <summary>템플릿 업데이트 (Action<T> 사용)</summary>
         public async Task<PlatformApplicationAccessTemplate?> UpdateTemplateAsync(
-            Guid templateId, Action<PlatformApplicationAccessTemplate> updates)
+            Guid templateId, Action<PlatformApplicationAccessTemplate> updates, CancellationToken cancellationToken = default)
         {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return null;
+            var template = await GetByIdAsync(templateId, cancellationToken); // GetByIdAsync 사용 (캐시 활용 가능)
+            if (template == null)
+            {
+                _logger.LogWarning("Attempted to update non-existent template {TemplateId}", templateId);
+                return null;
+            }
 
+            var originalOrgId = template.OrganizationId; // 캐시 무효화를 위해 저장
             updates(template);
-            template.UpdatedAt = DateTime.UtcNow;
+            // template.UpdatedAt = DateTime.UtcNow; // Interceptor가 처리
 
-            await _context.SaveChangesAsync();
-            
-            // 캐시 무효화
-            InvalidateCache(templateId);
-            if (template.OrganizationId != Guid.Empty)
-                InvalidateOrganizationCache(template.OrganizationId);
+            await UpdateAsync(template, cancellationToken); // BaseRepository.UpdateAsync 사용 (캐시 무효화 포함)
 
+            // 만약 OrganizationId가 변경되었다면 이전 조직 캐시도 무효화
+            if (originalOrgId != template.OrganizationId)
+            {
+                 await InvalidateOrganizationCacheAsync(originalOrgId, cancellationToken);
+            }
+             await InvalidateOrganizationCacheAsync(template.OrganizationId, cancellationToken); // 현재 조직 캐시 무효화
+
+
+            _logger.LogInformation("Updated access template {TemplateId}", templateId);
             return template;
         }
 
         /// <summary>템플릿 활성화/비활성화</summary>
-        public async Task<bool> SetActiveStatusAsync(Guid templateId, bool isActive)
+        public async Task<bool> SetActiveStatusAsync(Guid templateId, bool isActive, CancellationToken cancellationToken = default)
         {
-            var template = await GetByIdAsync(templateId);
+            var template = await GetByIdAsync(templateId, cancellationToken);
             if (template == null) return false;
 
-            template.IsActive = isActive;
-            template.UpdatedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
+            if (template.IsActive == isActive) return true; // 변경 사항 없음
 
-            InvalidateCache(templateId);
+            template.IsActive = isActive;
+            // template.UpdatedAt = DateTime.UtcNow; // Interceptor가 처리
+            await UpdateAsync(template, cancellationToken); // UpdateAsync 호출 (캐시 무효화 포함)
+             await InvalidateOrganizationCacheAsync(template.OrganizationId, cancellationToken); // 조직 캐시 무효화 추가
+
+            _logger.LogInformation("Set active status for template {TemplateId} to {IsActive}", templateId, isActive);
             return true;
         }
 
-        /// <summary>템플릿 복제</summary>
+        /// <summary>템플릿 복제 (단순 복제)</summary>
         public async Task<PlatformApplicationAccessTemplate> CloneTemplateAsync(
-            Guid sourceTemplateId, string newName, Guid? targetOrganizationId = null)
+            Guid sourceTemplateId, string newName, Guid? targetOrganizationId = null, CancellationToken cancellationToken = default)
         {
-            var source = await GetByIdAsync(sourceTemplateId);
-            if (source == null) throw new InvalidOperationException("Source template not found");
+            // 원본 조회 (AsNoTracking 필요 없음, 어차피 새 객체 생성)
+            var source = await GetByIdAsync(sourceTemplateId, cancellationToken);
+            if (source == null) throw new InvalidOperationException($"Source template {sourceTemplateId} not found");
 
             var clone = new PlatformApplicationAccessTemplate
             {
-                Id = Guid.NewGuid(),
+                // Id, CreatedAt 등은 AddAsync에서 처리
                 OrganizationId = targetOrganizationId ?? source.OrganizationId,
                 Level = source.Level,
                 Name = newName,
                 Description = $"Copy of {source.Name}",
                 DefaultRoleId = source.DefaultRoleId,
                 PermissionPatterns = source.PermissionPatterns,
-                Priority = source.Priority,
-                IsActive = true,
-                IsSystemTemplate = false,
+                Priority = source.Priority + 1, // 복제본 우선순위 조정 (예시)
+                IsActive = source.IsActive,     // 원본 상태 따름
+                IsSystemTemplate = false,      // 복제본은 시스템 템플릿 아님
                 IncludesBillingAccess = source.IncludesBillingAccess,
-                Metadata = source.Metadata,
-                CreatedAt = DateTime.UtcNow
+                Metadata = source.Metadata
             };
 
-            return await CreateTemplateAsync(clone, false);
+            // CreateTemplateAsync 호출하여 저장 및 캐시 무효화
+            return await CreateTemplateAsync(clone, cancellationToken);
         }
 
         #endregion
 
-        #region 권한 패턴 관리
-
-        /// <summary>권한 패턴 추가</summary>
-        public async Task<bool> AddPermissionPatternAsync(Guid templateId, string pattern)
-        {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return false;
-
-            var patterns = JsonSerializer.Deserialize<List<string>>(template.PermissionPatterns ?? "[]") ?? new List<string>();
-            if (!patterns.Contains(pattern))
-            {
-                patterns.Add(pattern);
-                template.PermissionPatterns = JsonSerializer.Serialize(patterns);
-                template.UpdatedAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
-                
-                InvalidateCache(templateId);
-            }
-
-            return true;
-        }
-
-        /// <summary>권한 패턴 제거</summary>
-        public async Task<bool> RemovePermissionPatternAsync(Guid templateId, string pattern)
-        {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return false;
-
-            var patterns = JsonSerializer.Deserialize<List<string>>(template.PermissionPatterns ?? "[]") ?? new List<string>();
-            if (patterns.Remove(pattern))
-            {
-                template.PermissionPatterns = JsonSerializer.Serialize(patterns);
-                template.UpdatedAt = DateTime.UtcNow;
-                await _context.SaveChangesAsync();
-                
-                InvalidateCache(templateId);
-                return true;
-            }
-
-            return false;
-        }
+        #region 권한 패턴 관리 (CancellationToken 추가)
 
         /// <summary>권한 패턴 목록 업데이트</summary>
-        public async Task<bool> UpdatePermissionPatternsAsync(Guid templateId, IEnumerable<string> patterns)
+        public async Task<bool> UpdatePermissionPatternsAsync(
+            Guid templateId, IEnumerable<string> patterns, CancellationToken cancellationToken = default)
         {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return false;
-
-            template.PermissionPatterns = JsonSerializer.Serialize(patterns.ToList());
-            template.UpdatedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
-            
-            InvalidateCache(templateId);
-            return true;
-        }
-
-        /// <summary>권한 패턴 검증</summary>
-        public async Task<(bool IsValid, List<string> Errors)> ValidatePermissionPatternsAsync(IEnumerable<string> patterns)
-        {
-            await Task.CompletedTask;
-            var errors = new List<string>();
-
-            foreach (var pattern in patterns)
+             // 패턴 검증은 서비스 계층 책임
+            var updatedTemplate = await UpdateTemplateAsync(templateId, t =>
             {
-                if (string.IsNullOrWhiteSpace(pattern))
-                {
-                    errors.Add("Empty pattern not allowed");
-                    continue;
-                }
+                 // ToList() 호출하여 즉시 실행 및 null 방지
+                t.PermissionPatterns = JsonSerializer.Serialize(patterns?.ToList() ?? new List<string>());
+            }, cancellationToken);
 
-                // 기본 패턴 검증
-                if (!pattern.Contains(':') && !pattern.StartsWith('!'))
-                {
-                    errors.Add($"Invalid pattern format: {pattern}");
-                }
-
-                // 와일드카드 검증
-                if (pattern.Count(c => c == '*') > 3)
-                {
-                    errors.Add($"Too many wildcards in pattern: {pattern}");
-                }
-            }
-
-            return (errors.Count == 0, errors);
-        }
-
-        /// <summary>실제 권한으로 확장 (캐시 적용)</summary>
-        public async Task<IEnumerable<string>> ExpandPermissionsAsync(Guid templateId)
-        {
-            if (_cache != null)
-            {
-                var cacheKey = $"ExpandedPermissions:{templateId}";
-                if (_cache.TryGetValue(cacheKey, out IEnumerable<string>? cached))
-                    return cached!;
-            }
-
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return new List<string>();
-
-            var patterns = JsonSerializer.Deserialize<List<string>>(template.PermissionPatterns ?? "[]") ?? new List<string>();
-            
-            // 실제 확장 로직은 더 복잡할 것임
-            var expanded = patterns;
-
-            if (_cache != null)
-            {
-                _cache.Set($"ExpandedPermissions:{templateId}", expanded, TimeSpan.FromMinutes(30));
-            }
-
-            return expanded;
+            return updatedTemplate != null;
         }
 
         #endregion
 
-        #region 시스템 템플릿
+        #region 시스템 템플릿 (CancellationToken 추가)
 
-        /// <summary>시스템 템플릿 조회 (캐시 적용)</summary>
-        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetSystemTemplatesAsync(Guid? organizationId = null)
+        /// <summary>시스템 템플릿 조회</summary>
+        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetSystemTemplatesAsync(
+            Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
-            if (_cache != null && organizationId.HasValue)
+             // 시스템 템플릿은 자주 변경되지 않으므로 캐싱 효율 높음
+            string cacheKey = $"SystemTemplates:{organizationId?.ToString() ?? "Global"}";
+            if (_cacheService != null)
             {
-                var cacheKey = $"SystemTemplates:{organizationId}";
-                if (_cache.TryGetValue(cacheKey, out IEnumerable<PlatformApplicationAccessTemplate>? cached))
-                    return cached!;
+                 var cached = await _cacheService.GetAsync<List<PlatformApplicationAccessTemplate>>(cacheKey, cancellationToken);
+                 if (cached != null) return cached;
             }
 
-            var query = _dbSet.Where(t => !t.IsDeleted && t.IsSystemTemplate);
-            if (organizationId.HasValue) 
+            var query = Query().Where(t => t.IsSystemTemplate); // Query() 사용
+            if (organizationId.HasValue) // 특정 조직의 시스템 템플릿 (커스터마이징된 경우)
                 query = query.Where(t => t.OrganizationId == organizationId.Value);
-            
-            var result = await query.Include(t => t.DefaultRole).ToListAsync();
+            else // 전역 시스템 템플릿
+                query = query.Where(t => t.OrganizationId == Guid.Empty); // 또는 OrganizationId가 Nullable이라면 == null
 
-            if (_cache != null && organizationId.HasValue)
+            var result = await query
+                .Include(t => t.DefaultRole)
+                .OrderBy(t => t.Priority)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
+
+            if (_cacheService != null)
             {
-                _cache.Set($"SystemTemplates:{organizationId}", result, _templateCacheOptions);
+                await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromHours(24), cancellationToken); // 장시간 캐싱
             }
-
             return result;
         }
 
-        /// <summary>시스템 템플릿 초기화</summary>
-        public async Task<int> InitializeSystemTemplatesAsync(Guid organizationId)
-        {
-            var existingCount = await QueryForOrganization(organizationId)
-                .Where(t => t.IsSystemTemplate)
-                .CountAsync();
-                
-            if (existingCount > 0) return 0;
-
-            var systemTemplates = CreateDefaultSystemTemplates(organizationId);
-            await _context.PlatformApplicationAccessTemplates.AddRangeAsync(systemTemplates);
-            await _context.SaveChangesAsync();
-
-            InvalidateOrganizationCache(organizationId);
-
-            _logger.LogInformation("Initialized {Count} system templates for organization {OrganizationId}", 
-                systemTemplates.Count, organizationId);
-
-            return systemTemplates.Count;
-        }
-
         /// <summary>시스템 템플릿 여부 확인</summary>
-        public async Task<bool> IsSystemTemplateAsync(Guid templateId)
+        public async Task<bool> IsSystemTemplateAsync(Guid templateId, CancellationToken cancellationToken = default)
         {
-            var template = await GetByIdAsync(templateId);
+            // GetByIdAsync는 캐시를 활용함
+            var template = await GetByIdAsync(templateId, cancellationToken);
             return template?.IsSystemTemplate ?? false;
         }
 
         #endregion
 
-        #region 우선순위 관리
+        #region 우선순위 관리 (CancellationToken 추가)
 
         /// <summary>우선순위별 템플릿 조회</summary>
-        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetByPriorityAsync(Guid organizationId, int minPriority = 0)
+        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetByPriorityAsync(
+            Guid organizationId, int minPriority = 0, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(t => t.Priority >= minPriority)
                 .OrderBy(t => t.Priority)
                 .Include(t => t.DefaultRole)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         /// <summary>우선순위 업데이트</summary>
-        public async Task<bool> UpdatePriorityAsync(Guid templateId, int newPriority)
+        public async Task<bool> UpdatePriorityAsync(Guid templateId, int newPriority, CancellationToken cancellationToken = default)
         {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return false;
-
-            template.Priority = newPriority;
-            template.UpdatedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
-            
-            InvalidateCache(templateId);
-            return true;
+             var updatedTemplate = await UpdateTemplateAsync(templateId, t =>
+             {
+                 t.Priority = newPriority;
+             }, cancellationToken);
+            return updatedTemplate != null;
         }
 
         /// <summary>최고 우선순위 템플릿 조회</summary>
         public async Task<PlatformApplicationAccessTemplate?> GetHighestPriorityTemplateAsync(
-            Guid organizationId, ApplicationAccessLevel level)
+            Guid organizationId, ApplicationAccessLevel level, CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
                 .Where(t => t.Level == level && t.IsActive)
-                .OrderBy(t => t.Priority)
+                .OrderBy(t => t.Priority) // 낮은 숫자가 높은 우선순위
                 .Include(t => t.DefaultRole)
-                .FirstOrDefaultAsync();
+                .AsNoTracking()
+                .FirstOrDefaultAsync(cancellationToken);
         }
 
         #endregion
 
-        #region 사용 현황
+        #region 사용 현황 (기본 조회, CancellationToken 추가)
 
         /// <summary>템플릿 사용 횟수 조회</summary>
-        public async Task<int> GetUsageCountAsync(Guid templateId)
+        public async Task<int> GetUsageCountAsync(Guid templateId, CancellationToken cancellationToken = default)
         {
-            return await _context.UserPlatformApplicationAccess
-                .Where(a => a.AccessTemplateId == templateId && !a.IsDeleted)
-                .CountAsync();
+             // UserPlatformApplicationAccess 엔티티 필요
+            return await _context.Set<UserPlatformApplicationAccess>()
+                .CountAsync(a => a.AccessTemplateId == templateId && !a.IsDeleted, cancellationToken);
         }
 
-        /// <summary>템플릿을 사용하는 사용자 수</summary>
-        public async Task<int> GetUserCountAsync(Guid templateId)
+        /// <summary>템플릿을 사용하는 고유 사용자 수</summary>
+        public async Task<int> GetUserCountAsync(Guid templateId, CancellationToken cancellationToken = default)
         {
-            return await _context.UserPlatformApplicationAccess
+            // UserPlatformApplicationAccess 엔티티 필요
+            return await _context.Set<UserPlatformApplicationAccess>()
                 .Where(a => a.AccessTemplateId == templateId && !a.IsDeleted)
                 .Select(a => a.ConnectedId)
                 .Distinct()
-                .CountAsync();
-        }
-
-        /// <summary>가장 많이 사용되는 템플릿 (최적화됨)</summary>
-        public async Task<IEnumerable<(PlatformApplicationAccessTemplate Template, int UsageCount)>> GetMostUsedTemplatesAsync(
-            Guid organizationId, int limit = 10)
-        {
-            // 사용 횟수를 먼저 집계
-            var usageCounts = await _context.UserPlatformApplicationAccess
-                .Where(a => !a.IsDeleted)
-                .GroupBy(a => a.AccessTemplateId)
-                .Where(g => g.Key.HasValue)  // null 값 필터링
-                .Select(g => new { TemplateId = g.Key!.Value, Count = g.Count() })  // null이 아님을 보장
-                .ToDictionaryAsync(x => x.TemplateId, x => x.Count);
-
-            // 템플릿 조회
-            var templates = await QueryForOrganization(organizationId)
-                .Include(t => t.DefaultRole)
-                .ToListAsync();
-
-            // 조인 및 정렬
-            return templates
-                .Select(t => (t, usageCounts.GetValueOrDefault(t.Id, 0)))
-                .OrderByDescending(x => x.Item2)
-                .Take(limit);
-        }
-
-        /// <summary>사용되지 않는 템플릿 조회</summary>
-        public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetUnusedTemplatesAsync(Guid organizationId)
-        {
-            var usedTemplateIds = await _context.UserPlatformApplicationAccess
-                .Where(a => !a.IsDeleted)
-                .Select(a => a.AccessTemplateId)
-                .Distinct()
-                .ToListAsync();
-
-            return await QueryForOrganization(organizationId)
-                .Where(t => !usedTemplateIds.Contains(t.Id))
-                .Include(t => t.DefaultRole)
-                .ToListAsync();
+                .CountAsync(cancellationToken);
         }
 
         #endregion
 
-        #region Billing 접근
+        #region Billing 접근 (CancellationToken 추가)
 
         /// <summary>Billing 접근 권한이 있는 템플릿 조회</summary>
         public async Task<IEnumerable<PlatformApplicationAccessTemplate>> GetTemplatesWithBillingAccessAsync(
-            Guid organizationId, bool activeOnly = true)
+            Guid organizationId, bool activeOnly = true, CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId).Where(t => t.IncludesBillingAccess);
             if (activeOnly) query = query.Where(t => t.IsActive);
 
-            return await query.Include(t => t.DefaultRole).ToListAsync();
+            return await query
+                .Include(t => t.DefaultRole)
+                .OrderBy(t => t.Priority)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         /// <summary>Billing 접근 권한 설정</summary>
-        public async Task<bool> SetBillingAccessAsync(Guid templateId, bool includesBilling)
+        public async Task<bool> SetBillingAccessAsync(Guid templateId, bool includesBilling, CancellationToken cancellationToken = default)
         {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return false;
-
-            template.IncludesBillingAccess = includesBilling;
-            template.UpdatedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
-            
-            InvalidateCache(templateId);
-            return true;
+             var updatedTemplate = await UpdateTemplateAsync(templateId, t =>
+             {
+                 t.IncludesBillingAccess = includesBilling;
+             }, cancellationToken);
+            return updatedTemplate != null;
         }
 
         #endregion
 
-        #region 일괄 작업
+        #region 일괄 작업 (CancellationToken 추가)
 
-        /// <summary>템플릿 일괄 생성</summary>
-        public async Task<int> BulkCreateAsync(IEnumerable<PlatformApplicationAccessTemplate> templates)
+        /// <summary>템플릿 일괄 생성 (AddRange)</summary>
+        public async Task<int> BulkCreateAsync(IEnumerable<PlatformApplicationAccessTemplate> templates, CancellationToken cancellationToken = default)
         {
+             if (templates == null || !templates.Any()) return 0;
+
             var templateList = templates.ToList();
-            await _context.PlatformApplicationAccessTemplates.AddRangeAsync(templateList);
-            await _context.SaveChangesAsync();
+            // ID, CreatedAt 등은 AddRangeAsync 내부 또는 Interceptor가 처리해야 함
+            // foreach(var t in templateList) { if(t.Id == Guid.Empty) t.Id = Guid.NewGuid(); t.CreatedAt = DateTime.UtcNow; }
+
+            await AddRangeAsync(templateList, cancellationToken); // BaseRepository.AddRangeAsync 사용
 
             // 조직별 캐시 무효화
             foreach (var orgId in templateList.Select(t => t.OrganizationId).Distinct())
             {
-                InvalidateOrganizationCache(orgId);
+                 await InvalidateOrganizationCacheAsync(orgId, cancellationToken);
             }
-
             return templateList.Count;
         }
 
-        /// <summary>조직의 템플릿 삭제 (시스템 템플릿 제외 옵션)</summary>
-        public async Task<int> DeleteAllByOrganizationAsync(Guid organizationId, bool excludeSystemTemplates = true)
+        /// <summary>조직의 템플릿 일괄 삭제 (Soft Delete)</summary>
+        public async Task<int> DeleteAllByOrganizationAsync(
+            Guid organizationId, bool excludeSystemTemplates = true, CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId);
             if (excludeSystemTemplates) query = query.Where(t => !t.IsSystemTemplate);
 
-            var templates = await query.ToListAsync();
-            foreach (var template in templates)
-            {
-                template.IsDeleted = true;
-                template.DeletedAt = DateTime.UtcNow;
-                InvalidateCache(template.Id);
-            }
+            var templatesToDelete = await query.ToListAsync(cancellationToken);
+            if (!templatesToDelete.Any()) return 0;
 
-            await _context.SaveChangesAsync();
-            InvalidateOrganizationCache(organizationId);
-            
-            return templates.Count;
+            await DeleteRangeAsync(templatesToDelete, cancellationToken); // BaseRepository.DeleteRangeAsync 사용 (Soft Delete + 캐시 무효화)
+            await InvalidateOrganizationCacheAsync(organizationId, cancellationToken); // 조직 캐시 무효화
+
+            _logger.LogInformation("Soft deleted {Count} templates for organization {OrganizationId}", templatesToDelete.Count, organizationId);
+            return templatesToDelete.Count;
         }
 
         /// <summary>템플릿 일괄 활성화/비활성화</summary>
-        public async Task<int> BulkSetActiveStatusAsync(IEnumerable<Guid> templateIds, bool isActive)
+        public async Task<int> BulkSetActiveStatusAsync(
+            IEnumerable<Guid> templateIds, bool isActive, CancellationToken cancellationToken = default)
         {
-            var idList = templateIds.ToList();
-            var templates = await Query().Where(t => idList.Contains(t.Id)).ToListAsync();
-            
-            foreach (var template in templates)
-            {
-                template.IsActive = isActive;
-                template.UpdatedAt = DateTime.UtcNow;
-                InvalidateCache(template.Id);
-            }
+             if (templateIds == null || !templateIds.Any()) return 0;
 
-            await _context.SaveChangesAsync();
-            return templates.Count;
+             var idList = templateIds.ToList();
+             // ExecuteUpdateAsync 사용 (EF Core 7+) - 더 효율적
+             int updatedCount = await Query()
+                 .Where(t => idList.Contains(t.Id) && t.IsActive != isActive)
+                 .ExecuteUpdateAsync(updates => updates
+                     .SetProperty(t => t.IsActive, isActive)
+                     .SetProperty(t => t.UpdatedAt, DateTime.UtcNow), // Interceptor가 처리 못할 수 있으므로 명시
+                     cancellationToken);
+
+             // 변경된 템플릿들의 캐시 무효화 (ExecuteUpdate는 개별 엔티티를 반환하지 않음)
+             // 조직 ID를 알아내기 위해 추가 쿼리 필요 또는 더 넓은 범위 캐시 무효화
+             if (updatedCount > 0)
+             {
+                  var affectedOrgIds = await Query()
+                      .Where(t => idList.Contains(t.Id))
+                      .Select(t => t.OrganizationId)
+                      .Distinct()
+                      .ToListAsync(cancellationToken);
+
+                  foreach(var orgId in affectedOrgIds)
+                  {
+                       await InvalidateOrganizationCacheAsync(orgId, cancellationToken);
+                  }
+                  // 개별 템플릿 캐시 무효화 (필요 시)
+                  foreach (var id in idList)
+                  {
+                      await InvalidateCacheAsync(id, cancellationToken);
+                  }
+             }
+
+            _logger.LogInformation("Bulk updated active status for {Count} templates to {IsActive}", updatedCount, isActive);
+            return updatedCount;
         }
 
         #endregion
 
-        #region 마이그레이션
-
-        /// <summary>템플릿을 다른 조직으로 마이그레이션</summary>
-        public async Task<PlatformApplicationAccessTemplate> MigrateToOrganizationAsync(
-            Guid templateId, Guid targetOrganizationId, bool includeUsers = false)
-        {
-            var sourceTemplate = await GetByIdAsync(templateId);
-            if (sourceTemplate == null) throw new InvalidOperationException("Source template not found");
-
-            var migratedTemplate = await CloneTemplateAsync(templateId, sourceTemplate.Name, targetOrganizationId);
-
-            if (includeUsers)
-            {
-                _logger.LogWarning("User migration should be handled at service layer for template {TemplateId}", templateId);
-            }
-
-            return migratedTemplate;
-        }
-
-        /// <summary>레거시 권한을 템플릿으로 변환</summary>
-        public async Task<PlatformApplicationAccessTemplate> ConvertLegacyPermissionsAsync(
-            Guid organizationId, IEnumerable<string> legacyPermissions, string templateName)
-        {
-            var template = new PlatformApplicationAccessTemplate
-            {
-                Id = Guid.NewGuid(),
-                OrganizationId = organizationId,
-                Level = DetermineAccessLevel(legacyPermissions),
-                Name = templateName,
-                Description = "Converted from legacy permissions",
-                PermissionPatterns = JsonSerializer.Serialize(legacyPermissions.ToList()),
-                Priority = 50,
-                IsActive = true,
-                IsSystemTemplate = false,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            return await CreateTemplateAsync(template, false);
-        }
-
-        #endregion
-
-        #region 검색 및 필터링
+        #region 검색 및 필터링 (CancellationToken 추가)
 
         /// <summary>키워드로 템플릿 검색</summary>
         public async Task<IEnumerable<PlatformApplicationAccessTemplate>> SearchAsync(
-            Guid organizationId, string keyword, bool searchInPatterns = false)
+            Guid organizationId, string keyword, bool searchInPatterns = false, CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId);
+            var lowerKeyword = keyword?.ToLowerInvariant() ?? ""; // null 처리 추가
 
-            if (!string.IsNullOrWhiteSpace(keyword))
+            if (!string.IsNullOrWhiteSpace(lowerKeyword))
             {
-                query = query.Where(t => 
-                    t.Name.Contains(keyword) || 
-                    (t.Description != null && t.Description.Contains(keyword)) ||
-                    (searchInPatterns && t.PermissionPatterns.Contains(keyword)));
+                query = query.Where(t =>
+                    (t.Name != null && t.Name.ToLower().Contains(lowerKeyword)) || // null 체크 추가
+                    (t.Description != null && t.Description.ToLower().Contains(lowerKeyword)) ||
+                    (searchInPatterns && t.PermissionPatterns != null && t.PermissionPatterns.ToLower().Contains(lowerKeyword))); // null 체크 추가
             }
 
-            return await query.Include(t => t.DefaultRole).ToListAsync();
-        }
-
-        /// <summary>고급 검색</summary>
-        public async Task<PagedResult<PlatformApplicationAccessTemplate>> AdvancedSearchAsync(
-            Expression<Func<PlatformApplicationAccessTemplate, bool>> criteria, int pageNumber = 1, int pageSize = 50)
-        {
-            var query = Query().Where(criteria);
-            var totalCount = await query.CountAsync();
-
-            var items = await query
+            return await query
                 .Include(t => t.DefaultRole)
                 .OrderBy(t => t.Priority)
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
-
-            return PagedResult<PlatformApplicationAccessTemplate>.Create(items, totalCount, pageNumber, pageSize);
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         #endregion
 
-        #region 통계 및 분석
+        #region Helper Methods (CancellationToken 추가)
 
-        /// <summary>템플릿 사용 통계 (최적화됨)</summary>
-        public async Task<Dictionary<ApplicationAccessLevel, (int TemplateCount, int UsageCount)>> GetTemplateStatisticsAsync(Guid organizationId)
+        /// <summary>조직 관련 캐시 무효화</summary>
+        private async Task InvalidateOrganizationCacheAsync(Guid organizationId, CancellationToken cancellationToken)
         {
-            // 템플릿별 사용 횟수 먼저 집계
-            var usageCounts = await _context.UserPlatformApplicationAccess
-                .Where(a => !a.IsDeleted && a.AccessTemplateId.HasValue)
-                .GroupBy(a => a.AccessTemplateId!.Value)
-                .Select(g => new { TemplateId = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.TemplateId, x => x.Count);
-
-            // 템플릿 통계 계산
-            var templates = await QueryForOrganization(organizationId).ToListAsync();
-            
-            return templates
-                .GroupBy(t => t.Level)
-                .Select(g => new 
-                { 
-                    Level = g.Key,
-                    TemplateCount = g.Count(),
-                    UsageCount = g.Sum(t => usageCounts.GetValueOrDefault(t.Id, 0))
-                })
-                .ToDictionary(x => x.Level, x => (x.TemplateCount, x.UsageCount));
+            if (_cacheService == null) return;
+            // 조직별 템플릿 목록 캐시 등 무효화
+            await _cacheService.RemoveAsync($"SystemTemplates:{organizationId}", cancellationToken);
+            // 다른 조직 관련 캐시 키 추가...
+             _logger.LogDebug("Invalidated organization-level template cache for Org={OrganizationId}", organizationId);
         }
 
-        /// <summary>권한 패턴 분석</summary>
-        public async Task<Dictionary<string, int>> AnalyzePermissionPatternsAsync(Guid templateId)
-        {
-            var template = await GetByIdAsync(templateId);
-            if (template == null) return new Dictionary<string, int>();
+        // BaseRepository의 InvalidateCacheAsync(Guid id) 사용, 별도 InvalidateCache 제거
 
-            var patterns = JsonSerializer.Deserialize<List<string>>(template.PermissionPatterns ?? "[]") ?? new List<string>();
-            
-            return patterns
-                .SelectMany(p => p.Split(':').Take(2))
-                .GroupBy(p => p)
-                .ToDictionary(g => g.Key, g => g.Count());
-        }
+        // DetermineAccessLevel, CreateDefaultSystemTemplates 는 서비스 로직이므로 제거됨
+        // private ApplicationAccessLevel DetermineAccessLevel(...) { ... }
+        // private List<PlatformApplicationAccessTemplate> CreateDefaultSystemTemplates(...) { ... }
 
         #endregion
 
-        #region Helper Methods
-
-        /// <summary>조직별 캐시 무효화</summary>
-        private void InvalidateOrganizationCache(Guid organizationId)
-        {
-            if (_cache == null) return;
-            _cache.Remove($"SystemTemplates:{organizationId}");
-            _cache.Remove($"OrganizationTemplates:{organizationId}");
-        }
-
-        /// <summary>권한 패턴으로부터 접근 레벨 결정</summary>
-        private ApplicationAccessLevel DetermineAccessLevel(IEnumerable<string> permissions)
-        {
-            var permList = permissions.ToList();
-            
-            if (permList.Any(p => p.Contains("*:*:*") || p.Contains("owner")))
-                return ApplicationAccessLevel.Owner;
-            
-            if (permList.Any(p => p.Contains("admin") || p.Contains("*:write")))
-                return ApplicationAccessLevel.Admin;
-            
-            if (permList.Any(p => p.Contains("write")))
-                return ApplicationAccessLevel.User;
-            
-            return ApplicationAccessLevel.Viewer;
-        }
-
-        /// <summary>기본 시스템 템플릿 생성</summary>
-        private List<PlatformApplicationAccessTemplate> CreateDefaultSystemTemplates(Guid organizationId)
-        {
-            return new List<PlatformApplicationAccessTemplate>
-            {
-                new()
-                {
-                    Id = Guid.NewGuid(),
-                    OrganizationId = organizationId,
-                    Level = ApplicationAccessLevel.Owner,
-                    Name = "Owner Template",
-                    Description = "Full access to all features",
-                    PermissionPatterns = JsonSerializer.Serialize(new[] { "application:*:*" }),
-                    Priority = 10,
-                    IsActive = true,
-                    IsSystemTemplate = true,
-                    IncludesBillingAccess = true,
-                    CreatedAt = DateTime.UtcNow
-                },
-                new()
-                {
-                    Id = Guid.NewGuid(),
-                    OrganizationId = organizationId,
-                    Level = ApplicationAccessLevel.Admin,
-                    Name = "Admin Template",
-                    Description = "Administrative access",
-                    PermissionPatterns = JsonSerializer.Serialize(new[] { "application:*:read", "application:*:write", "!application:billing:*" }),
-                    Priority = 20,
-                    IsActive = true,
-                    IsSystemTemplate = true,
-                    CreatedAt = DateTime.UtcNow
-                },
-                new()
-                {
-                    Id = Guid.NewGuid(),
-                    OrganizationId = organizationId,
-                    Level = ApplicationAccessLevel.User,
-                    Name = "User Template",
-                    Description = "Standard user access",
-                    PermissionPatterns = JsonSerializer.Serialize(new[] { "application:*:read", "application:data:write" }),
-                    Priority = 30,
-                    IsActive = true,
-                    IsSystemTemplate = true,
-                    CreatedAt = DateTime.UtcNow
-                },
-                new()
-                {
-                    Id = Guid.NewGuid(),
-                    OrganizationId = organizationId,
-                    Level = ApplicationAccessLevel.Viewer,
-                    Name = "Viewer Template",
-                    Description = "Read-only access",
-                    PermissionPatterns = JsonSerializer.Serialize(new[] { "application:*:read" }),
-                    Priority = 40,
-                    IsActive = true,
-                    IsSystemTemplate = true,
-                    CreatedAt = DateTime.UtcNow
-                }
-            };
-        }
-
-        #endregion
+        // [FIXED] 서비스 계층 로직 메서드 구현 제거됨:
+        // - AddPermissionPatternAsync
+        // - RemovePermissionPatternAsync
+        // - ValidatePermissionPatternsAsync
+        // - ExpandPermissionsAsync
+        // - InitializeSystemTemplatesAsync
+        // - GetMostUsedTemplatesAsync
+        // - GetUnusedTemplatesAsync
+        // - MigrateToOrganizationAsync
+        // - ConvertLegacyPermissionsAsync
+        // - AdvancedSearchAsync (BaseRepository.GetPagedAsync 사용)
+        // - GetTemplateStatisticsAsync
+        // - AnalyzePermissionPatternsAsync
     }
 }

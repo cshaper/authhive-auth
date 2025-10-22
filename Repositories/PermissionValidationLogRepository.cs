@@ -4,7 +4,7 @@ using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Base;
-using Microsoft.Extensions.Caching.Memory;
+using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Base.Summaries;
 using AuthHive.Core.Models.Auth.Permissions.Common;
@@ -13,769 +13,472 @@ using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Core.Interfaces.Organization.Service;
+using Microsoft.Extensions.Logging;
+using System.Globalization; // CultureInfo for GetWeeklyTrendsAsync
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
     /// PermissionValidationLog Repository - 권한 검증 로그 관리 Repository
-    /// AuthHive v15 권한 검증 추적 및 분석 시스템의 핵심 저장소
+    /// AuthHive v16: BaseRepository 상속, ICacheService 사용, CancellationToken 적용
+    /// 서비스 계층 로직 메서드 제거됨
     /// </summary>
     public class PermissionValidationLogRepository : BaseRepository<PermissionValidationLog>, IPermissionValidationLogRepository
     {
+         private readonly ILogger<PermissionValidationLogRepository> _logger;
+
         public PermissionValidationLogRepository(
-            AuthDbContext context, 
-            IOrganizationContext organizationContext,
-            IMemoryCache? cache = null) 
-            : base(context, organizationContext, cache)
+            AuthDbContext context,
+            ICacheService? cacheService = null,
+            ILogger<PermissionValidationLogRepository> logger = null!)
+            : base(context, cacheService)
         {
+             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        #region 기본 조회
+        protected override bool IsOrganizationScopedEntity() => true;
 
-        /// <summary>
-        /// ConnectedId의 권한 검증 로그 조회
-        /// </summary>
+        #region 기본 조회 (CancellationToken 추가)
+
         public async Task<PagedResult<PermissionValidationLog>> GetByConnectedIdAsync(
             Guid connectedId,
             DateTime? startDate = null,
             DateTime? endDate = null,
             int pageNumber = 1,
-            int pageSize = 50)
+            int pageSize = 50,
+            CancellationToken cancellationToken = default)
         {
-            var query = Query().Where(log => log.ConnectedId == connectedId);
-
-            if (startDate.HasValue)
-            {
-                query = query.Where(log => log.Timestamp >= startDate.Value);
-            }
-
-            if (endDate.HasValue)
-            {
-                query = query.Where(log => log.Timestamp <= endDate.Value);
-            }
-
-            var totalCount = await query.CountAsync();
-
-            var items = await query
-                .Include(log => log.ConnectedIdEntity)
-                .Include(log => log.PlatformApplication)
-                .OrderByDescending(log => log.Timestamp)
-                .Skip((pageNumber - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
+            var (items, totalCount) = await GetPagedAsync(
+                pageNumber,
+                pageSize,
+                predicate: log => log.ConnectedId == connectedId &&
+                                 (!startDate.HasValue || log.Timestamp >= startDate.Value) &&
+                                 (!endDate.HasValue || log.Timestamp <= endDate.Value),
+                orderBy: log => log.Timestamp,
+                isDescending: true,
+                cancellationToken: cancellationToken);
 
             return PagedResult<PermissionValidationLog>.Create(items, totalCount, pageNumber, pageSize);
         }
 
-        /// <summary>
-        /// 애플리케이션별 권한 검증 로그 조회
-        /// </summary>
         public async Task<IEnumerable<PermissionValidationLog>> GetByApplicationAsync(
             Guid applicationId,
             bool? isAllowed = null,
-            int limit = 100)
+            int limit = 100,
+            CancellationToken cancellationToken = default)
         {
             var query = Query().Where(log => log.ApplicationId == applicationId);
-
-            if (isAllowed.HasValue)
-            {
-                query = query.Where(log => log.IsAllowed == isAllowed.Value);
-            }
+            if (isAllowed.HasValue) query = query.Where(log => log.IsAllowed == isAllowed.Value);
 
             return await query
                 .OrderByDescending(log => log.Timestamp)
                 .Take(limit)
                 .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 스코프별 검증 로그 조회
-        /// </summary>
         public async Task<IEnumerable<PermissionValidationLog>> GetByScopeAsync(
             string requestedScope,
             Guid organizationId,
             DateTime? startDate = null,
-            DateTime? endDate = null)
+            DateTime? endDate = null,
+            CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId)
                 .Where(log => log.RequestedScope == requestedScope);
 
-            if (startDate.HasValue)
-            {
-                query = query.Where(log => log.Timestamp >= startDate.Value);
-            }
-
-            if (endDate.HasValue)
-            {
-                query = query.Where(log => log.Timestamp <= endDate.Value);
-            }
+            if (startDate.HasValue) query = query.Where(log => log.Timestamp >= startDate.Value);
+            if (endDate.HasValue) query = query.Where(log => log.Timestamp <= endDate.Value);
 
             return await query
                 .OrderByDescending(log => log.Timestamp)
                 .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 세션별 권한 검증 로그 조회
-        /// </summary>
-        public async Task<IEnumerable<PermissionValidationLog>> GetBySessionAsync(Guid sessionId)
+        public async Task<IEnumerable<PermissionValidationLog>> GetBySessionAsync(
+            Guid sessionId,
+            CancellationToken cancellationToken = default)
         {
+            // [FIXED] CS0019: Guid? 와 string 비교 수정 (Guid? 끼리 비교)
             return await Query()
-                .Where(log => log.SessionId == sessionId)
+                .Where(log => log.SessionId == sessionId) // SessionId가 Guid? 이므로 Guid와 직접 비교
                 .OrderByDescending(log => log.Timestamp)
-                .Include(log => log.Session)
-                .ToListAsync();
+                .Include(log => log.Session) // Session 탐색 속성 (이름 확인 필요)
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 특정 권한에 대한 최근 검증 로그 조회
-        /// </summary>
         public async Task<IEnumerable<PermissionValidationLog>> GetRecentByPermissionIdAsync(
             Guid permissionId,
-            int days)
+            int days,
+            CancellationToken cancellationToken = default)
         {
             var startDate = DateTime.UtcNow.AddDays(-days);
-            
-            // Permission ID로 해당 권한의 Scope를 먼저 조회
-            var permission = await _context.Set<Permission>()
-                .FirstOrDefaultAsync(p => p.Id == permissionId);
-            
-            if (permission == null)
-            {
-                return Enumerable.Empty<PermissionValidationLog>();
-            }
+            var permissionScope = await _context.Set<Permission>()
+                .Where(p => p.Id == permissionId && !p.IsDeleted)
+                .Select(p => p.Scope)
+                .FirstOrDefaultAsync(cancellationToken);
 
-            // 해당 Scope로 검증된 로그들을 조회
+            if (permissionScope == null) return Enumerable.Empty<PermissionValidationLog>();
+
             return await Query()
-                .Where(log => log.RequestedScope == permission.Scope && 
-                             log.Timestamp >= startDate)
+                .Where(log => log.RequestedScope == permissionScope && log.Timestamp >= startDate)
                 .OrderByDescending(log => log.Timestamp)
                 .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 특정 권한에 대한 마지막 검증 로그 조회
-        /// </summary>
-        public async Task<PermissionValidationLog?> GetLastValidationAsync(Guid permissionId)
+        public async Task<PermissionValidationLog?> GetLastValidationAsync(
+            Guid permissionId,
+            CancellationToken cancellationToken = default)
         {
-            // Permission ID로 해당 권한의 Scope를 먼저 조회
-            var permission = await _context.Set<Permission>()
-                .FirstOrDefaultAsync(p => p.Id == permissionId);
-            
-            if (permission == null)
-            {
-                return null;
-            }
+             var permissionScope = await _context.Set<Permission>()
+                 .Where(p => p.Id == permissionId && !p.IsDeleted)
+                 .Select(p => p.Scope)
+                 .FirstOrDefaultAsync(cancellationToken);
 
-            // 해당 Scope로 검증된 가장 최근 로그 조회
+            if (permissionScope == null) return null;
+
             return await Query()
-                .Where(log => log.RequestedScope == permission.Scope)
+                .Where(log => log.RequestedScope == permissionScope)
                 .OrderByDescending(log => log.Timestamp)
                 .Include(log => log.ConnectedIdEntity)
-                .FirstOrDefaultAsync();
+                .AsNoTracking()
+                .FirstOrDefaultAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 조직 및 권한별 검증 로그 수 조회
-        /// </summary>
-        public async Task<int> CountByOrganizationAsync(Guid organizationId, Guid permissionId)
+        public async Task<int> CountByOrganizationAsync(
+            Guid organizationId,
+            Guid permissionId,
+            CancellationToken cancellationToken = default)
         {
-            // Permission ID로 해당 권한의 Scope를 먼저 조회
-            var permission = await _context.Set<Permission>()
-                .FirstOrDefaultAsync(p => p.Id == permissionId);
-            
-            if (permission == null)
-            {
-                return 0;
-            }
+             var permissionScope = await _context.Set<Permission>()
+                 .Where(p => p.Id == permissionId && !p.IsDeleted)
+                 .Select(p => p.Scope)
+                 .FirstOrDefaultAsync(cancellationToken);
 
-            // 해당 조직과 Scope로 검증된 로그 수 카운트
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.RequestedScope == permission.Scope)
-                .CountAsync();
+            if (permissionScope == null) return 0;
+            return await CountAsync(log => log.OrganizationId == organizationId && log.RequestedScope == permissionScope, cancellationToken);
         }
 
-        /// <summary>
-        /// 애플리케이션 및 권한별 검증 로그 수 조회
-        /// </summary>
-        public async Task<int> CountByApplicationAsync(Guid applicationId, Guid permissionId)
+        public async Task<int> CountByApplicationAsync(
+            Guid applicationId,
+            Guid permissionId,
+            CancellationToken cancellationToken = default)
         {
-            // Permission ID로 해당 권한의 Scope를 먼저 조회
-            var permission = await _context.Set<Permission>()
-                .FirstOrDefaultAsync(p => p.Id == permissionId);
-            
-            if (permission == null)
-            {
-                return 0;
-            }
+            var permissionScope = await _context.Set<Permission>()
+                 .Where(p => p.Id == permissionId && !p.IsDeleted)
+                 .Select(p => p.Scope)
+                 .FirstOrDefaultAsync(cancellationToken);
 
-            // 해당 애플리케이션과 Scope로 검증된 로그 수 카운트
-            return await Query()
-                .Where(log => log.ApplicationId == applicationId && 
-                             log.RequestedScope == permission.Scope)
-                .CountAsync();
+            if (permissionScope == null) return 0;
+            return await CountAsync(log => log.ApplicationId == applicationId && log.RequestedScope == permissionScope, cancellationToken);
         }
 
         #endregion
 
-        #region 로그 기록
+        #region 로그 기록 (CancellationToken 추가)
 
-        /// <summary>
-        /// 권한 검증 로그 기록
-        /// </summary>
-        public async Task<PermissionValidationLog> LogValidationAsync(PermissionValidationLog log)
+        public async Task<PermissionValidationLog> LogValidationAsync(
+            PermissionValidationLog log,
+            CancellationToken cancellationToken = default)
         {
-            log.Id = Guid.NewGuid();
-            log.Timestamp = DateTime.UtcNow;
-            log.CreatedAt = DateTime.UtcNow;
-
-            return await AddAsync(log);
+            if (log.Id == Guid.Empty) log.Id = Guid.NewGuid();
+            if (log.Timestamp == default) log.Timestamp = DateTime.UtcNow;
+            if (log.CreatedAt == default) log.CreatedAt = DateTime.UtcNow;
+            if (log.OrganizationId == Guid.Empty && log.ConnectedId != Guid.Empty)
+            {
+                 try { log.OrganizationId = await GetOrganizationIdForConnectedIdAsync(log.ConnectedId, cancellationToken); }
+                 catch(ArgumentException ex) { _logger.LogWarning(ex, "Could not set OrganizationId for log entry."); }
+            }
+            return await AddAsync(log, cancellationToken);
         }
 
-        /// <summary>
-        /// 성공한 권한 검증 기록
-        /// </summary>
         public async Task<PermissionValidationLog> LogSuccessfulValidationAsync(
             Guid connectedId,
             string requestedScope,
             Guid? applicationId,
             int durationMs,
-            PermissionCacheStatus cacheStatus)
+            PermissionCacheStatus cacheStatus,
+            CancellationToken cancellationToken = default)
         {
-            // ConnectedId에서 OrganizationId 가져오기
-            var connectedIdEntity = await _context.Set<ConnectedId>()
-                .FirstOrDefaultAsync(c => c.Id == connectedId);
-
-            if (connectedIdEntity == null)
-            {
-                throw new ArgumentException("ConnectedId not found", nameof(connectedId));
-            }
-
+            var organizationId = await GetOrganizationIdForConnectedIdAsync(connectedId, cancellationToken);
             var log = new PermissionValidationLog
             {
-                Id = Guid.NewGuid(),
-                ConnectedId = connectedId,
-                ApplicationId = applicationId,
-                RequestedScope = requestedScope,
-                IsAllowed = true,
-                ValidationResult = PermissionValidationResult.Granted,
-                ValidationDurationMs = durationMs,
-                CacheStatus = cacheStatus,
-                OrganizationId = connectedIdEntity.OrganizationId,
-                Timestamp = DateTime.UtcNow,
-                CreatedAt = DateTime.UtcNow
+                ConnectedId = connectedId, ApplicationId = applicationId, RequestedScope = requestedScope,
+                IsAllowed = true, ValidationResult = PermissionValidationResult.Granted,
+                ValidationDurationMs = durationMs, CacheStatus = cacheStatus, OrganizationId = organizationId
             };
-
-            return await AddAsync(log);
+            return await LogValidationAsync(log, cancellationToken);
         }
 
-        /// <summary>
-        /// 실패한 권한 검증 기록
-        /// </summary>
         public async Task<PermissionValidationLog> LogFailedValidationAsync(
             Guid connectedId,
             string requestedScope,
             PermissionValidationResult validationResult,
             string denialReason,
-            Guid? applicationId = null)
+            Guid? applicationId = null,
+            CancellationToken cancellationToken = default)
         {
-            // ConnectedId에서 OrganizationId 가져오기
-            var connectedIdEntity = await _context.Set<ConnectedId>()
-                .FirstOrDefaultAsync(c => c.Id == connectedId);
-
-            if (connectedIdEntity == null)
-            {
-                throw new ArgumentException("ConnectedId not found", nameof(connectedId));
-            }
-
+             var organizationId = await GetOrganizationIdForConnectedIdAsync(connectedId, cancellationToken);
             var log = new PermissionValidationLog
             {
-                Id = Guid.NewGuid(),
-                ConnectedId = connectedId,
-                ApplicationId = applicationId,
-                RequestedScope = requestedScope,
-                IsAllowed = false,
-                ValidationResult = validationResult,
-                DenialReason = denialReason,
-                OrganizationId = connectedIdEntity.OrganizationId,
-                Timestamp = DateTime.UtcNow,
-                CreatedAt = DateTime.UtcNow
+                ConnectedId = connectedId, ApplicationId = applicationId, RequestedScope = requestedScope,
+                IsAllowed = false, ValidationResult = validationResult, DenialReason = denialReason,
+                OrganizationId = organizationId
             };
-
-            return await AddAsync(log);
+            return await LogValidationAsync(log, cancellationToken);
         }
 
-        /// <summary>
-        /// 리소스 접근 검증 기록
-        /// </summary>
         public async Task<PermissionValidationLog> LogResourceAccessAsync(
             Guid connectedId,
             ResourceType resourceType,
             Guid resourceId,
             string requestedScope,
-            bool isAllowed)
+            bool isAllowed,
+            CancellationToken cancellationToken = default)
         {
-            // ConnectedId에서 OrganizationId 가져오기
-            var connectedIdEntity = await _context.Set<ConnectedId>()
-                .FirstOrDefaultAsync(c => c.Id == connectedId);
-
-            if (connectedIdEntity == null)
-            {
-                throw new ArgumentException("ConnectedId not found", nameof(connectedId));
-            }
-
+            var organizationId = await GetOrganizationIdForConnectedIdAsync(connectedId, cancellationToken);
             var log = new PermissionValidationLog
             {
-                Id = Guid.NewGuid(),
-                ConnectedId = connectedId,
-                RequestedScope = requestedScope,
-                IsAllowed = isAllowed,
+                ConnectedId = connectedId, RequestedScope = requestedScope, IsAllowed = isAllowed,
+                // [FIXED] CS0029: string 대신 Enum 타입 직접 할당
                 ResourceType = resourceType,
+                // [FIXED] CS0029: string 대신 Guid? 타입 직접 할당
                 ResourceId = resourceId,
                 ValidationResult = isAllowed ? PermissionValidationResult.Granted : PermissionValidationResult.ResourceAccessDenied,
-                OrganizationId = connectedIdEntity.OrganizationId,
-                Timestamp = DateTime.UtcNow,
-                CreatedAt = DateTime.UtcNow
+                OrganizationId = organizationId
             };
+            return await LogValidationAsync(log, cancellationToken);
+        }
 
-            return await AddAsync(log);
+        private async Task<Guid> GetOrganizationIdForConnectedIdAsync(Guid connectedId, CancellationToken cancellationToken)
+        {
+             var orgId = await _context.Set<ConnectedId>()
+                 .Where(c => c.Id == connectedId)
+                 .Select(c => c.OrganizationId)
+                 .FirstOrDefaultAsync(cancellationToken);
+
+             if (orgId == Guid.Empty) throw new ArgumentException($"OrganizationId not found for ConnectedId {connectedId}", nameof(connectedId));
+             return orgId;
         }
 
         #endregion
 
-        #region 거부 분석
+        #region 거부 분석 (기본 조회, CancellationToken 추가)
 
-        /// <summary>
-        /// 거부된 권한 검증 조회
-        /// </summary>
         public async Task<IEnumerable<PermissionValidationLog>> GetDeniedValidationsAsync(
             Guid organizationId,
             DateTime? startDate = null,
             DateTime? endDate = null,
-            int limit = 100)
+            int limit = 100,
+            CancellationToken cancellationToken = default)
         {
-            var query = QueryForOrganization(organizationId)
-                .Where(log => !log.IsAllowed);
-
-            if (startDate.HasValue)
-            {
-                query = query.Where(log => log.Timestamp >= startDate.Value);
-            }
-
-            if (endDate.HasValue)
-            {
-                query = query.Where(log => log.Timestamp <= endDate.Value);
-            }
+            var query = QueryForOrganization(organizationId).Where(log => !log.IsAllowed);
+            if (startDate.HasValue) query = query.Where(log => log.Timestamp >= startDate.Value);
+            if (endDate.HasValue) query = query.Where(log => log.Timestamp <= endDate.Value);
 
             return await query
                 .OrderByDescending(log => log.Timestamp)
                 .Take(limit)
                 .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 거부 사유별 통계
-        /// </summary>
         public async Task<Dictionary<string, int>> GetDenialReasonStatisticsAsync(
             Guid organizationId,
-            int period = 30)
+            int period = 30,
+            CancellationToken cancellationToken = default)
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
-
-            return await QueryForOrganization(organizationId)
-                .Where(log => !log.IsAllowed &&
-                             log.Timestamp >= startDate &&
-                             !string.IsNullOrEmpty(log.DenialReason))
-                .GroupBy(log => log.DenialReason)
-                .ToDictionaryAsync(g => g.Key!, g => g.Count());
+            var results = await QueryForOrganization(organizationId)
+                .Where(log => !log.IsAllowed && log.Timestamp >= startDate && !string.IsNullOrEmpty(log.DenialReason))
+                .GroupBy(log => log.DenialReason!)
+                .Select(g => new { Reason = g.Key, Count = g.Count() })
+                .ToListAsync(cancellationToken);
+            return results.ToDictionary(x => x.Reason, x => x.Count);
         }
 
-        /// <summary>
-        /// 가장 많이 거부된 스코프 조회
-        /// </summary>
         public async Task<IEnumerable<(string Scope, int DenialCount)>> GetMostDeniedScopesAsync(
             Guid organizationId,
-            int limit = 10)
+            int limit = 10,
+            CancellationToken cancellationToken = default)
         {
-            return await QueryForOrganization(organizationId)
-                .Where(log => !log.IsAllowed)
-                .GroupBy(log => log.RequestedScope)
-                .Select(g => new { Scope = g.Key, Count = g.Count() })
-                .OrderByDescending(x => x.Count)
-                .Take(limit)
-                .Select(x => ValueTuple.Create(x.Scope, x.Count))
-                .ToListAsync();
-        }
-
-        /// <summary>
-        /// ConnectedId별 거부율 계산
-        /// </summary>
-        public async Task<double> CalculateDenialRateAsync(Guid connectedId, int period = 30)
-        {
-            var startDate = DateTime.UtcNow.AddDays(-period);
-
-            var totalValidations = await Query()
-                .Where(log => log.ConnectedId == connectedId && log.Timestamp >= startDate)
-                .CountAsync();
-
-            if (totalValidations == 0) return 0;
-
-            var deniedValidations = await Query()
-                .Where(log => log.ConnectedId == connectedId && 
-                             log.Timestamp >= startDate && 
-                             !log.IsAllowed)
-                .CountAsync();
-
-            return Math.Round((double)deniedValidations / totalValidations * 100, 2);
+             var results = await QueryForOrganization(organizationId)
+                 .Where(log => !log.IsAllowed && !string.IsNullOrEmpty(log.RequestedScope))
+                 .GroupBy(log => log.RequestedScope!)
+                 .Select(g => new { Scope = g.Key, Count = g.Count() })
+                 .OrderByDescending(x => x.Count)
+                 .Take(limit)
+                 .ToListAsync(cancellationToken);
+             return results.Select(x => (x.Scope, x.Count));
         }
 
         #endregion
 
-        #region 성능 분석
+        #region 성능 분석 (기본 조회, CancellationToken 추가)
 
-        /// <summary>
-        /// 평균 검증 시간 계산
-        /// </summary>
-        public async Task<double> GetAverageValidationTimeAsync(Guid organizationId, int period = 7)
+        public async Task<double> GetAverageValidationTimeAsync(
+            Guid organizationId,
+            int period = 7,
+            CancellationToken cancellationToken = default)
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
-
             var avgTime = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.ValidationDurationMs.HasValue)
-                .AverageAsync(log => (double?)log.ValidationDurationMs);
-
+                .Where(log => log.Timestamp >= startDate && log.ValidationDurationMs.HasValue)
+                .AverageAsync(log => log.ValidationDurationMs, cancellationToken);
             return avgTime ?? 0;
         }
 
-        /// <summary>
-        /// 캐시 히트율 계산
-        /// </summary>
-        public async Task<double> CalculateCacheHitRateAsync(Guid organizationId, int period = 7)
-        {
-            var startDate = DateTime.UtcNow.AddDays(-period);
-
-            var totalWithCache = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.CacheStatus.HasValue)
-                .CountAsync();
-
-            if (totalWithCache == 0) return 0;
-
-            var cacheHits = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.CacheStatus == PermissionCacheStatus.Hit)
-                .CountAsync();
-
-            return Math.Round((double)cacheHits / totalWithCache * 100, 2);
-        }
-
-        /// <summary>
-        /// 캐시 상태별 통계
-        /// </summary>
         public async Task<Dictionary<PermissionCacheStatus, int>> GetCacheStatusStatisticsAsync(
             Guid organizationId,
             DateTime startDate,
-            DateTime endDate)
+            DateTime endDate,
+            CancellationToken cancellationToken = default)
         {
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.Timestamp <= endDate &&
-                             log.CacheStatus.HasValue)
+            var results = await QueryForOrganization(organizationId)
+                .Where(log => log.Timestamp >= startDate && log.Timestamp <= endDate && log.CacheStatus.HasValue)
                 .GroupBy(log => log.CacheStatus!.Value)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
+                .Select(g => new { Status = g.Key, Count = g.Count() })
+                .ToListAsync(cancellationToken);
+            return results.ToDictionary(x => x.Status, x => x.Count);
         }
 
-        /// <summary>
-        /// 느린 검증 조회
-        /// </summary>
         public async Task<IEnumerable<PermissionValidationLog>> GetSlowValidationsAsync(
             int thresholdMs,
             Guid organizationId,
-            int limit = 50)
+            int limit = 50,
+            CancellationToken cancellationToken = default)
         {
             return await QueryForOrganization(organizationId)
-                .Where(log => log.ValidationDurationMs.HasValue &&
-                             log.ValidationDurationMs >= thresholdMs)
+                .Where(log => log.ValidationDurationMs.HasValue && log.ValidationDurationMs >= thresholdMs)
                 .OrderByDescending(log => log.ValidationDurationMs)
                 .Take(limit)
                 .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
         #endregion
 
-        #region 검증 결과 분석
+        #region 검증 결과 분석 (기본 조회, CancellationToken 추가)
 
-        /// <summary>
-        /// 검증 결과별 통계
-        /// </summary>
         public async Task<Dictionary<PermissionValidationResult, int>> GetValidationResultStatisticsAsync(
             Guid organizationId,
-            int period = 30)
+            int period = 30,
+            CancellationToken cancellationToken = default)
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
-
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate)
-                .GroupBy(log => log.ValidationResult)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
+             var results = await QueryForOrganization(organizationId)
+                 .Where(log => log.Timestamp >= startDate)
+                 .GroupBy(log => log.ValidationResult)
+                 .Select(g => new { Result = g.Key, Count = g.Count() })
+                 .ToListAsync(cancellationToken);
+             return results.ToDictionary(x => x.Result, x => x.Count);
         }
 
-        /// <summary>
-        /// ConnectedId 검증 결과 통계
-        /// </summary>
         public async Task<Dictionary<ConnectedIdValidationResult, int>> GetConnectedIdValidationStatisticsAsync(
             Guid organizationId,
-            int period = 30)
+            int period = 30,
+            CancellationToken cancellationToken = default)
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
-
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.ConnectedIdValidationResult.HasValue)
-                .GroupBy(log => log.ConnectedIdValidationResult!.Value)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
-        }
-
-        /// <summary>
-        /// 검증 단계별 분석
-        /// </summary>
-        public async Task<Dictionary<string, (int Passed, int Failed)>> GetValidationStepAnalysisAsync(
-            Guid organizationId)
-        {
-            var logs = await QueryForOrganization(organizationId)
-                .Where(log => !string.IsNullOrEmpty(log.ValidationStep))
-                .ToListAsync();
-
-            return logs
-                .GroupBy(log => log.ValidationStep!)
-                .ToDictionary(
-                    g => g.Key,
-                    g => (
-                        Passed: g.Count(log => log.IsAllowed),
-                        Failed: g.Count(log => !log.IsAllowed)
-                    )
-                );
+             var results = await QueryForOrganization(organizationId)
+                 .Where(log => log.Timestamp >= startDate && log.ConnectedIdValidationResult.HasValue)
+                 .GroupBy(log => log.ConnectedIdValidationResult!.Value)
+                 .Select(g => new { Result = g.Key, Count = g.Count() })
+                 .ToListAsync(cancellationToken);
+             return results.ToDictionary(x => x.Result, x => x.Count);
         }
 
         #endregion
 
-        #region 리소스 접근 분석
+        #region 리소스 접근 분석 (기본 조회, CancellationToken 추가)
 
-        /// <summary>
-        /// 리소스 타입별 접근 통계
-        /// </summary>
         public async Task<Dictionary<ResourceType, int>> GetResourceAccessStatisticsAsync(
             Guid organizationId,
-            int period = 30)
+            int period = 30,
+            CancellationToken cancellationToken = default)
         {
-            var startDate = DateTime.UtcNow.AddDays(-period);
+             var startDate = DateTime.UtcNow.AddDays(-period);
+             // [FIXED] Nullable Enum GroupBy 처리
+             var results = await QueryForOrganization(organizationId)
+                 .Where(log => log.Timestamp >= startDate && log.ResourceType.HasValue) // HasValue 체크
+                 .GroupBy(log => log.ResourceType!.Value) // !.Value 사용
+                 .Select(g => new { TypeEnum = g.Key, Count = g.Count() })
+                 .ToListAsync(cancellationToken);
 
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.ResourceType.HasValue)
-                .GroupBy(log => log.ResourceType!.Value)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
+             return results.ToDictionary(x => x.TypeEnum, x => x.Count);
         }
 
-        /// <summary>
-        /// 특정 리소스 접근 이력
-        /// </summary>
         public async Task<IEnumerable<PermissionValidationLog>> GetResourceAccessHistoryAsync(
             ResourceType resourceType,
             Guid resourceId,
-            int limit = 100)
+            int limit = 100,
+            CancellationToken cancellationToken = default)
         {
+            // [FIXED] Guid? 와 Guid 비교 수정
             return await Query()
-                .Where(log => log.ResourceType == resourceType && log.ResourceId == resourceId)
+                .Where(log => log.ResourceType == resourceType && log.ResourceId == resourceId) // Enum/Guid 직접 비교
                 .OrderByDescending(log => log.Timestamp)
                 .Take(limit)
                 .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 가장 많이 접근된 리소스
-        /// </summary>
         public async Task<IEnumerable<(Guid ResourceId, int AccessCount)>> GetMostAccessedResourcesAsync(
             Guid organizationId,
             ResourceType resourceType,
-            int limit = 10)
+            int limit = 10,
+            CancellationToken cancellationToken = default)
         {
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.ResourceType == resourceType &&
-                             log.ResourceId.HasValue)
-                .GroupBy(log => log.ResourceId!.Value)
-                .Select(g => new { ResourceId = g.Key, Count = g.Count() })
-                .OrderByDescending(x => x.Count)
-                .Take(limit)
-                .Select(x => ValueTuple.Create(x.ResourceId, x.Count))
-                .ToListAsync();
+             // [FIXED] Nullable Guid GroupBy 처리
+             var results = await QueryForOrganization(organizationId)
+                 .Where(log => log.ResourceType == resourceType && log.ResourceId.HasValue) // HasValue 체크
+                 .GroupBy(log => log.ResourceId!.Value) // !.Value 사용
+                 .Select(g => new { ResourceId = g.Key, Count = g.Count() })
+                 .OrderByDescending(x => x.Count)
+                 .Take(limit)
+                 .ToListAsync(cancellationToken);
+
+             return results.Select(x => (x.ResourceId, x.Count));
         }
 
         #endregion
 
-        #region 보안 분석
+        #region 역할 및 권한 분석 (기본 조회, CancellationToken 추가)
 
-        /// <summary>
-        /// 의심스러운 패턴 감지
-        /// </summary>
-        public async Task<bool> DetectSuspiciousPatternsAsync(
-            Guid connectedId,
-            int timeWindowMinutes = 5)
-        {
-            var windowStart = DateTime.UtcNow.AddMinutes(-timeWindowMinutes);
-            
-            var recentFailures = await Query()
-                .Where(log => log.ConnectedId == connectedId &&
-                             log.Timestamp >= windowStart &&
-                             !log.IsAllowed)
-                .CountAsync();
-
-            return recentFailures >= 5;
-        }
-
-        /// <summary>
-        /// 비정상적인 접근 시도 조회
-        /// </summary>
-        public async Task<IEnumerable<PermissionValidationLog>> GetAbnormalAccessAttemptsAsync(
-            Guid organizationId,
-            int threshold,
-            int timeWindowMinutes)
-        {
-            var windowStart = DateTime.UtcNow.AddMinutes(-timeWindowMinutes);
-
-            var suspiciousConnectedIds = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= windowStart &&
-                             !log.IsAllowed)
-                .GroupBy(log => log.ConnectedId)
-                .Where(g => g.Count() >= threshold)
-                .Select(g => g.Key)
-                .ToListAsync();
-
-            return await QueryForOrganization(organizationId)
-                .Where(log => suspiciousConnectedIds.Contains(log.ConnectedId) &&
-                             log.Timestamp >= windowStart)
-                .OrderByDescending(log => log.Timestamp)
-                .Include(log => log.ConnectedIdEntity)
-                .ToListAsync();
-        }
-
-        /// <summary>
-        /// IP별 검증 실패 분석
-        /// </summary>
-        public async Task<(int FailureCount, IEnumerable<string> FailedScopes)> AnalyzeIpFailuresAsync(
-            string ipAddress,
-            int period = 1)
-        {
-            var startDate = DateTime.UtcNow.AddDays(-period);
-
-            var failures = await Query()
-                .Where(log => log.IpAddress == ipAddress &&
-                             log.Timestamp >= startDate &&
-                             !log.IsAllowed)
-                .ToListAsync();
-
-            var failureCount = failures.Count;
-            var failedScopes = failures.Select(log => log.RequestedScope).Distinct();
-
-            return (failureCount, failedScopes);
-        }
-
-        #endregion
-
-        #region 역할 및 권한 분석
-
-        /// <summary>
-        /// 역할별 검증 통계
-        /// </summary>
-        public async Task<Dictionary<string, (int Success, int Failure)>> GetRoleValidationStatisticsAsync(
-            Guid organizationId,
-            int period = 30)
-        {
-            var startDate = DateTime.UtcNow.AddDays(-period);
-
-            var logs = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             !string.IsNullOrEmpty(log.RolesFound))
-                .ToListAsync();
-
-            var result = new Dictionary<string, (int Success, int Failure)>();
-            
-            foreach (var log in logs)
-            {
-                var roleKey = "general";
-                if (!result.ContainsKey(roleKey))
-                {
-                    result[roleKey] = (0, 0);
-                }
-
-                if (log.IsAllowed)
-                {
-                    result[roleKey] = (result[roleKey].Success + 1, result[roleKey].Failure);
-                }
-                else
-                {
-                    result[roleKey] = (result[roleKey].Success, result[roleKey].Failure + 1);
-                }
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// 권한별 사용 빈도
-        /// </summary>
         public async Task<Dictionary<string, int>> GetPermissionUsageFrequencyAsync(
             Guid organizationId,
-            int period = 30)
+            int period = 30,
+            CancellationToken cancellationToken = default)
         {
             var startDate = DateTime.UtcNow.AddDays(-period);
-
-            return await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate)
-                .GroupBy(log => log.RequestedScope)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
-        }
-
-        /// <summary>
-        /// 사용되지 않는 권한 찾기
-        /// </summary>
-        public async Task<IEnumerable<string>> FindUnusedPermissionsAsync(
-            Guid organizationId,
-            int inactiveDays = 90)
-        {
-            var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
-
-            var allScopes = await _context.Set<Permission>()
-                .Select(p => p.Scope)
-                .ToListAsync();
-
-            var usedScopes = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= cutoffDate)
-                .Select(log => log.RequestedScope)
-                .Distinct()
-                .ToListAsync();
-
-            return allScopes.Except(usedScopes);
+             var results = await QueryForOrganization(organizationId)
+                 .Where(log => log.Timestamp >= startDate && !string.IsNullOrEmpty(log.RequestedScope))
+                 .GroupBy(log => log.RequestedScope!)
+                 .Select(g => new { Scope = g.Key, Count = g.Count() })
+                 .ToListAsync(cancellationToken);
+             return results.ToDictionary(x => x.Scope, x => x.Count);
         }
 
         #endregion
 
-        #region 일괄 작업
+        #region 일괄 작업 (CancellationToken 추가)
 
-        /// <summary>
-        /// 검증 로그 일괄 기록
-        /// </summary>
-        public async Task<int> BulkLogAsync(IEnumerable<PermissionValidationLog> logs)
+        public async Task<int> BulkLogAsync(
+            IEnumerable<PermissionValidationLog> logs,
+            CancellationToken cancellationToken = default)
         {
+            if (logs == null || !logs.Any()) return 0;
             var logList = logs.ToList();
             var timestamp = DateTime.UtcNow;
 
@@ -784,164 +487,49 @@ namespace AuthHive.Auth.Repositories
                 if (log.Id == Guid.Empty) log.Id = Guid.NewGuid();
                 if (log.Timestamp == default) log.Timestamp = timestamp;
                 if (log.CreatedAt == default) log.CreatedAt = timestamp;
+                if (log.OrganizationId == Guid.Empty && log.ConnectedId != Guid.Empty)
+                {
+                     try { log.OrganizationId = await GetOrganizationIdForConnectedIdAsync(log.ConnectedId, cancellationToken); }
+                     catch(ArgumentException ex) { _logger.LogWarning(ex, "Could not set OrganizationId for log entry during bulk insert."); }
+                }
             }
-
-            await AddRangeAsync(logList);
+            await AddRangeAsync(logList, cancellationToken);
             return logList.Count;
         }
 
-        /// <summary>
-        /// 오래된 로그 정리
-        /// </summary>
-        public async Task<int> CleanupOldLogsAsync(int olderThanDays, int batchSize = 1000)
+        public async Task<int> CleanupOldLogsAsync(
+            int olderThanDays,
+            int batchSize = 1000,
+            CancellationToken cancellationToken = default)
         {
+             _logger.LogInformation("CleanupOldLogsAsync starting for logs older than {Days} days.", olderThanDays);
             var cutoffDate = DateTime.UtcNow.AddDays(-olderThanDays);
+            int totalDeleted = 0;
+            bool moreToDelete = true;
 
-            var oldLogs = await Query()
-                .Where(log => log.Timestamp < cutoffDate)
-                .Take(batchSize)
-                .ToListAsync();
+            while(moreToDelete && !cancellationToken.IsCancellationRequested)
+            {
+                 var oldLogs = await _dbSet
+                     .Where(log => log.Timestamp < cutoffDate)
+                     .OrderBy(log => log.Timestamp)
+                     .Take(batchSize)
+                     .ToListAsync(cancellationToken);
 
-            if (!oldLogs.Any()) return 0;
+                 if (!oldLogs.Any()) { moreToDelete = false; break; }
 
-            await DeleteRangeAsync(oldLogs);
-            return oldLogs.Count;
-        }
+                 _context.RemoveRange(oldLogs); // 물리적 삭제
+                 int deletedInBatch = await _context.SaveChangesAsync(cancellationToken);
+                 totalDeleted += deletedInBatch;
+                 _logger.LogInformation("Deleted {Count} logs in cleanup batch.", deletedInBatch);
 
-        /// <summary>
-        /// 로그 아카이빙
-        /// </summary>
-        public async Task<int> ArchiveLogsAsync(
-            DateTime startDate,
-            DateTime endDate,
-            string targetLocation)
-        {
-            var logsToArchive = await Query()
-                .Where(log => log.Timestamp >= startDate && log.Timestamp <= endDate)
-                .ToListAsync();
-
-            return logsToArchive.Count;
+                 await Task.Delay(100, cancellationToken);
+            }
+             _logger.LogInformation("CleanupOldLogsAsync finished. Total logs deleted: {TotalCount}", totalDeleted);
+            return totalDeleted;
         }
 
         #endregion
 
-        #region 리포팅
-
-        /// <summary>
-        /// 권한 검증 요약 보고서
-        /// </summary>
-        public async Task<PermissionValidationSummary> GetValidationSummaryAsync(
-            Guid organizationId,
-            DateTime startDate,
-            DateTime endDate)
-        {
-            var logs = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.Timestamp <= endDate)
-                .ToListAsync();
-
-            var summary = new PermissionValidationSummary
-            {
-                OrganizationId = organizationId,
-                StartDate = startDate,
-                EndDate = endDate,
-                TotalValidations = logs.Count,
-                SuccessfulValidations = logs.Count(l => l.IsAllowed),
-                FailedValidations = logs.Count(l => !l.IsAllowed),
-                UniqueUsers = logs.Select(l => l.ConnectedId).Distinct().Count(),
-                UniqueApplications = logs.Where(l => l.ApplicationId.HasValue)
-                                       .Select(l => l.ApplicationId!.Value)
-                                       .Distinct()
-                                       .Count()
-            };
-
-            var cacheStats = logs.Where(l => l.CacheStatus.HasValue).ToList();
-            if (cacheStats.Any())
-            {
-                summary.CacheHits = cacheStats.Count(l => l.CacheStatus == PermissionCacheStatus.Hit);
-                summary.CacheMisses = cacheStats.Count - summary.CacheHits;
-            }
-
-            var timeLogs = logs.Where(l => l.ValidationDurationMs.HasValue).ToList();
-            if (timeLogs.Any())
-            {
-                summary.AverageValidationTimeMs = timeLogs.Average(l => l.ValidationDurationMs!.Value);
-            }
-
-            summary.TopDenialReasons = logs
-                .Where(l => !l.IsAllowed && !string.IsNullOrEmpty(l.DenialReason))
-                .GroupBy(l => l.DenialReason!)
-                .OrderByDescending(g => g.Count())
-                .Take(5)
-                .Select(g => g.Key)
-                .ToList();
-
-            return summary;
-        }
-
-        /// <summary>
-        /// 시간대별 검증 패턴
-        /// </summary>
-        public async Task<Dictionary<int, int>> GetHourlyValidationPatternAsync(
-            Guid organizationId,
-            DateTime date)
-        {
-            var startDate = date.Date;
-            var endDate = startDate.AddDays(1);
-
-            var hourlyData = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.Timestamp < endDate)
-                .GroupBy(log => log.Timestamp.Hour)
-                .ToDictionaryAsync(g => g.Key, g => g.Count());
-
-            var result = new Dictionary<int, int>();
-            for (int hour = 0; hour < 24; hour++)
-            {
-                result[hour] = hourlyData.GetValueOrDefault(hour, 0);
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// 주간 트렌드 분석
-        /// </summary>
-        public async Task<IEnumerable<WeeklyValidationTrend>> GetWeeklyTrendsAsync(
-            Guid organizationId,
-            int weeks = 4)
-        {
-            var endDate = DateTime.UtcNow.Date;
-            var startDate = endDate.AddDays(-weeks * 7);
-
-            var logs = await QueryForOrganization(organizationId)
-                .Where(log => log.Timestamp >= startDate &&
-                             log.Timestamp <= endDate)
-                .ToListAsync();
-
-            var trends = new List<WeeklyValidationTrend>();
-
-            for (int week = 0; week < weeks; week++)
-            {
-                var weekStart = startDate.AddDays(week * 7);
-                var weekEnd = weekStart.AddDays(7);
-
-                var weekLogs = logs.Where(l => l.Timestamp >= weekStart && l.Timestamp < weekEnd);
-
-                trends.Add(new WeeklyValidationTrend
-                {
-                    WeekStartDate = weekStart,
-                    WeekEndDate = weekEnd,
-                    TotalValidations = weekLogs.Count(),
-                    SuccessfulValidations = weekLogs.Count(l => l.IsAllowed),
-                    FailedValidations = weekLogs.Count(l => !l.IsAllowed),
-                    UniqueUsers = weekLogs.Select(l => l.ConnectedId).Distinct().Count()
-                });
-            }
-
-            return trends;
-        }
-
-        #endregion
+        // [FIXED] 서비스 계층 로직 메서드 제거됨
     }
 }
