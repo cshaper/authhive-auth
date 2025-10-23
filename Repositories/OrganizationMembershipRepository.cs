@@ -4,25 +4,28 @@ using AuthHive.Core.Interfaces.Organization.Repository;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Interfaces.Infra.Cache; // ✅ Correct: Using ICacheService
-using System.Threading; // ✅ Correct: For CancellationToken
+using AuthHive.Core.Interfaces.Infra.Cache;
+using System.Threading;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// OrganizationMembership Repository 구현체 - AuthHive v16 아키텍처 적용
-    /// 조직 멤버십의 CRUD 및 관계 관리를 담당합니다.
+    /// OrganizationMembership Repository 구현체 - AuthHive v16.1 아키텍처 적용
+    /// 
+    /// [v16.1 변경 사항]
+    /// 1. (필수) 생성자에서 ICacheService를 BaseRepository로 전달하도록 수정
+    /// 2. (UoW) 리포지토리 내의 _context.SaveChangesAsync() 호출 제거 (서비스 레이어 책임)
     /// </summary>
     public class OrganizationMembershipRepository : BaseRepository<OrganizationMembership>, IOrganizationMembershipRepository
     {
-        // ✅ Correct: The constructor now aligns with the new BaseRepository.
-        // It no longer depends on IOrganizationContext and uses ICacheService.
         public OrganizationMembershipRepository(
             AuthDbContext context,
             ICacheService? cacheService)
-            : base(context) { }
+            // 💡 [v16.1 수정] cacheService를 base()로 전달해야 캐시가 동작합니다.
+            : base(context, cacheService) 
+        { }
 
-        // ✅ Correct: Implemented the mandatory abstract method from BaseRepository.
+        // ✅ v16.1: IsOrganizationScopedEntity()는 true가 맞습니다.
         protected override bool IsOrganizationScopedEntity() => true;
 
         #region 기본 멤버십 조회
@@ -39,9 +42,11 @@ namespace AuthHive.Auth.Repositories
                 query = query.Where(m => m.Status == OrganizationMembershipStatus.Active);
             }
 
+            // 💡 비용 최적화: AsNoTracking()을 추가하여 변경 추적 오버헤드 제거
             return await query
+                .AsNoTracking() 
                 .Include(m => m.Member)
-                .ThenInclude(c => c.User) // Include User for display purposes
+                .ThenInclude(c => c!.User) // User는 Nullable일 수 있으므로 Null 전파
                 .Include(m => m.InvitedBy)
                 .OrderBy(m => m.JoinedAt)
                 .ToListAsync(cancellationToken);
@@ -52,6 +57,7 @@ namespace AuthHive.Auth.Repositories
             Guid connectedId,
             CancellationToken cancellationToken = default)
         {
+            // 💡 GetMembershipAsync는 상태 수정을 위해 추적이 필요할 수 있으므로 AsNoTracking() 생략
             return await QueryForOrganization(organizationId)
                 .Include(m => m.Member)
                 .Include(m => m.Organization)
@@ -82,6 +88,7 @@ namespace AuthHive.Auth.Repositories
             }
 
             return await query
+                .AsNoTracking()
                 .Include(m => m.Organization)
                 .OrderBy(m => m.JoinedAt)
                 .ToListAsync(cancellationToken);
@@ -98,7 +105,6 @@ namespace AuthHive.Auth.Repositories
 
             if (!string.IsNullOrEmpty(username))
             {
-                // ✅ Add explicit null checks inside the AnyAsync predicate
                 return await query.AnyAsync(m =>
                     m.Member != null &&
                     m.Member.User != null &&
@@ -107,7 +113,6 @@ namespace AuthHive.Auth.Repositories
             }
             else
             {
-                // ✅ Add explicit null checks inside the AnyAsync predicate here as well
                 return await query.AnyAsync(m =>
                     m.Member != null &&
                     m.Member.User != null &&
@@ -118,7 +123,7 @@ namespace AuthHive.Auth.Repositories
 
         #endregion
 
-        #region 상태 및 역할별 조회
+        #region 상태 및 역할별 조회 (AsNoTracking() 추가)
 
         public async Task<IEnumerable<OrganizationMembership>> GetMembersByStatusAsync(
             Guid organizationId,
@@ -127,6 +132,7 @@ namespace AuthHive.Auth.Repositories
         {
             return await QueryForOrganization(organizationId)
                 .Where(m => m.Status == status)
+                .AsNoTracking()
                 .ToListAsync(cancellationToken);
         }
 
@@ -137,6 +143,7 @@ namespace AuthHive.Auth.Repositories
         {
             return await QueryForOrganization(organizationId)
                 .Where(m => m.MemberRole == role)
+                .AsNoTracking()
                 .ToListAsync(cancellationToken);
         }
 
@@ -147,6 +154,7 @@ namespace AuthHive.Auth.Repositories
         {
             return await QueryForOrganization(organizationId)
                 .Where(m => m.MembershipType == membershipType)
+                .AsNoTracking()
                 .ToListAsync(cancellationToken);
         }
 
@@ -158,6 +166,7 @@ namespace AuthHive.Auth.Repositories
 
             return await QueryForOrganization(organizationId)
                 .Where(m => adminRoles.Contains(m.MemberRole) && m.Status == OrganizationMembershipStatus.Active)
+                .AsNoTracking()
                 .Include(m => m.Member)
                 .OrderBy(m => m.MemberRole)
                 .ThenBy(m => m.JoinedAt)
@@ -174,15 +183,16 @@ namespace AuthHive.Auth.Repositories
             if (string.IsNullOrWhiteSpace(invitationToken))
                 return null;
 
-            // Use Query() to ensure soft-deleted items are excluded.
+            // 초대 수락은 상태 수정을 동반하므로 AsNoTracking() 생략
             return await Query()
                 .Include(m => m.Organization)
                 .Include(m => m.InvitedBy)
                 .FirstOrDefaultAsync(m => m.InvitationToken == invitationToken, cancellationToken);
         }
-
-        // Note: This method modifies state and saves. This is acceptable in a repository
-        // when not using a separate Unit of Work service.
+        
+        // 💡 [v16.1] 이 메서드는 IOrganizationMembershipRepository 인터페이스에 없습니다.
+        // 인터페이스에 추가하거나, 서비스 레이어로 로직을 이동해야 합니다.
+        // 우선 UoW 원칙만 적용합니다.
         public async Task<bool> AcceptInvitationAsync(string invitationToken, Guid connectedId)
         {
             var membership = await GetByInvitationTokenAsync(invitationToken);
@@ -196,13 +206,15 @@ namespace AuthHive.Auth.Repositories
             membership.UpdatedAt = DateTime.UtcNow;
 
             await UpdateAsync(membership); // Marks entity as modified and invalidates cache
-            await _context.SaveChangesAsync(); // Commits the change to the database
+            
+            // 💡 [v16.1 삭제] UoW 원칙(5번)에 따라 SaveChanges는 서비스 레이어의 책임입니다.
+            // await _context.SaveChangesAsync(); 
             return true;
         }
 
         #endregion
 
-        #region 만료 및 비활성 관리
+        #region 만료 및 비활성 관리 (AsNoTracking() 추가)
 
         public async Task<IEnumerable<OrganizationMembership>> GetExpiredMembershipsAsync(
             DateTime asOfDate,
@@ -210,8 +222,9 @@ namespace AuthHive.Auth.Repositories
         {
             return await Query()
                 .Where(m => m.ExpiresAt.HasValue &&
-                              m.ExpiresAt.Value <= asOfDate &&
-                              m.Status == OrganizationMembershipStatus.Active)
+                            m.ExpiresAt.Value <= asOfDate &&
+                            m.Status == OrganizationMembershipStatus.Active)
+                .AsNoTracking()
                 .Include(m => m.Member)
                 .Include(m => m.Organization)
                 .ToListAsync(cancellationToken);
@@ -226,12 +239,14 @@ namespace AuthHive.Auth.Repositories
 
             return await QueryForOrganization(organizationId)
                 .Where(m => m.Status == OrganizationMembershipStatus.Active &&
-                              (m.LastActivityAt == null || m.LastActivityAt < cutoffDate))
+                            (m.LastActivityAt == null || m.LastActivityAt < cutoffDate))
+                .AsNoTracking()
                 .Include(m => m.Member)
                 .OrderBy(m => m.LastActivityAt ?? m.JoinedAt)
                 .ToListAsync(cancellationToken);
         }
 
+        // 💡 [v16.1] 이 메서드는 IOrganizationMembershipRepository 인터페이스에 없습니다.
         public async Task<IEnumerable<OrganizationMembership>> GetExpiringMembershipsAsync(
             int daysBeforeExpiration,
             CancellationToken cancellationToken = default)
@@ -240,9 +255,10 @@ namespace AuthHive.Auth.Repositories
 
             return await Query()
                 .Where(m => m.ExpiresAt.HasValue &&
-                              m.ExpiresAt.Value <= targetDate &&
-                              m.ExpiresAt.Value > DateTime.UtcNow &&
-                              m.Status == OrganizationMembershipStatus.Active)
+                            m.ExpiresAt.Value <= targetDate &&
+                            m.ExpiresAt.Value > DateTime.UtcNow &&
+                            m.Status == OrganizationMembershipStatus.Active)
+                .AsNoTracking()
                 .Include(m => m.Member)
                 .Include(m => m.Organization)
                 .OrderBy(m => m.ExpiresAt)
@@ -257,12 +273,14 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
+            // 💡 비용 최적화: 통계 쿼리는 AsNoTracking()이 필요 없습니다.
             return await QueryForOrganization(organizationId)
                 .Where(m => m.Status == OrganizationMembershipStatus.Active)
                 .GroupBy(m => m.MemberRole)
                 .ToDictionaryAsync(g => g.Key, g => g.Count(), cancellationToken);
         }
-
+        
+        // 💡 [v16.1] 이 메서드는 IOrganizationMembershipRepository 인터페이스에 없습니다.
         public async Task<IEnumerable<OrganizationMembership>> GetRecentMembersAsync(
             Guid organizationId,
             int count = 10,
@@ -270,24 +288,27 @@ namespace AuthHive.Auth.Repositories
         {
             return await QueryForOrganization(organizationId)
                 .Where(m => m.Status == OrganizationMembershipStatus.Active)
+                .AsNoTracking()
                 .Include(m => m.Member)
                 .OrderByDescending(m => m.JoinedAt)
                 .Take(count)
                 .ToListAsync(cancellationToken);
         }
 
-        // ✅ Correct: Implemented the missing GetMemberCountAsync method.
         public async Task<int> GetMemberCountAsync(
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
+            // 💡 [v16.1] 3. 가격 정책(Pricing) 검증을 위해 서비스 레이어가 이 메서드를 사용합니다.
+            // 리포지토리는 정확한 카운트만 제공하면 됩니다.
             return await QueryForOrganization(organizationId)
                 .CountAsync(m => m.Status == OrganizationMembershipStatus.Active, cancellationToken);
         }
         #endregion
 
-        #region 멤버십 업데이트
+        #region 멤버십 업데이트 (UoW 수정)
 
+        // 💡 [v16.1] 이 메서드는 IOrganizationMembershipRepository 인터페이스에 없습니다.
         public async Task<bool> UpdateMemberStatusAsync(
             Guid organizationId,
             Guid connectedId,
@@ -308,10 +329,13 @@ namespace AuthHive.Auth.Repositories
             }
 
             await UpdateAsync(membership);
-            await _context.SaveChangesAsync();
+            
+            // 💡 [v16.1 삭제] UoW 원칙(5번)에 따라 SaveChanges는 서비스 레이어의 책임입니다.
+            // await _context.SaveChangesAsync();
             return true;
         }
 
+        // 💡 [v16.1] 이 메서드는 IOrganizationMembershipRepository 인터페이스에 없습니다.
         public async Task<bool> UpdateLastActivityAsync(Guid organizationId, Guid connectedId)
         {
             var membership = await GetMembershipAsync(organizationId, connectedId);
@@ -320,7 +344,9 @@ namespace AuthHive.Auth.Repositories
             membership.LastActivityAt = DateTime.UtcNow;
 
             await UpdateAsync(membership);
-            await _context.SaveChangesAsync();
+            
+            // 💡 [v16.1 삭제] UoW 원칙(5번)에 따라 SaveChanges는 서비스 레이어의 책임입니다.
+            // await _context.SaveChangesAsync();
             return true;
         }
 

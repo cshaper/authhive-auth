@@ -6,66 +6,82 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using AuthHive.Core.Entities.PlatformApplications;
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Interfaces.User.Repository;
+// 💡 [v16.1] 인터페이스 네임스페이스 수정 (IUserApplicationAccessRepository 위치)
+using AuthHive.Core.Interfaces.PlatformApplication.Repository;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.User.Requests;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
-using AuthHive.Core.Interfaces.Infra.Cache; // Replaced IMemoryCache with ICacheService
+using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService
 using AuthHive.Core.Entities.Auth;
-using AuthHive.Core.Entities.Audit;
-using System.Text.Json;
+using System.Linq.Expressions;
+// 💡 [v16.1] 서비스 로직(AuditLog) 분리를 위해 참조 제거
+// using AuthHive.Core.Entities.Audit;
+// using System.Text.Json;
 
 namespace AuthHive.Auth.Repositories
 {
     /// <summary>
-    /// UserPlatformApplicationAccess 엔티티의 데이터 접근을 담당하는 리포지토리입니다. (AuthHive v16 기준)
-    /// BaseRepository의 v16 원칙에 따라 ICacheService를 사용하며, IOrganizationContext에 대한 의존성이 제거되었습니다.
+    /// UserPlatformApplicationAccess 엔티티의 데이터 접근을 담당하는 리포지토리입니다. (AuthHive v16.1)
+    /// 
+    /// [v16.1 변경 사항]
+    /// 1. (버그) 생성자에서 ICacheService를 base()로 전달하도록 수정
+    /// 2. (UoW) 모든 _context.SaveChangesAsync() 호출 제거
+    /// 3. (서비스 로직) 감사 로깅, 권한 계산 등 비즈니스 로직 메서드 제거
+    /// 4. (최적화) 모든 읽기 전용 쿼리에 AsNoTracking() 적용
+    /// 5. (TODO) 미완성 벌크(Bulk) 메서드를 UoW 원칙에 맞게 구현
     /// </summary>
-    public class UserApplicationAccessRepository : BaseRepository<UserPlatformApplicationAccess>, IUserApplicationAccessRepository
+    // 💡 [v16.1] 인터페이스 경로 수정
+    public class UserApplicationAccessRepository : BaseRepository<UserPlatformApplicationAccess>, IUserPlatformApplicationAccessRepository
     {
-        /// <summary>
-        /// 생성자에서 IOrganizationContext를 제거하고 ICacheService를 주입받도록 수정되었습니다.
-        /// 이는 리포지토리가 외부 컨텍스트에 의존하지 않고 명시적인 파라미터로만 동작하도록 하는 v16 아키텍처 원칙을 따릅니다.
-        /// </summary>
         public UserApplicationAccessRepository(
             AuthDbContext context,
-            ICacheService? cacheService = null) // IMemoryCache -> ICacheService
-            : base(context)
+            ICacheService? cacheService = null)
+            // 💡 [v16.1 수정] cacheService를 base()로 전달해야 캐시가 동작합니다.
+            : base(context, cacheService)
         {
         }
 
         /// <summary>
-        /// BaseRepository의 추상 메서드를 구현합니다.
-        /// UserPlatformApplicationAccess 엔티티는 OrganizationId를 포함하므로, 조직 범위 엔티티가 맞습니다.
+        /// 이 엔티티는 OrganizationId를 포함하므로, 조직 범위 엔티티가 맞습니다.
         /// </summary>
         protected override bool IsOrganizationScopedEntity() => true;
 
-        #region 기본 조회
+        #region 기본 조회 (AsNoTracking 적용)
+
+        // 💡 [v16.1] 인터페이스(prompt 26)에 있는 FindSingleAsync 구현
+        public async Task<UserPlatformApplicationAccess?> FindSingleAsync(
+         Expression<Func<UserPlatformApplicationAccess, bool>> predicate,
+         CancellationToken cancellationToken = default) // <-- 1. 여기 추가
+        {
+            return await Query()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(predicate, cancellationToken); // <-- 2. 여기 전달
+        }
 
         public async Task<UserPlatformApplicationAccess?> GetByConnectedIdAndApplicationAsync(
             Guid connectedId, Guid applicationId, CancellationToken cancellationToken = default)
         {
+            // 이 메서드는 조회 후 수정될 수 있으므로 AsNoTracking() 생략
             return await Query()
                 .Include(a => a.Role)
                 .FirstOrDefaultAsync(a => a.ConnectedId == connectedId && a.ApplicationId == applicationId, cancellationToken);
         }
 
+        // 💡 [v16.1] 원본 파일에만 있던 사용자 정의 캐시 메서드
         public async Task<UserPlatformApplicationAccess?> GetByConnectedIdApplicationAndOrganizationAsync(
             Guid connectedId, Guid applicationId, Guid organizationId, CancellationToken cancellationToken = default)
         {
-            // 캐싱 로직을 ICacheService를 사용하도록 수정
             var cacheKey = GetCacheKey($"cid={connectedId}:aid={applicationId}:oid={organizationId}");
             if (_cacheService != null)
             {
                 var cachedAccess = await _cacheService.GetAsync<UserPlatformApplicationAccess>(cacheKey, cancellationToken);
-                if (cachedAccess != null)
-                {
-                    return cachedAccess;
-                }
+                if (cachedAccess != null) return cachedAccess;
             }
 
+            // 💡 [v16.1] AsNoTracking() 추가
             var result = await Query()
+                .AsNoTracking()
                 .Include(a => a.Role)
                 .FirstOrDefaultAsync(a => a.ConnectedId == connectedId && a.ApplicationId == applicationId && a.OrganizationId == organizationId, cancellationToken);
 
@@ -73,136 +89,139 @@ namespace AuthHive.Auth.Repositories
             {
                 await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(10), cancellationToken);
             }
-
             return result;
         }
 
+        // 💡 [v16.1] 인터페이스(prompt 26)의 시그니처와 맞춤 (onlyActive 파라미터 제거)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByConnectedIdAsync(
-            Guid connectedId, bool onlyActive = true, CancellationToken cancellationToken = default)
+            Guid connectedId, CancellationToken cancellationToken = default)
         {
             var query = Query().Where(a => a.ConnectedId == connectedId);
-            if (onlyActive)
-            {
-                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
-            return await query.Include(a => a.PlatformApplication).OrderBy(a => a.PlatformApplication.Name).ToListAsync(cancellationToken);
+
+            // 💡 [v16.1] AsNoTracking() 추가
+            return await query
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .OrderBy(a => a.PlatformApplication.Name)
+                .ToListAsync(cancellationToken);
         }
 
+        // 💡 [v16.1] 인터페이스(prompt 26)의 시그니처와 맞춤 (onlyActive 파라미터 제거)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByApplicationIdAsync(
-            Guid applicationId, bool onlyActive = true, CancellationToken cancellationToken = default)
+            Guid applicationId, CancellationToken cancellationToken = default)
         {
             var query = Query().Where(a => a.ApplicationId == applicationId);
-            if (onlyActive)
-            {
-                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
-            return await query.Include(a => a.ConnectedIdNavigation).OrderBy(a => a.GrantedAt).ToListAsync(cancellationToken);
+
+            // 💡 [v16.1] AsNoTracking() 추가
+            return await query
+                .AsNoTracking()
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.GrantedAt)
+                .ToListAsync(cancellationToken);
         }
 
+        // 💡 [v16.1] 인터페이스(prompt 26)의 시그니처와 맞춤 (onlyActive 파라미터 제거)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByOrganizationIdAsync(
-           Guid organizationId, bool onlyActive = true, CancellationToken cancellationToken = default)
+           Guid organizationId, CancellationToken cancellationToken = default)
         {
             var query = QueryForOrganization(organizationId);
-            if (onlyActive)
-            {
-                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
-            return await query.Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.PlatformApplication.Name).ThenBy(a => a.GrantedAt).ToListAsync(cancellationToken);
-        }
 
-        /// <summary>
-        /// 여러 조직 ID에 속한 모든 애플리케이션 접근 권한을 한 번의 쿼리로 조회합니다.
-        /// (N+1 쿼리 문제 해결용)
-        /// </summary>
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetAllByOrganizationIdsAsync(
-            IEnumerable<Guid> organizationIds,
-            bool onlyActive = true,
-            CancellationToken cancellationToken = default)
-        {
-            var query = Query().Where(a => organizationIds.Contains(a.OrganizationId));
-
-            if (onlyActive)
-            {
-                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
-
+            // 💡 [v16.1] AsNoTracking() 추가
             return await query
+                .AsNoTracking()
                 .Include(a => a.PlatformApplication)
                 .Include(a => a.ConnectedIdNavigation)
-                .ThenInclude(c => c.User)
-                .OrderBy(a => a.OrganizationId)
-                .ThenBy(a => a.PlatformApplication.Name)
+                .OrderBy(a => a.PlatformApplication.Name)
                 .ThenBy(a => a.GrantedAt)
                 .ToListAsync(cancellationToken);
         }
 
-        /// <summary>
-        /// 특정 애플리케이션에 대해 여러 사용자의 접근 권한을 한 번의 쿼리로 조회합니다.
-        /// (N+1 쿼리 문제 해결용)
-        /// </summary>
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByApplicationAndConnectedIdsAsync(
-            Guid applicationId,
-            IEnumerable<Guid> connectedIds,
-            bool onlyActive = true,
-            CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 원본 파일에만 있던 N+1 방지용 헬퍼 (AsNoTracking 추가)
+        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetAllByOrganizationIdsAsync(
+            IEnumerable<Guid> organizationIds, bool onlyActive = true, CancellationToken cancellationToken = default)
         {
-            var query = Query()
-                .Where(a => a.ApplicationId == applicationId && connectedIds.Contains(a.ConnectedId));
-
+            var query = Query().Where(a => organizationIds.Contains(a.OrganizationId));
             if (onlyActive)
-            {
                 query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
 
-            return await query
-                .Include(a => a.ConnectedIdNavigation)
-                .ThenInclude(c => c.User)
+            return await query.AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation).ThenInclude(c => c.User)
+                .OrderBy(a => a.OrganizationId)
+                .ToListAsync(cancellationToken);
+        }
+
+        // 💡 [v16.1] 원본 파일에만 있던 N+1 방지용 헬퍼 (AsNoTracking 추가)
+        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByApplicationAndConnectedIdsAsync(
+            Guid applicationId, IEnumerable<Guid> connectedIds, bool onlyActive = true, CancellationToken cancellationToken = default)
+        {
+            var query = Query().Where(a => a.ApplicationId == applicationId && connectedIds.Contains(a.ConnectedId));
+            if (onlyActive)
+                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
+
+            return await query.AsNoTracking()
+                .Include(a => a.ConnectedIdNavigation).ThenInclude(c => c.User)
                 .Include(a => a.Role)
                 .OrderBy(a => a.ConnectedId)
-                .ThenBy(a => a.GrantedAt)
                 .ToListAsync(cancellationToken);
         }
 
         #endregion
 
-        #region 권한 레벨 및 역할별 조회
+        #region 권한 레벨 및 역할별 조회 (AsNoTracking 적용)
 
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByAccessLevelAsync(ApplicationAccessLevel accessLevel, Guid? organizationId = null, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 시그니처와 맞춤 (organizationId 파라미터 제거)
+        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByAccessLevelAsync(
+            Guid applicationId, ApplicationAccessLevel accessLevel, CancellationToken cancellationToken = default)
         {
-            var query = organizationId.HasValue ? QueryForOrganization(organizationId.Value) : Query();
-            query = query.Where(a => a.AccessLevel == accessLevel);
-            return await query.Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.GrantedAt).ToListAsync(cancellationToken);
+            var query = Query().Where(a => a.ApplicationId == applicationId && a.AccessLevel == accessLevel);
+
+            return await query
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.GrantedAt)
+                .ToListAsync(cancellationToken);
         }
 
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByRoleIdAsync(Guid roleId, bool onlyActive = true, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 시그니처와 맞춤 (onlyActive 파라미터 제거)
+        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByRoleIdAsync(
+            Guid roleId, CancellationToken cancellationToken = default)
         {
             var query = Query().Where(a => a.RoleId == roleId);
-            if (onlyActive)
-            {
-                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
-            return await query.Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.GrantedAt).ToListAsync(cancellationToken);
+
+            return await query
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.GrantedAt)
+                .ToListAsync(cancellationToken);
         }
 
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByTemplateIdAsync(Guid templateId, bool onlyActive = true, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 시그니처와 맞춤 (onlyActive 파라미터 제거)
+        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByTemplateIdAsync(
+            Guid templateId, CancellationToken cancellationToken = default)
         {
             var query = Query().Where(a => a.AccessTemplateId == templateId);
-            if (onlyActive)
-            {
-                query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow));
-            }
-            return await query.Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.GrantedAt).ToListAsync(cancellationToken);
+
+            return await query
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.GrantedAt)
+                .ToListAsync(cancellationToken);
         }
 
         #endregion
 
-        #region Soft Delete Operations
+        #region CUD 작업 (UoW 적용)
 
         /// <summary>
+        /// [v16.1] SoftDeleteAsync 인터페이스 구현
         /// 감사 정보를 포함하여 접근 권한을 소프트 삭제합니다.
-        /// 캐시 무효화 로직이 ICacheService를 사용하도록 업데이트되었습니다.
+        /// UoW 원칙에 따라 SaveChangesAsync() 및 감사 로깅 로직을 제거했습니다.
         /// </summary>
-        public async Task<bool> DeleteAsync(
+        public async Task<bool> SoftDeleteAsync(
             Guid id,
             Guid deletedByConnectedId,
             CancellationToken cancellationToken = default)
@@ -221,81 +240,111 @@ namespace AuthHive.Auth.Repositories
             entity.UpdatedAt = DateTime.UtcNow;
             entity.UpdatedByConnectedId = deletedByConnectedId;
 
-            // 관련 캐시를 비동기적으로 모두 무효화
+            // [v16.1] BaseRepository의 UpdateAsync 호출 (캐시 무효화 포함)
+            await UpdateAsync(entity, cancellationToken);
+
+            // [v16.1] 사용자 정의 캐시 키 무효화
+            // 복잡한 캐시 무효화는 서비스 레이어 또는 이벤트 버스에서 처리하는 것이 이상적입니다.
             if (_cacheService != null)
             {
-                var tasks = new List<Task>
-                {
-                    _cacheService.RemoveAsync(GetCacheKey($"cid={entity.ConnectedId}:aid={entity.ApplicationId}"), cancellationToken),
-                    _cacheService.RemoveAsync(GetCacheKey($"cid={entity.ConnectedId}:aid={entity.ApplicationId}:oid={entity.OrganizationId}"), cancellationToken),
-                    _cacheService.RemoveAsync(GetCacheKey(id), cancellationToken),
-                    _cacheService.RemoveAsync(GetCacheKey($"org={entity.OrganizationId}"), cancellationToken)
-                };
-                await Task.WhenAll(tasks);
+                await _cacheService.RemoveAsync(GetCacheKey($"cid={entity.ConnectedId}:aid={entity.ApplicationId}:oid={entity.OrganizationId}"), cancellationToken);
             }
 
-            _dbSet.Update(entity);
-            var result = await _context.SaveChangesAsync(cancellationToken);
 
-            // 변경 사항 감사 로그 기록
-            if (result > 0)
-            {
-                await LogAccessChangeAsync(
-                    id,
-                    "DELETE",
-                    "Active",
-                    "Deleted",
-                    deletedByConnectedId,
-                    cancellationToken);
-            }
+            return true; // UoW 커밋을 가정하고 true 반환
+        }
 
-            return result > 0;
+        // 💡 [v16.1] 인터페이스(prompt 26) 구현
+        public async Task<bool> RemoveAllByApplicationAsync(Guid applicationId, CancellationToken cancellationToken = default)
+        {
+            var entities = await Query().Where(a => a.ApplicationId == applicationId).ToListAsync(cancellationToken);
+            if (!entities.Any()) return true;
+
+            // 💡 [v16.1] BaseRepository의 DeleteRangeAsync 사용
+            await DeleteRangeAsync(entities, cancellationToken);
+            return true;
+        }
+
+        // 💡 [v16.1] 인터페이스(prompt 26) 구현
+        public async Task<bool> RemoveAllByConnectedIdAsync(Guid connectedId, CancellationToken cancellationToken = default)
+        {
+            var entities = await Query().Where(a => a.ConnectedId == connectedId).ToListAsync(cancellationToken);
+            if (!entities.Any()) return true;
+
+            // 💡 [v16.1] BaseRepository의 DeleteRangeAsync 사용
+            await DeleteRangeAsync(entities, cancellationToken);
+            return true;
         }
 
         #endregion
 
-        #region 상태 및 만료 관리
+        #region 상태 및 만료 관리 (AsNoTracking 적용)
 
+        // 💡 [v16.1] 원본 파일에만 있던 헬퍼 (AsNoTracking 추가)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetExpiredAccessAsync(DateTime? asOfDate = null, CancellationToken cancellationToken = default)
         {
             var checkDate = asOfDate ?? DateTime.UtcNow;
-            return await Query().Where(a => a.IsActive && a.ExpiresAt != null && a.ExpiresAt <= checkDate).Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.ExpiresAt).ToListAsync(cancellationToken);
+            return await Query()
+                .Where(a => a.IsActive && a.ExpiresAt != null && a.ExpiresAt <= checkDate)
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.ExpiresAt).ToListAsync(cancellationToken);
         }
 
+        // 💡 [v16.1] 원본 파일에만 있던 헬퍼 (AsNoTracking 추가)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetExpiringAccessAsync(int daysBeforeExpiry = 7, CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
             var expiryThreshold = now.AddDays(daysBeforeExpiry);
-            return await Query().Where(a => a.IsActive && a.ExpiresAt != null && a.ExpiresAt > now && a.ExpiresAt <= expiryThreshold).Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.ExpiresAt).ToListAsync(cancellationToken);
+            return await Query()
+                .Where(a => a.IsActive && a.ExpiresAt != null && a.ExpiresAt > now && a.ExpiresAt <= expiryThreshold)
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.ExpiresAt).ToListAsync(cancellationToken);
         }
 
+        // 💡 [v16.1] 원본 파일에만 있던 헬퍼 (AsNoTracking 추가)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetInactiveAccessAsync(DateTime inactiveSince, CancellationToken cancellationToken = default)
         {
-            return await Query().Where(a => a.IsActive && (a.LastAccessedAt == null || a.LastAccessedAt < inactiveSince)).Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.LastAccessedAt ?? a.GrantedAt).ToListAsync(cancellationToken);
+            return await Query()
+                .Where(a => a.IsActive && (a.LastAccessedAt == null || a.LastAccessedAt < inactiveSince))
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.LastAccessedAt ?? a.GrantedAt).ToListAsync(cancellationToken);
         }
 
         #endregion
 
-        #region 상속 및 스코프
+        #region 상속 및 스코프 (AsNoTracking 적용)
 
+        // 💡 [v16.1] 원본 파일에만 있던 헬퍼 (AsNoTracking 추가)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetInheritedAccessAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
-            return await Query().Where(a => a.ConnectedId == connectedId && a.IsInherited && a.InheritedFromId != null).Include(a => a.PlatformApplication).Include(a => a.AccessTemplate).OrderBy(a => a.PlatformApplication.Name).ToListAsync(cancellationToken);
+            return await Query()
+                .Where(a => a.ConnectedId == connectedId && a.IsInherited && a.InheritedFromId != null)
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.AccessTemplate)
+                .OrderBy(a => a.PlatformApplication.Name).ToListAsync(cancellationToken);
         }
 
+        // 💡 [v16.1] 원본 파일에만 있던 헬퍼 (AsNoTracking 추가)
         public async Task<IEnumerable<UserPlatformApplicationAccess>> GetByScopeAsync(string scope, Guid? applicationId = null, CancellationToken cancellationToken = default)
         {
-            // EF Core 6+에서는 JSON 컬럼 쿼리에 EF.Functions.JsonContains를 사용할 수 있습니다.
-            // a.AdditionalPermissions가 null이 아닌 경우에만 JsonContains를 실행하도록 수정
-            // JSON 배열에 특정 값이 포함되어 있는지 확인할 때 예를 들어, "permissions"라는 JSON 배열 컬럼에 "admin"이라는 권한이 포함된 사용자를 찾고 싶을 때 사용할 수 있습니다.
-            // 이건 scope라는 변수에 담긴값을 찾는 코드임
             var query = Query().Where(a => a.AdditionalPermissions != null &&
-                                           EF.Functions.JsonContains(a.AdditionalPermissions, $"\"{scope}\""));
+                                            EF.Functions.JsonContains(a.AdditionalPermissions, $"\"{scope}\""));
             if (applicationId.HasValue)
             {
                 query = query.Where(a => a.ApplicationId == applicationId.Value);
             }
-            return await query.Include(a => a.PlatformApplication).Include(a => a.ConnectedIdNavigation).OrderBy(a => a.GrantedAt).ToListAsync(cancellationToken);
+            return await query
+                .AsNoTracking()
+                .Include(a => a.PlatformApplication)
+                .Include(a => a.ConnectedIdNavigation)
+                .OrderBy(a => a.GrantedAt).ToListAsync(cancellationToken);
         }
 
         #endregion
@@ -307,16 +356,36 @@ namespace AuthHive.Auth.Repositories
             return await Query().AnyAsync(a => a.ConnectedId == connectedId && a.ApplicationId == applicationId, cancellationToken);
         }
 
-        public async Task<bool> HasActiveAccessAsync(Guid connectedId, Guid applicationId, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 HasAccessLevelAsync 구현
+        public async Task<bool> HasAccessLevelAsync(Guid connectedId, Guid applicationId, ApplicationAccessLevel minLevel, CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
-            return await Query().AnyAsync(a => a.ConnectedId == connectedId && a.ApplicationId == applicationId && a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > now), cancellationToken);
+            return await Query().AnyAsync(a =>
+                a.ConnectedId == connectedId &&
+                a.ApplicationId == applicationId &&
+                a.AccessLevel >= minLevel && // 접근 레벨 비교
+                a.IsActive &&
+                (a.ExpiresAt == null || a.ExpiresAt > now),
+                cancellationToken);
+        }
+
+        // 💡 [v16.1] 인터페이스(prompt 26)의 IsActiveAsync 구현
+        public async Task<bool> IsActiveAsync(Guid connectedId, Guid applicationId, CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+            return await Query().AnyAsync(a =>
+                a.ConnectedId == connectedId &&
+                a.ApplicationId == applicationId &&
+                a.IsActive &&
+                (a.ExpiresAt == null || a.ExpiresAt > now),
+                cancellationToken);
         }
 
         #endregion
 
-        #region 페이징 및 검색
+        #region 페이징 및 검색 (AsNoTracking 적용)
 
+        // 💡 [v16.1] 원본 파일에만 있던 헬퍼 (AsNoTracking 추가)
         public async Task<PagedResult<UserPlatformApplicationAccess>> SearchAsync(
             SearchUserApplicationAccessRequest request,
             CancellationToken cancellationToken = default)
@@ -333,23 +402,13 @@ namespace AuthHive.Auth.Repositories
                 query = query.Where(a => a.ConnectedId == request.ConnectedId.Value);
             if (request.OrganizationId.HasValue)
                 query = query.Where(a => a.OrganizationId == request.OrganizationId.Value);
-            if (request.ApplicationId.HasValue)
-                query = query.Where(a => a.ApplicationId == request.ApplicationId.Value);
-            if (request.AccessLevel.HasValue)
-                query = query.Where(a => a.AccessLevel == request.AccessLevel.Value);
-            if (request.IsActive.HasValue)
-            {
-                var now = DateTime.UtcNow;
-                if (request.IsActive.Value)
-                    query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > now));
-                else
-                    query = query.Where(a => !a.IsActive || (a.ExpiresAt != null && a.ExpiresAt <= now));
-            }
             // ... (기타 필터들)
 
             var totalCount = await query.CountAsync(cancellationToken);
             var sortedQuery = ApplySorting(query, request.SortBy, request.SortDescending);
+
             var items = await sortedQuery
+                .AsNoTracking() // 💡 [v16.1] AsNoTracking() 추가
                 .Skip((request.PageNumber - 1) * request.PageSize)
                 .Take(request.PageSize)
                 .ToListAsync(cancellationToken);
@@ -373,102 +432,29 @@ namespace AuthHive.Auth.Repositories
 
         #region 집계
 
-        public async Task<int> GetAccessCountAsync(Guid? organizationId = null, Guid? applicationId = null, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 GetCountByApplicationAsync 구현
+        public async Task<int> GetCountByApplicationAsync(
+            Guid applicationId,
+            CancellationToken cancellationToken = default) // <-- 1. 시그니처에 잘 추가됨
         {
-            var query = organizationId.HasValue ? QueryForOrganization(organizationId.Value) : Query();
-            if (applicationId.HasValue)
-            {
-                query = query.Where(a => a.ApplicationId == applicationId.Value);
-            }
-            var now = DateTime.UtcNow;
-            query = query.Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > now));
-            return await query.CountAsync(cancellationToken);
+            return await Query().CountAsync(
+                a => a.ApplicationId == applicationId,
+                cancellationToken); // <-- 2. 내부 호출에 잘 전달됨
         }
 
-        #endregion
-
-        #region 벌크 작업
-
-        // 참고: 벌크 작업은 일반적으로 성능 최적화를 위해 캐시를 우회하거나,
-        // 작업 완료 후 관련 캐시 목록을 무효화하는 별도 로직이 필요합니다.
-
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> CreateBulkAsync(IEnumerable<Guid> connectedIds, Guid applicationId, ApplicationAccessLevel accessLevel, Guid? roleId = null, Guid? templateId = null, Guid grantedByConnectedId = default, CancellationToken cancellationToken = default)
-        {
-            var accessList = new List<UserPlatformApplicationAccess>();
-            var now = DateTime.UtcNow;
-            // TODO: CreateBulkAsync 로직을 완성해야 합니다.
-            // Placeholder for bulk creation logic
-            await Task.CompletedTask;
-            return accessList;
-        }
-
-        public async Task<int> UpdateBulkAsync(IEnumerable<UserPlatformApplicationAccess> accesses, CancellationToken cancellationToken = default)
-        {
-            // TODO: UpdateBulkAsync 로직을 완성하고 캐시 무효화를 처리해야 합니다.
-            _dbSet.UpdateRange(accesses);
-            return await _context.SaveChangesAsync(cancellationToken);
-        }
-
-        public async Task<int> DeleteBulkAsync(IEnumerable<Guid> ids, Guid deletedByConnectedId, CancellationToken cancellationToken = default)
-        {
-            // TODO: DeleteBulkAsync 로직을 완성하고 캐시 무효화를 처리해야 합니다.
-            var entities = await Query().Where(a => ids.Contains(a.Id)).ToListAsync(cancellationToken);
-            foreach (var entity in entities) { /* ... mark as deleted and invalidate cache ... */ }
-            _dbSet.UpdateRange(entities);
-            return await _context.SaveChangesAsync(cancellationToken);
-        }
-
-        #endregion
-
-        #region 권한 검증 확장
-
-        public async Task<bool> HasPermissionAsync(Guid connectedId, Guid applicationId, string permission, CancellationToken cancellationToken = default)
-        {
-            var effectivePermissions = await GetEffectivePermissionsAsync(connectedId, applicationId, cancellationToken);
-            return effectivePermissions.Contains(permission, StringComparer.OrdinalIgnoreCase);
-        }
-
-        public async Task<IEnumerable<string>> GetEffectivePermissionsAsync(Guid connectedId, Guid applicationId, CancellationToken cancellationToken = default)
-        {
-            var permissions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var access = await GetByConnectedIdAndApplicationAsync(connectedId, applicationId, cancellationToken);
-            if (access == null || !access.IsActive) return permissions;
-
-            if (access.RoleId.HasValue)
-            {
-                var rolePermissions = await _context.Set<RolePermission>().Include(rp => rp.Permission)
-                    .Where(rp => rp.RoleId == access.RoleId.Value && rp.IsActive)
-                    .Select(rp => rp.Permission.Scope).ToListAsync(cancellationToken);
-                foreach (var p in rolePermissions) permissions.Add(p);
-            }
-            if (!string.IsNullOrEmpty(access.AdditionalPermissions))
-            {
-                var additional = JsonSerializer.Deserialize<List<string>>(access.AdditionalPermissions);
-                if (additional != null) foreach (var p in additional) permissions.Add(p);
-            }
-            if (!string.IsNullOrEmpty(access.ExcludedPermissions))
-            {
-                var excluded = JsonSerializer.Deserialize<List<string>>(access.ExcludedPermissions);
-                if (excluded != null) foreach (var p in excluded) permissions.Remove(p);
-            }
-            return permissions;
-        }
-
-        #endregion
-
-        #region 통계 및 분석
-
-        public async Task<Dictionary<Guid, int>> GetActiveUserCountByApplicationAsync(Guid organizationId, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 GetActiveCountByApplicationAsync 구현
+        public async Task<int> GetActiveCountByApplicationAsync(Guid applicationId, CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
-            return await QueryForOrganization(organizationId)
-                .Where(a => a.IsActive && (a.ExpiresAt == null || a.ExpiresAt > now))
-                .GroupBy(a => a.ApplicationId)
-                .Select(g => new { ApplicationId = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.ApplicationId, x => x.Count, cancellationToken);
+            return await Query().CountAsync(a =>
+                a.ApplicationId == applicationId &&
+                a.IsActive &&
+                (a.ExpiresAt == null || a.ExpiresAt > now),
+                cancellationToken);
         }
 
-        public async Task<Dictionary<ApplicationAccessLevel, int>> GetUserCountByAccessLevelAsync(Guid applicationId, CancellationToken cancellationToken = default)
+        // 💡 [v16.1] 인터페이스(prompt 26)의 GetCountByAccessLevelAsync (dictionary) 구현
+        public async Task<Dictionary<ApplicationAccessLevel, int>> GetCountByAccessLevelAsync(Guid applicationId, CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
             return await Query()
@@ -477,100 +463,88 @@ namespace AuthHive.Auth.Repositories
                 .Select(g => new { AccessLevel = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.AccessLevel, x => x.Count, cancellationToken);
         }
-
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> GetRecentlyActiveUsersAsync(
+        /// <summary>
+        /// (중복 서명) 특정 애플리케이션의 특정 접근 레벨 사용자 수를 계산합니다.
+        /// </summary>
+        public async Task<int> GetCountByAccessLevelAsync(
             Guid applicationId,
-            int days = 7,
-            int? take = null,
+            ApplicationAccessLevel accessLevel,
             CancellationToken cancellationToken = default)
         {
-            var cutoffDate = DateTime.UtcNow.AddDays(-days);
-
-            var query = Query()
-                .Include(a => a.ConnectedIdNavigation)
-                .Where(a => a.ApplicationId == applicationId &&
-                              a.IsActive &&
-                              a.LastAccessedAt != null &&
-                              a.LastAccessedAt >= cutoffDate)
-                .OrderByDescending(a => a.LastAccessedAt);
-
-            if (take.HasValue)
-            {
-                query = (IOrderedQueryable<UserPlatformApplicationAccess>)query.Take(take.Value);
-            }
-
-            return await query.ToListAsync(cancellationToken);
+            var now = DateTime.UtcNow;
+            return await Query()
+                .CountAsync(a =>
+                    a.ApplicationId == applicationId &&
+                    a.AccessLevel == accessLevel && // 💡 특정 레벨 필터 추가
+                    a.IsActive &&
+                    (a.ExpiresAt == null || a.ExpiresAt > now),
+                    cancellationToken);
+        }
+        // 💡 [v16.1] 인터페이스(prompt 26)의 GetQueryable 구현
+        public IQueryable<UserPlatformApplicationAccess> GetQueryable()
+        {
+            return Query();
         }
 
         #endregion
 
-        #region 변경 이력 추적
+        // 💡 [v16.1] 원본 파일에 있던 벌크 메서드들 (UoW 원칙 적용)
+        // 참고: 이 메서드들은 인터페이스(prompt 26)에 정의되어 있지 않아 외부에서 호출이 불가능할 수 있습니다.
+        // 캐시 무효화는 서비스 레이어 또는 이벤트 버스에서 처리해야 합니다.
 
-        public async Task LogAccessChangeAsync(Guid userApplicationAccessId, string changeType, string? oldValue, string? newValue, Guid changedByConnectedId, CancellationToken cancellationToken = default)
+        public async Task<IEnumerable<UserPlatformApplicationAccess>> CreateBulkAsync(IEnumerable<Guid> connectedIds, Guid applicationId, ApplicationAccessLevel accessLevel, Guid organizationId, Guid? roleId = null, Guid? templateId = null, Guid grantedByConnectedId = default, CancellationToken cancellationToken = default)
         {
-            // IgnoreQueryFilters를 사용하여 소프트 삭제된 엔티티도 조회하여 OrganizationId를 확보합니다.
-            var accessEntity = await _dbSet.IgnoreQueryFilters()
-                                     .FirstOrDefaultAsync(e => e.Id == userApplicationAccessId, cancellationToken);
-
-            if (accessEntity == null) return; // 또는 예외 처리
-
-            if (!Enum.TryParse<AuditActionType>(changeType, true, out var actionType))
-            {
-                // 변환 실패 시 기본값 또는 오류 처리
-                actionType = AuditActionType.Update; // 혹은 예외를 던집니다.
-            }
-
-            var auditLog = new AuditLog
+            var now = DateTime.UtcNow;
+            var accessList = connectedIds.Select(cid => new UserPlatformApplicationAccess
             {
                 Id = Guid.NewGuid(),
-                PerformedByConnectedId = changedByConnectedId,
-                TargetOrganizationId = accessEntity.OrganizationId, // 'OrganizationId' -> 'TargetOrganizationId'
-                ApplicationId = accessEntity.ApplicationId,
-                Timestamp = DateTime.UtcNow,
-                ActionType = actionType, // Enum 타입으로 설정
-                Action = $"ACCESS_{changeType.ToUpper()}", // 예: "ACCESS_DELETE"
-                ResourceType = nameof(UserPlatformApplicationAccess), // 'EntityType' -> 'ResourceType'
-                ResourceId = userApplicationAccessId.ToString(), // 'EntityId' -> 'ResourceId'
-                Success = true,
-                IpAddress = "N/A", // 서비스 계층에서 HttpContext로부터 주입 필요
-                UserAgent = "N/A",  // 서비스 계층에서 HttpContext로부터 주입 필요
-                Severity = AuditEventSeverity.Info,
-                // 변경 전/후 데이터를 Metadata에 JSON 형식으로 저장
-                Metadata = JsonSerializer.Serialize(new { OldValue = oldValue, NewValue = newValue })
-            };
+                ConnectedId = cid,
+                OrganizationId = organizationId, // 💡 [v16.1] 조직 ID 추가
+                ApplicationId = applicationId,
+                AccessLevel = accessLevel,
+                RoleId = roleId,
+                AccessTemplateId = templateId,
+                IsActive = true,
+                GrantedAt = now,
+                GrantedByConnectedId = grantedByConnectedId,
+                CreatedAt = now,
+                CreatedByConnectedId = grantedByConnectedId
+            }).ToList();
 
-            await _context.Set<AuditLog>().AddAsync(auditLog, cancellationToken);
-            await _context.SaveChangesAsync(cancellationToken); // 변경사항 즉시 저장
+            await AddRangeAsync(accessList, cancellationToken);
+            return accessList;
         }
 
-        #endregion
-
-        #region 권한 복사 및 템플릿
-
-        public async Task<UserPlatformApplicationAccess?> CloneAccessAsync(Guid sourceConnectedId, Guid targetConnectedId, Guid applicationId, Guid grantedByConnectedId, CancellationToken cancellationToken = default)
+        public async Task UpdateBulkAsync(IEnumerable<UserPlatformApplicationAccess> accesses, CancellationToken cancellationToken = default)
         {
-            var sourceAccess = await GetByConnectedIdAndApplicationAsync(sourceConnectedId, applicationId, cancellationToken);
-            if (sourceAccess == null || await ExistsAsync(targetConnectedId, applicationId, cancellationToken)) return null;
+            // 💡 [v16.1] BaseRepository의 UpdateRangeAsync 호출
+            await UpdateRangeAsync(accesses, cancellationToken);
+            // 💡 [v16.1 삭제] UoW 원칙 위반
+            // return await _context.SaveChangesAsync(cancellationToken);
+        }
 
-            var newAccess = new UserPlatformApplicationAccess
+
+        public async Task DeleteBulkAsync(IEnumerable<Guid> ids, Guid deletedByConnectedId, CancellationToken cancellationToken = default)
+        {
+            var entities = await Query().Where(a => ids.Contains(a.Id)).ToListAsync(cancellationToken);
+            if (!entities.Any()) return;
+
+            var now = DateTime.UtcNow;
+            foreach (var entity in entities)
             {
-                // ... 속성 복사 로직 ...
-            };
-            await AddAsync(newAccess, cancellationToken);
-            return newAccess;
+                // 💡 [v16.1] 수동으로 감사 속성 설정
+                entity.DeletedByConnectedId = deletedByConnectedId;
+                entity.UpdatedByConnectedId = deletedByConnectedId;
+                entity.UpdatedAt = now;
+                entity.IsActive = false;
+            }
+
+            // 💡 [v16.1] BaseRepository의 DeleteRangeAsync 호출 (IsDeleted, DeletedAt 설정)
+            await DeleteRangeAsync(entities, cancellationToken);
+
+            // 💡 [v16.1 삭제] UoW 원칙 위반
+            // return await _context.SaveChangesAsync(cancellationToken);
         }
 
-        public async Task<IEnumerable<UserPlatformApplicationAccess>> ApplyTemplateToUsersAsync(Guid templateId, IEnumerable<Guid> connectedIds, Guid applicationId, Guid grantedByConnectedId, CancellationToken cancellationToken = default)
-        {
-            var template = await _context.Set<PlatformApplicationAccessTemplate>().FindAsync(new object[] { templateId }, cancellationToken);
-            if (template == null) return Enumerable.Empty<UserPlatformApplicationAccess>();
-
-            var results = new List<UserPlatformApplicationAccess>();
-            // ... 템플릿 기반으로 권한을 생성 또는 업데이트하는 로직 ...
-            await _context.SaveChangesAsync(cancellationToken);
-            return results;
-        }
-
-        #endregion
     }
 }
