@@ -2,7 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
+using System.Text.Json; // 이 네임스페이스는 이제 LogActionAsync에서 직접 사용되지 않습니다.
+using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Enums.Audit;
 using AuthHive.Core.Enums.Core;
@@ -45,114 +46,169 @@ namespace AuthHive.Application.Handlers
 
         #region Lifecycle Events
 
-        public async Task HandleApiKeyCreatedAsync(ApiKeyCreatedEvent eventData)
+        public async Task HandleApiKeyCreatedAsync(ApiKeyCreatedEvent eventData, CancellationToken cancellationToken)
         {
-            await HandleEventAsync("ApiKeyCreated", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                // 새로운 API 키 정보를 즉시 캐시하여 빠른 접근을 보장합니다.
-                var cacheKey = GetApiKeyCacheKey(eventData.ApplicationId, eventData.ApiKeyId);
-                // 민감하지 않은 필수 데이터만 캐시합니다.
-                var cachedData = new { eventData.ApiKeyId, eventData.ApplicationId, eventData.KeyName, Status = "Active" };
-                await _cacheService.SetAsync(cacheKey, cachedData, TimeSpan.FromHours(24));
+                _logger.LogError("Cannot handle ApiKeyCreatedEvent: ApplicationId is missing or empty for ApiKeyId (AggregateId) {AggregateId}.", eventData.AggregateId);
+                return; // 데이터가 유효하지 않으면 조기 종료합니다.
+            }
+
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyCreated", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
+            {
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                var cacheKey = GetApiKeyCacheKey(eventData.ApplicationId.Value, eventData.AggregateId);
+                var cachedData = new { ApiKeyId = eventData.AggregateId, eventData.ApplicationId, eventData.KeyName, Status = "Active" };
+                await _cacheService.SetAsync(cacheKey, cachedData, TimeSpan.FromHours(24), ct);
 
                 await _auditService.LogActionAsync(
-                    performedByConnectedId: eventData.CreatedByConnectedId,
+                    // [FIX] CS1739: 'performedByConnectedId:' -> 'connectedId:'
+                    connectedId: eventData.CreatedByConnectedId,
                     action: "API_KEY_CREATED",
                     actionType: AuditActionType.Create,
                     resourceType: "ApiKey",
-                    resourceId: eventData.ApiKeyId.ToString(),
-                    metadata: JsonSerializer.Serialize(new { eventData.KeyName, eventData.KeyPrefix, eventData.KeySource })
+                    // [FIX] ApiKeyId -> AggregateId
+                    resourceId: eventData.AggregateId.ToString(),
+                    // [FIX] CS1503: string -> Dictionary<string, object>
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["KeyName"] = eventData.KeyName,
+                        ["KeyPrefix"] = eventData.KeyPrefix,
+                        ["KeySource"] = eventData.KeySource 
+                    },
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
-        public async Task HandleApiKeyUpdatedAsync(ApiKeyUpdatedEvent eventData)
+        public async Task HandleApiKeyUpdatedAsync(ApiKeyUpdatedEvent eventData, CancellationToken cancellationToken)
         {
-            await HandleEventAsync("ApiKeyUpdated", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
+                _logger.LogError("Cannot handle ApiKeyUpdatedEvent: ApplicationId is missing or empty for ApiKeyId (AggregateId) {AggregateId}.", eventData.AggregateId);
+                return; 
+            }
+
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyUpdated", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
+            {
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.AggregateId, ct);
+                
                 await _auditService.LogActionAsync(
-                    performedByConnectedId: eventData.UpdatedByConnectedId,
+                    // [FIX] CS1739: 'performedByConnectedId:' -> 'connectedId:'
+                    connectedId: eventData.UpdatedByConnectedId,
                     action: "API_KEY_UPDATED",
                     actionType: AuditActionType.Update,
                     resourceType: "ApiKey",
-                    resourceId: eventData.ApiKeyId.ToString(),
-                    metadata: JsonSerializer.Serialize(new { eventData.ChangedProperties })
+                    // [FIX] ApiKeyId -> AggregateId
+                    resourceId: eventData.AggregateId.ToString(),
+                    // [FIX] CS1503: string -> Dictionary<string, object>
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["ChangedProperties"] = eventData.ChangedProperties
+                    },
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
-        public async Task HandleApiKeyDeletedAsync(ApiKeyDeletedEvent eventData)
+        public async Task HandleApiKeyDeletedAsync(ApiKeyDeletedEvent eventData, CancellationToken cancellationToken)
         {
-            await HandleEventAsync("ApiKeyDeleted", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
+                _logger.LogError("Cannot handle ApiKeyDeletedEvent: ApplicationId is missing or empty for ApiKeyId (AggregateId) {AggregateId}.", eventData.AggregateId);
+                return; 
+            }
+
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyDeleted", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
+            {
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.AggregateId, ct);
                 await _auditService.LogActionAsync(
-                    performedByConnectedId: eventData.DeletedByConnectedId,
+                    // [FIX] CS1739: 'performedByConnectedId:' -> 'connectedId:'
+                    connectedId: eventData.DeletedByConnectedId,
                     action: "API_KEY_DELETED",
                     actionType: AuditActionType.Delete,
                     resourceType: "ApiKey",
-                    resourceId: eventData.ApiKeyId.ToString(),
-                    metadata: JsonSerializer.Serialize(new { eventData.Reason })
+                    // [FIX] ApiKeyId -> AggregateId
+                    resourceId: eventData.AggregateId.ToString(),
+                    // [FIX] CS1503: string -> Dictionary<string, object>
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["Reason"] = eventData.Reason ?? "Not specified"
+                    },
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
-        public async Task HandleApiKeyExpiredAsync(ApiKeyExpiredEvent eventData)
+        public async Task HandleApiKeyExpiredAsync(ApiKeyExpiredEvent eventData, CancellationToken cancellationToken)
         {
-            await HandleEventAsync("ApiKeyExpired", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
-                // 시스템에 의해 트리거된 이벤트입니다.
+                _logger.LogError("Cannot handle ApiKeyExpiredEvent: ApplicationId is missing or empty for ApiKeyId (AggregateId) {AggregateId}.", eventData.AggregateId);
+                return; 
+            }
+
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyExpired", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
+            {
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.AggregateId, ct);
                 await _auditService.LogSecurityEventAsync(
                     eventType: "ApiKeyExpired",
                     severity: AuditEventSeverity.Info,
-                    description: $"API Key '{eventData.ApiKeyId}' for Application '{eventData.ApplicationId}' has expired.",
-                    connectedId: null, // 시스템 이벤트
-                    details: new Dictionary<string, object> { ["ExpiredAt"] = eventData.ExpiredAt }
+                    description: $"API Key '{eventData.AggregateId}' for Application '{eventData.ApplicationId}' has expired.",
+                    connectedId: null, 
+                    details: new Dictionary<string, object> { ["ExpiredAt"] = eventData.OccurredAt },
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
         #endregion
 
         #region Usage Events (Performance & Cost Optimized)
 
-        public Task HandleApiKeyUsedAsync(ApiKeyUsedEvent eventData)
+        public async Task HandleApiKeyUsedAsync(ApiKeyUsedEvent eventData, CancellationToken cancellationToken)
         {
-            // 권장 사항: 이 이벤트는 매우 빈번하게 발생합니다.
-            // 모든 사용 기록을 메인 감사 데이터베이스에 로깅하는 것은 비용이 매우 큽니다.
-            // 이 핸들러는 사용량 제한 카운터 업데이트와 같은 가벼운 인메모리 작업에 집중해야 합니다.
-            // 분석을 위해서는 이 이벤트들을 별도의 고성능 로깅 파이프라인(예: Kafka -> Data Lake)으로 스트리밍하는 것이 좋습니다.
+            // ... (주석 동일)
 
-            // 예시: 캐시의 카운터 증가
-            var usageCounterKey = GetApiKeyUsageCounterKey(eventData.ApiKeyId);
-            _cacheService.IncrementAsync(usageCounterKey, 1);
-
-            return Task.CompletedTask;
+            // [FIX] ApiKeyId -> AggregateId
+            var usageCounterKey = GetApiKeyUsageCounterKey(eventData.AggregateId);
+            await _cacheService.IncrementAsync(usageCounterKey, 1, cancellationToken);
         }
 
-        public async Task HandleApiKeyRateLimitReachedAsync(ApiKeyRateLimitEvent eventData)
+        public async Task HandleApiKeyRateLimitReachedAsync(ApiKeyRateLimitEvent eventData, CancellationToken cancellationToken)
         {
-            _logger.LogWarning("Rate limit reached for API Key {ApiKeyId} on App {AppId}", eventData.ApiKeyId, eventData.ApplicationId);
+            // [FIX] ApiKeyId -> AggregateId
+            _logger.LogWarning("Rate limit reached for API Key {ApiKeyId} on App {AppId}", eventData.AggregateId, eventData.ApplicationId);
 
-            // 보안 관련 중요 이벤트이므로, 보안 로그로 기록합니다.
             await _auditService.LogSecurityEventAsync(
                 eventType: "ApiKeyRateLimitReached",
                 severity: AuditEventSeverity.Warning,
                 description: $"API Key is being throttled.",
-                connectedId: null, // 시스템 이벤트이지만, 특정 키와 관련이 있습니다.
+                connectedId: null, 
                 details: new Dictionary<string, object>
                 {
-                    ["ApiKeyId"] = eventData.ApiKeyId,
-                    ["ApplicationId"] = eventData.ApplicationId,
+                    // [FIX] ApiKeyId -> AggregateId
+                    ["ApiKeyId"] = eventData.AggregateId,
+                    ["ApplicationId"] = eventData.ApplicationId ?? Guid.Empty,
                     ["RateLimitPerMinute"] = eventData.RateLimitPerMinute,
                     ["CurrentRequests"] = eventData.CurrentRequests
-                }
+                },
+                cancellationToken: cancellationToken
             );
         }
 
-        public async Task HandleApiKeyAuthenticationFailedAsync(ApiKeyAuthFailedEvent eventData)
+        public async Task HandleApiKeyAuthenticationFailedAsync(ApiKeyAuthFailedEvent eventData, CancellationToken cancellationToken)
         {
             _logger.LogWarning("API Key authentication failed. Reason: {Reason}, IP: {IP}", eventData.FailureReason, eventData.ClientIp);
 
@@ -165,7 +221,8 @@ namespace AuthHive.Application.Handlers
                 {
                     ["ApplicationId"] = eventData.ApplicationId ?? Guid.Empty,
                     ["ClientIp"] = eventData.ClientIp ?? "Unknown"
-                }
+                },
+                cancellationToken: cancellationToken
             );
         }
 
@@ -173,82 +230,110 @@ namespace AuthHive.Application.Handlers
 
         #region Management Events
 
-        public async Task HandleApiKeyDeactivatedAsync(ApiKeyDeactivatedEvent eventData)
+        public async Task HandleApiKeyDeactivatedAsync(ApiKeyDeactivatedEvent eventData, CancellationToken cancellationToken)
         {
-            // 비활성화 이벤트는 반드시 연관된 애플리케이션 ID를 가져야 합니다.
-            if (!eventData.ApplicationId.HasValue)
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                _logger.LogError("Cannot handle ApiKeyDeactivatedEvent: ApplicationId is missing for ApiKeyId {ApiKeyId}.", eventData.ApiKeyId);
-                return; // 데이터가 유효하지 않으면 조기 종료합니다.
+                // [FIX] ApiKeyId -> AggregateId
+                _logger.LogError("Cannot handle ApiKeyDeactivatedEvent: ApplicationId is missing for ApiKeyId {AggregateId}.", eventData.AggregateId);
+                return; 
             }
 
-            await HandleEventAsync("ApiKeyDeactivated", eventData.ApplicationId.Value, eventData.ApiKeyId, async () =>
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyDeactivated", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.ApiKeyId);
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.AggregateId, ct);
                 await _auditService.LogActionAsync(
-                    performedByConnectedId: eventData.DeactivatedByConnectedId,
+                    // [FIX] CS1739: 'performedByConnectedId:' -> 'connectedId:'
+                    connectedId: eventData.DeactivatedByConnectedId,
                     action: "API_KEY_DEACTIVATED",
                     actionType: AuditActionType.StatusChange,
                     resourceType: "ApiKey",
-                    resourceId: eventData.ApiKeyId.ToString(),
-                    metadata: JsonSerializer.Serialize(new { eventData.Reason })
+                    // [FIX] ApiKeyId -> AggregateId
+                    resourceId: eventData.AggregateId.ToString(),
+                    // [FIX] CS1503: string -> Dictionary<string, object>
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["Reason"] = eventData.Reason ?? "Not specified"
+                    },
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
-        public async Task HandleApiKeyReactivatedAsync(ApiKeyReactivatedEvent eventData)
+        public async Task HandleApiKeyReactivatedAsync(ApiKeyReactivatedEvent eventData, CancellationToken cancellationToken)
         {
-            if (eventData.ApplicationId == Guid.Empty)
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                _logger.LogError("Cannot handle ApiKeyReactivatedEvent: ApplicationId is an empty Guid for ApiKeyId {ApiKeyId}.", eventData.ApiKeyId);
+                // [FIX] ApiKeyId -> AggregateId
+                _logger.LogError("Cannot handle ApiKeyReactivatedEvent: ApplicationId is missing or empty for ApiKeyId {AggregateId}.", eventData.AggregateId);
                 return;
             }
 
-            await HandleEventAsync("ApiKeyReactivated", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyReactivated", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.AggregateId, ct);
                 await _auditService.LogActionAsync(
-                    performedByConnectedId: eventData.ReactivatedByConnectedId,
+                    // [FIX] CS1739: 'performedByConnectedId:' -> 'connectedId:'
+                    connectedId: eventData.ReactivatedByConnectedId,
                     action: "API_KEY_REACTIVATED",
                     actionType: AuditActionType.StatusChange,
                     resourceType: "ApiKey",
-                    resourceId: eventData.ApiKeyId.ToString()
+                    // [FIX] ApiKeyId -> AggregateId
+                    resourceId: eventData.AggregateId.ToString(),
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
-        public async Task HandleApiKeyScopeChangedAsync(ApiKeyScopeChangedEvent eventData)
+        public async Task HandleApiKeyScopeChangedAsync(ApiKeyScopeChangedEvent eventData, CancellationToken cancellationToken)
         {
-            if (eventData.ApplicationId == Guid.Empty)
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                _logger.LogError("Cannot handle ApiKeyScopeChangedEvent: ApplicationId is an empty Guid for ApiKeyId {ApiKeyId}.", eventData.ApiKeyId);
+                // [FIX] ApiKeyId -> AggregateId
+                _logger.LogError("Cannot handle ApiKeyScopeChangedEvent: ApplicationId is missing or empty for ApiKeyId {AggregateId}.", eventData.AggregateId);
                 return;
             }
 
-            await HandleEventAsync("ApiKeyScopeChanged", eventData.ApplicationId, eventData.ApiKeyId, async () =>
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await HandleEventAsync("ApiKeyScopeChanged", eventData.ApplicationId.Value, eventData.AggregateId, async (ct) =>
             {
-                await InvalidateApiKeyCacheAsync(eventData.ApplicationId, eventData.ApiKeyId);
-                // 스코프 변경은 중요한 보안 이벤트입니다.
+                // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+                await InvalidateApiKeyCacheAsync(eventData.ApplicationId.Value, eventData.AggregateId, ct);
                 await _auditService.LogActionAsync(
-                    performedByConnectedId: eventData.ChangedByConnectedId,
+                    // [FIX] CS1739: 'performedByConnectedId:' -> 'connectedId:'
+                    connectedId: eventData.ChangedByConnectedId,
                     action: "API_KEY_SCOPE_CHANGED",
                     actionType: AuditActionType.PermissionUpdated,
                     resourceType: "ApiKey",
-                    resourceId: eventData.ApiKeyId.ToString(),
-                    metadata: JsonSerializer.Serialize(new { OldScopes = eventData.OldScopes, NewScopes = eventData.NewScopes })
+                    // [FIX] ApiKeyId -> AggregateId
+                    resourceId: eventData.AggregateId.ToString(),
+                    // [FIX] CS1503 & CS8601: null일 경우 빈 리스트로 대체
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["OldScopes"] = eventData.OldScopes ?? (object)new List<string>(),
+                        ["NewScopes"] = eventData.NewScopes ?? (object)new List<string>()
+                    },
+                    cancellationToken: ct
                 );
-            });
+            }, cancellationToken);
         }
 
         #endregion
 
         #region Security Events
 
-        public async Task HandleSuspiciousApiKeyActivityAsync(SuspiciousApiKeyActivityEvent eventData)
+        public async Task HandleSuspiciousApiKeyActivityAsync(SuspiciousApiKeyActivityEvent eventData, CancellationToken cancellationToken)
         {
-            _logger.LogCritical("Suspicious activity detected for API Key {ApiKeyId}! Type: {Activity}", eventData.ApiKeyId, eventData.ActivityType);
+            // [FIX] ApiKeyId -> AggregateId
+            _logger.LogCritical("Suspicious activity detected for API Key {ApiKeyId}! Type: {Activity}", eventData.AggregateId, eventData.ActivityType);
 
-            // 높은 심각도의 보안 이벤트를 기록합니다.
             await _auditService.LogSecurityEventAsync(
                 eventType: "SuspiciousApiKeyActivity",
                 severity: AuditEventSeverity.Critical,
@@ -256,20 +341,21 @@ namespace AuthHive.Application.Handlers
                 connectedId: null,
                 details: eventData.Details.Concat(new Dictionary<string, object>
                 {
-                    ["ApiKeyId"] = eventData.ApiKeyId,
-                    ["ApplicationId"] = eventData.ApplicationId
-                }).ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
+                    // [FIX] ApiKeyId -> AggregateId
+                    ["ApiKeyId"] = eventData.AggregateId,
+                    ["ApplicationId"] = eventData.ApplicationId ?? Guid.Empty
+                }).ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
+                cancellationToken: cancellationToken
             );
 
-            // 권장 사항: 내부 이벤트를 발행하여 자동화된 응답(예: 관리자에게 긴급 알림 이메일 전송 또는 키 임시 잠금)을 트리거합니다.
-            // await _eventBus.PublishAsync(new ApiKeyLockoutRequiredEvent { ... });
+            // await _eventBus.PublishAsync(new ApiKeyLockoutRequiredEvent { ... }, cancellationToken);
         }
 
-        public async Task HandleApiKeyExposureDetectedAsync(ApiKeyExposureEvent eventData)
+        public async Task HandleApiKeyExposureDetectedAsync(ApiKeyExposureEvent eventData, CancellationToken cancellationToken)
         {
-            _logger.LogCritical("API Key {ApiKeyId} exposure detected at {Location}!", eventData.ApiKeyId, eventData.ExposureLocation);
+            // [FIX] ApiKeyId -> AggregateId
+            _logger.LogCritical("API Key {ApiKeyId} exposure detected at {Location}!", eventData.AggregateId, eventData.ExposureLocation);
 
-            // 1. 심각한 보안 이벤트를 기록합니다.
             await _auditService.LogSecurityEventAsync(
                 eventType: "ApiKeyExposureDetected",
                 severity: AuditEventSeverity.Critical,
@@ -277,63 +363,71 @@ namespace AuthHive.Application.Handlers
                 connectedId: null,
                 details: new Dictionary<string, object>
                 {
-                    ["ApiKeyId"] = eventData.ApiKeyId,
-                    ["ApplicationId"] = eventData.ApplicationId,
+                    // [FIX] ApiKeyId -> AggregateId
+                    ["ApiKeyId"] = eventData.AggregateId,
+                    ["ApplicationId"] = eventData.ApplicationId ?? Guid.Empty, // Nullable 처리
                     ["ExposureUrl"] = eventData.ExposureUrl ?? "N/A"
-                }
+                },
+                cancellationToken: cancellationToken
             );
 
-            // 노출된 키는 반드시 애플리케이션 ID를 가져야 합니다.
-            if (eventData.ApplicationId == Guid.Empty)
+            // [FIX] ApplicationId는 Guid? 이므로 .Value를 사용하기 전 null 체크
+            if (!eventData.ApplicationId.HasValue || eventData.ApplicationId.Value == Guid.Empty)
             {
-                _logger.LogCritical("Cannot process ApiKeyExposureEvent for ApiKeyId {ApiKeyId}: ApplicationId is missing or empty.", eventData.ApiKeyId);
+                // [FIX] ApiKeyId -> AggregateId
+                _logger.LogCritical("Cannot process ApiKeyExposureEvent for ApiKeyId {AggregateId}: ApplicationId is missing or empty.", eventData.AggregateId);
                 return;
             }
 
-            // 2. 키를 자동으로 비활성화하는 이벤트를 발행합니다.
-            // 이것은 매우 중요한 자동화된 보안 조치입니다.
-            await _eventBus.PublishAsync(new ApiKeyDeactivatedEvent(eventData.ApplicationId, eventData.ApiKeyId)
+            // [FIX] ApiKeyId -> AggregateId / ApplicationId.Value 사용
+            await _eventBus.PublishAsync(new ApiKeyDeactivatedEvent(eventData.ApplicationId.Value, eventData.AggregateId)
             {
                 Reason = $"Automatically deactivated due to public exposure detected at {eventData.ExposureLocation}.",
-                // 특정 사용자가 아닌 시스템에 의한 조치입니다.
                 DeactivatedByConnectedId = Guid.Empty,
                 DeactivatedAt = DateTime.UtcNow
-            });
+            }, cancellationToken);
 
-            // 3. 계정 소유자에게 긴급 이메일을 보냅니다.
-            // await _emailService.SendApiKeyExposedAlertAsync(eventData);
+            // await _emailService.SendApiKeyExposedAlertAsync(eventData, cancellationToken);
         }
 
         #endregion
 
         #region Private Helper Methods
 
-        private async Task HandleEventAsync(string eventName, Guid applicationId, Guid apiKeyId, Func<Task> handlerAction)
+        // [FIX] apiKeyId 매개변수 이름을 aggregateId로 변경하여 명확성 확보
+        private async Task HandleEventAsync(string eventName, Guid applicationId, Guid aggregateId, Func<CancellationToken, Task> handlerAction, CancellationToken cancellationToken)
         {
-            _logger.LogInformation("Handling {EventName}: App={AppId}, Key={KeyId}", eventName, applicationId, apiKeyId);
+            _logger.LogInformation("Handling {EventName}: App={AppId}, Key={KeyId}", eventName, applicationId, aggregateId);
             try
             {
-                await handlerAction();
+                await handlerAction(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling {EventName} was canceled: App={AppId}, Key={KeyId}", eventName, applicationId, aggregateId);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling {EventName}: App={AppId}, Key={KeyId}", eventName, applicationId, apiKeyId);
-                throw; // 에러를 다시 던져서 상위 호출자에게 알립니다.
+                _logger.LogError(ex, "Error handling {EventName}: App={AppId}, Key={KeyId}", eventName, applicationId, aggregateId);
+                throw; 
             }
         }
 
-        private async Task InvalidateApiKeyCacheAsync(Guid applicationId, Guid apiKeyId)
+        // [FIX] apiKeyId 매개변수 이름을 aggregateId로 변경하여 명확성 확보
+        private async Task InvalidateApiKeyCacheAsync(Guid applicationId, Guid aggregateId, CancellationToken cancellationToken)
         {
-            var cacheKey = GetApiKeyCacheKey(applicationId, apiKeyId);
-            await _cacheService.RemoveAsync(cacheKey);
-            _logger.LogDebug("Invalidated API Key cache for App={AppId}, Key={KeyId}", applicationId, apiKeyId);
+            var cacheKey = GetApiKeyCacheKey(applicationId, aggregateId);
+            await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+            _logger.LogDebug("Invalidated API Key cache for App={AppId}, Key={KeyId}", applicationId, aggregateId);
         }
 
-        // 캐시 키는 멀티테넌시를 고려하여 설계해야 합니다.
-        private static string GetApiKeyCacheKey(Guid applicationId, Guid apiKeyId) => $"apikeys:{applicationId}:{apiKeyId}";
-        private static string GetApiKeyUsageCounterKey(Guid apiKeyId) => $"apikeys:usage:{apiKeyId}";
+        // [FIX] apiKeyId 매개변수 이름을 aggregateId로 변경하여 명확성 확보
+        private static string GetApiKeyCacheKey(Guid applicationId, Guid aggregateId) => $"apikeys:{applicationId}:{aggregateId}";
+        
+        // [FIX] apiKeyId 매개변수 이름을 aggregateId로 변경하여 명확성 확보
+        private static string GetApiKeyUsageCounterKey(Guid aggregateId) => $"apikeys:usage:{aggregateId}";
 
         #endregion
     }
 }
-

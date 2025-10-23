@@ -1,1022 +1,535 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
-using AuthHive.Core.Interfaces.Auth.Handler;
-using AuthHive.Core.Interfaces.Audit.Repository;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.Infra;
-using AuthHive.Core.Interfaces.Infra.Monitoring;
-using AuthHive.Core.Entities.Auth;
-using AuthHive.Core.Entities.Audit;
-using AuthHive.Core.Enums.Auth;
-using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Models.Common;
-using AuthHive.Core.Models.Auth.ConnectedId.Events;
-using System.Text.Json;
 using System.Diagnostics;
-using AuthHive.Core.Interfaces.Infra.Cache;
+using System.Linq;
+using System.Text.Json;
+using System.Threading; // CancellationToken 사용
+using System.Threading.Tasks;
+using AuthHive.Core.Entities.Audit; // AuditLog 엔티티 사용
+using AuthHive.Core.Entities.Auth; // ConnectedIdContext 엔티티 사용
+using AuthHive.Core.Enums.Audit; // AuditEventSeverity 사용
+using AuthHive.Core.Enums.Auth; // ConnectedIdContextType 사용
+using AuthHive.Core.Enums.Core; // EventPriority 사용 (암시적)
+using AuthHive.Core.Interfaces.Audit; // IAuditService 사용 (LogActionAsync 호출 위함)
+using AuthHive.Core.Interfaces.Auth.Handler; // IConnectedIdContextEventHandler 구현
+using AuthHive.Core.Interfaces.Base; // IService, EventResult 등 사용
+using AuthHive.Core.Interfaces.Infra; // IDateTimeProvider 사용
+using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService 사용
+using AuthHive.Core.Interfaces.Infra.Monitoring; // IMetricsService 사용
+using AuthHive.Core.Models.Auth.ConnectedId.Events; // ContextEvent (배치 처리용, 실제 정의 필요)
+using AuthHive.Core.Models.Common; // EventResult, BatchEventResult 사용
+using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Services.Handlers
 {
     /// <summary>
-    /// ConnectedIdContext 이벤트 핸들러 구현 - AuthHive v15
+    /// ConnectedIdContext 이벤트 핸들러 구현 - AuthHive v16
     /// ConnectedIdContext 관련 모든 이벤트를 처리하고 감사, 메트릭, 캐시 관리를 수행합니다.
     /// </summary>
-    public class ConnectedIdContextEventHandler : IConnectedIdContextEventHandler
+    public class ConnectedIdContextEventHandler : IConnectedIdContextEventHandler, IService
     {
         private readonly ILogger<ConnectedIdContextEventHandler> _logger;
-        private readonly IAuditLogRepository _auditRepository;
+        // IAuditLogRepository 대신 IAuditService 사용 (LogActionAsync 메서드 활용)
+        private readonly IAuditService _auditService;
         private readonly IDateTimeProvider _dateTimeProvider;
         private readonly ICacheService _cacheService;
-        private readonly IMetricsService _metricsService;
+        private readonly IMetricsService _metricsService; // 메트릭 기록 서비스
 
-        private const string CACHE_KEY_PREFIX = "context";
-        private const string METRICS_PREFIX = "connectedid.context";
-        private const int HOT_PATH_THRESHOLD = 100; // 100회 이상 접근 시 Hot Path로 승격
-        private const int MEMORY_PRESSURE_THRESHOLD_MB = 1024; // 1GB
+        // 상수 정의
+        private const string CACHE_KEY_PREFIX = "context"; // 캐시 키 접두사
+        private const string METRICS_PREFIX = "connectedid.context"; // 메트릭 접두사
+        private const int HOT_PATH_THRESHOLD = 100; // Hot Path 승격 기준 접근 횟수
 
         public ConnectedIdContextEventHandler(
             ILogger<ConnectedIdContextEventHandler> logger,
-            IAuditLogRepository auditRepository,
+            IAuditService auditService, // IAuditLogRepository -> IAuditService
             IDateTimeProvider dateTimeProvider,
             ICacheService cacheService,
             IMetricsService metricsService)
         {
             _logger = logger;
-            _auditRepository = auditRepository;
+            _auditService = auditService; // 의존성 주입 변경
             _dateTimeProvider = dateTimeProvider;
             _cacheService = cacheService;
             _metricsService = metricsService;
         }
 
         #region IService Implementation
-        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
+
+        public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // 의존 서비스들의 상태 확인
-                // CancellationToken을 하위 서비스에 전달하여 취소/타임아웃을 지원합니다.
-                await _cacheService.GetAsync<string>("health_check", cancellationToken);
-                return true;
+                // 의존 서비스들의 상태 확인 (CacheService 예시)
+                await _cacheService.ExistsAsync("health_check", cancellationToken);
+                // 필요시 IAuditService, IMetricsService 등의 Health Check 추가
+                // var auditHealthy = await _auditService.IsHealthyAsync(cancellationToken);
+                // var metricsHealthy = await _metricsService.IsHealthyAsync(cancellationToken);
+                return true; // && auditHealthy && metricsHealthy;
             }
-            catch (Exception ex) // 예외 타입을 명시하는 것이 좋지만, 현재 형태를 유지합니다.
+            catch (OperationCanceledException)
             {
-                // 로깅은 catch 블록에서 발생하는 문제의 추적을 위해 유지
-                _logger.LogError(ex, "Health check failed due to exception.");
+                _logger.LogWarning("ConnectedIdContextEventHandler health check canceled.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "ConnectedIdContextEventHandler health check failed");
                 return false;
             }
         }
 
-        public Task InitializeAsync(CancellationToken cancellationToken = default) // 👈 CancellationToken 추가
+        public Task InitializeAsync(CancellationToken cancellationToken = default)
         {
-            _logger.LogInformation("ConnectedIdContextEventHandler initialized");
-
-            // 불필요한 'async/await Task.CompletedTask' 대신 Task를 직접 반환하여 오버헤드를 제거합니다.
+            _logger.LogInformation("ConnectedIdContextEventHandler initialized at {Time}", _dateTimeProvider.UtcNow);
             return Task.CompletedTask;
         }
         #endregion
 
-        #region 컨텍스트 생명주기 이벤트
+        #region 컨텍스트 생명주기 이벤트 (IConnectedIdContextEventHandler 구현)
 
         public async Task<EventResult> OnContextCreatedAsync(
             ConnectedIdContext context,
-            Guid createdBy)
+            Guid createdBy,
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogInformation(
-                    "Context created: {ContextKey} for ConnectedId {ConnectedId}, Type: {ContextType}",
+                    "Handling OnContextCreatedAsync: ContextKey={ContextKey}, ConnectedId={ConnectedId}, Type={ContextType}",
                     context.ContextKey, context.ConnectedId, context.ContextType);
 
+                var stopwatch = Stopwatch.StartNew();
+
                 // 1. 감사 로그
-                await LogAuditAsync(
-                    createdBy,
+                await LogContextActionAsync(
+                    AuditActionType.Create,
                     "CONTEXT_CREATED",
+                    createdBy,
                     $"Created context {context.ContextKey}",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Info,
+                    context,
                     new Dictionary<string, object>
                     {
                         ["ContextType"] = context.ContextType.ToString(),
-                        ["ConnectedId"] = context.ConnectedId,
-                        ["ApplicationId"] = context.ApplicationId?.ToString() ?? "N/A",
                         ["ExpiresAt"] = context.ExpiresAt
-                    });
+                    },
+                    cancellationToken);
 
                 // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.created.{context.ContextType.ToString().ToLower()}");
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.created.{context.ContextType.ToString().ToLower()}", cancellationToken: cancellationToken);
 
-                // 3. 캐시에 저장
-                await _cacheService.SetAsync(
-                    context.ContextKey,
-                    JsonSerializer.Serialize(context),
-                    context.ExpiresAt - _dateTimeProvider.UtcNow);
+                // 3. 캐시에 저장 (만료 시간 설정)
+                var expiration = context.ExpiresAt > _dateTimeProvider.UtcNow ? context.ExpiresAt - _dateTimeProvider.UtcNow : TimeSpan.FromMinutes(1); // 만료 시간이 과거면 짧은 시간 설정
+                // ConnectedIdContext가 클래스(참조 타입)라고 가정
+                await _cacheService.SetAsync(context.ContextKey, context, expiration, cancellationToken);
+
+                stopwatch.Stop();
+                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.created.duration", stopwatch.ElapsedMilliseconds, cancellationToken: cancellationToken);
 
                 return EventResult.CreateSuccess(context.Id.ToString(), 1);
             }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling OnContextCreatedAsync for ContextKey={ContextKey} was canceled.", context.ContextKey);
+                // 롤백할 DB 작업이 없으므로 throw만 함
+                throw;
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to handle context created event");
-                return EventResult.CreateFailure(ex.Message, true);
+                _logger.LogError(ex, "Failed to handle OnContextCreatedAsync for ContextKey={ContextKey}", context.ContextKey);
+                return EventResult.CreateFailure(ex.Message, true); // 실패 시 재시도 가능하도록 설정 (선택 사항)
             }
         }
 
         public async Task<EventResult> OnContextUpdatedAsync(
             ConnectedIdContext context,
             Guid updatedBy,
-            Dictionary<string, (object? OldValue, object? NewValue)> changes)
+            Dictionary<string, (object? OldValue, object? NewValue)> changes,
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogInformation(
-                    "Context updated: {ContextKey} with {ChangeCount} changes",
+                    "Handling OnContextUpdatedAsync: ContextKey={ContextKey} with {ChangeCount} changes",
                     context.ContextKey, changes.Count);
+                var stopwatch = Stopwatch.StartNew();
 
                 // 1. 감사 로그 (변경 사항 포함)
-                await LogAuditAsync(
-                    updatedBy,
+                await LogContextActionAsync(
+                    AuditActionType.Update,
                     "CONTEXT_UPDATED",
+                    updatedBy,
                     $"Updated context {context.ContextKey}",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Info,
-                    new Dictionary<string, object>
-                    {
-                        ["Changes"] = changes.Select(c => new
-                        {
-                            Field = c.Key,
-                            OldValue = c.Value.OldValue?.ToString() ?? "null",
-                            NewValue = c.Value.NewValue?.ToString() ?? "null"
-                        }).ToList()
-                    });
+                    context,
+                     new Dictionary<string, object>
+                     {
+                         // 변경 사항을 직렬화 가능한 형태로 변환
+                         ["Changes"] = changes.ToDictionary(
+                             kvp => kvp.Key,
+                             kvp => new { Old = kvp.Value.OldValue?.ToString(), New = kvp.Value.NewValue?.ToString() }
+                         )
+                     },
+                    cancellationToken);
 
                 // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.updated");
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.updated", cancellationToken: cancellationToken);
 
-                // 3. 캐시 업데이트
-                await _cacheService.SetAsync(
-                    context.ContextKey,
-                    JsonSerializer.Serialize(context),
-                    context.ExpiresAt - _dateTimeProvider.UtcNow);
+                // 3. 캐시 업데이트 (만료 시간 재설정)
+                var expiration = context.ExpiresAt > _dateTimeProvider.UtcNow ? context.ExpiresAt - _dateTimeProvider.UtcNow : TimeSpan.FromMinutes(1);
+                await _cacheService.SetAsync(context.ContextKey, context, expiration, cancellationToken);
+
+                stopwatch.Stop();
+                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.updated.duration", stopwatch.ElapsedMilliseconds, cancellationToken: cancellationToken);
 
                 return EventResult.CreateSuccess(context.Id.ToString(), 1);
             }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling OnContextUpdatedAsync for ContextKey={ContextKey} was canceled.", context.ContextKey);
+                throw;
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to handle context updated event");
+                _logger.LogError(ex, "Failed to handle OnContextUpdatedAsync for ContextKey={ContextKey}", context.ContextKey);
                 return EventResult.CreateFailure(ex.Message, true);
             }
         }
 
         public async Task<EventResult> OnContextDeletedAsync(
-            Guid contextId,
-            Guid organizationId,
-            Guid deletedBy,
-            string? reason = null)
+           Guid contextId,
+           Guid organizationId, // 조직 ID를 받아야 캐시 키 생성 및 감사 로그에 사용 가능
+           Guid deletedBy,
+           string? reason = null,
+           CancellationToken cancellationToken = default)
         {
+            // 컨텍스트 키를 생성하거나, 이벤트 발행 시 키를 전달받아야 함
+            // 여기서는 contextId와 organizationId로 키를 재구성한다고 가정
+            var contextKey = $"{CACHE_KEY_PREFIX}:{organizationId}:{contextId}"; // 예시 키 구조
+
             try
             {
                 _logger.LogInformation(
-                    "Context deleted: {ContextId}, Reason: {Reason}",
-                    contextId, reason ?? "Not specified");
+                    "Handling OnContextDeletedAsync: ContextId={ContextId}, OrgId={OrganizationId}, Reason={Reason}",
+                    contextId, organizationId, reason ?? "N/A");
+                var stopwatch = Stopwatch.StartNew();
 
                 // 1. 감사 로그
-                await LogAuditAsync(
-                    deletedBy,
-                    "CONTEXT_DELETED",
-                    $"Deleted context {contextId}: {reason}",
-                    contextId,
-                    organizationId,
-                    AuditEventSeverity.Warning,
-                    new Dictionary<string, object>
-                    {
-                        ["Reason"] = reason ?? "Not specified"
-                    });
+                await _auditService.LogActionAsync(
+                                actionType: AuditActionType.Delete,
+                                action: "CONTEXT_DELETED",
+                                connectedId: deletedBy,
+                                resourceType: "ConnectedIdContext",
+                                resourceId: contextId.ToString(),
+                                // success parameter (optional, defaults to true, might need adjustment based on context)
+                                // errorMessage parameter (optional)
+                                metadata: new Dictionary<string, object>
+                                {
+                                    ["Reason"] = reason ?? (object)"N/A", // null 처리
+                                    ["OrganizationId"] = organizationId // organizationId를 metadata에 포함
+                                                                        // severity가 필요하다면 여기에 추가: ["Severity"] = AuditEventSeverity.Warning.ToString()
+                                },
+                                cancellationToken: cancellationToken);
+
 
                 // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.deleted");
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.deleted", cancellationToken: cancellationToken);
 
-                // 3. 캐시에서 제거 (키 패턴으로 검색하여 제거)
-                await _cacheService.RemoveByPatternAsync($"{CACHE_KEY_PREFIX}:*{contextId}*");
+                // 3. 캐시에서 제거
+                await _cacheService.RemoveAsync(contextKey, cancellationToken);
+
+                stopwatch.Stop();
+                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.deleted.duration", stopwatch.ElapsedMilliseconds, cancellationToken: cancellationToken);
+
 
                 return EventResult.CreateSuccess(contextId.ToString(), 1);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                _logger.LogError(ex, "Failed to handle context deleted event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnContextExpiredAsync(
-            ConnectedIdContext context,
-            bool autoDeleted = false)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Context expired: {ContextKey}, AutoDeleted: {AutoDeleted}",
-                    context.ContextKey, autoDeleted);
-
-                // 1. 감사 로그
-                await LogAuditAsync(
-                    Guid.Empty,
-                    "CONTEXT_EXPIRED",
-                    $"Context {context.ContextKey} expired",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Info,
-                    new Dictionary<string, object>
-                    {
-                        ["AutoDeleted"] = autoDeleted,
-                        ["ExpiredAt"] = context.ExpiresAt
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.expired");
-
-                // 3. 캐시에서 제거
-                await _cacheService.RemoveAsync(context.ContextKey);
-
-                return EventResult.CreateSuccess(context.Id.ToString(), 1);
+                _logger.LogWarning("Handling OnContextDeletedAsync for ContextId={ContextId} was canceled.", contextId);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to handle context expired event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnContextRefreshedAsync(
-            ConnectedIdContext oldContext,
-            ConnectedIdContext newContext,
-            Guid? refreshedBy = null)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Context refreshed: {ContextKey}, New expiry: {ExpiresAt}",
-                    newContext.ContextKey, newContext.ExpiresAt);
-
-                // 1. 감사 로그
-                await LogAuditAsync(
-                    refreshedBy ?? Guid.Empty,
-                    "CONTEXT_REFRESHED",
-                    $"Refreshed context {newContext.ContextKey}",
-                    newContext.Id,
-                    newContext.OrganizationId,
-                    AuditEventSeverity.Info,
-                    new Dictionary<string, object>
-                    {
-                        ["OldExpiresAt"] = oldContext.ExpiresAt,
-                        ["NewExpiresAt"] = newContext.ExpiresAt,
-                        ["ExtendedBy"] = (newContext.ExpiresAt - oldContext.ExpiresAt).TotalMinutes
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.refreshed");
-
-                // 3. 캐시 업데이트
-                await _cacheService.SetAsync(
-                    newContext.ContextKey,
-                    JsonSerializer.Serialize(newContext),
-                    newContext.ExpiresAt - _dateTimeProvider.UtcNow);
-
-                return EventResult.CreateSuccess(newContext.Id.ToString(), 1);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle context refreshed event");
-                return EventResult.CreateFailure(ex.Message, true);
+                _logger.LogError(ex, "Failed to handle OnContextDeletedAsync for ContextId={ContextId}", contextId);
+                return EventResult.CreateFailure(ex.Message, false); // 삭제 실패는 재시도 불필요할 수 있음
             }
         }
 
         #endregion
 
-        #region 접근 및 사용 이벤트
+        #region 접근 및 사용 이벤트 (IConnectedIdContextEventHandler 구현)
 
         public async Task<EventResult> OnContextAccessedAsync(
-            ConnectedIdContext context,
+            ConnectedIdContext context, // 실제 컨텍스트 객체를 받아야 LastAccessedAt 업데이트 가능
             Guid accessedBy,
             string ipAddress,
-            string? userAgent = null)
+            string? userAgent = null,
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                // 접근 카운트 증가 (실제 구현에서는 DB 업데이트 필요)
-                context.AccessCount++;
-                context.LastAccessedAt = _dateTimeProvider.UtcNow;
+                var now = _dateTimeProvider.UtcNow;
+                // 마지막 접근 시간 업데이트는 캐시에만 반영 (DB 업데이트는 성능 부하)
+                context.LastAccessedAt = now; // 이벤트 핸들러가 상태를 직접 변경하는 것은 좋지 않음 -> 캐시 업데이트로 대체
 
-                // Hot Path 승격 체크
-                if (context.AccessCount >= HOT_PATH_THRESHOLD && !context.IsHotPath)
+                // 캐시 업데이트 (LastAccessedAt만 갱신된 객체로 덮어쓰기)
+                var expiration = context.ExpiresAt > now ? context.ExpiresAt - now : TimeSpan.FromMinutes(1);
+                await _cacheService.SetAsync(context.ContextKey, context, expiration, cancellationToken);
+
+
+                // 접근 카운트 증가 (캐시의 원자적 연산 사용)
+                var accessCountKey = $"{context.ContextKey}:access_count";
+                long currentAccessCount = await _cacheService.IncrementAsync(accessCountKey, 1, cancellationToken);
+
+                // Hot Path 승격 체크 및 이벤트 발행 (별도 메서드 호출)
+                if (currentAccessCount == HOT_PATH_THRESHOLD && !context.IsHotPath)
                 {
-                    await OnPromotedToHotPathAsync(context, context.AccessCount, HOT_PATH_THRESHOLD);
+                    // OnPromotedToHotPathAsync 호출 또는 관련 이벤트 발행
+                    _logger.LogInformation("Context {ContextKey} reached hot path threshold.", context.ContextKey);
+                    // context.IsHotPath = true; // 상태 변경 대신 이벤트 발행
+                    // await _eventBus.PublishAsync(new ContextPromotedToHotPathEvent(context.Id, ...));
+                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.hotpath.promoted_check", cancellationToken: cancellationToken); // 메트릭만 기록
                 }
 
                 // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.accessed");
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.accessed", cancellationToken: cancellationToken);
+
+                // 상세 접근 로그 (필요시, 성능 고려) - 감사 로그와 중복될 수 있음
+                // LogAccessDetailsAsync(context, accessedBy, ipAddress, userAgent, cancellationToken);
 
                 return EventResult.CreateSuccess(context.Id.ToString(), 1);
             }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling OnContextAccessedAsync for ContextKey={ContextKey} was canceled.", context.ContextKey);
+                // throw; // 접근 이벤트 취소는 무시 가능
+                return EventResult.CreateFailure("Operation canceled", false);
+            }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to handle context accessed event");
+                _logger.LogError(ex, "Failed to handle OnContextAccessedAsync for ContextKey={ContextKey}", context.ContextKey);
+                return EventResult.CreateFailure(ex.Message, false); // 접근 이벤트 실패는 무시 가능
+            }
+        }
+
+        public async Task<EventResult> OnCacheHitAsync(
+           string contextKey,
+           string cacheType, // e.g., "Memory", "Redis"
+           long latencyMs,
+           CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // 메트릭 기록
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.hit.{cacheType.ToLower()}", cancellationToken: cancellationToken);
+                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.cache.latency.{cacheType.ToLower()}", latencyMs, cancellationToken: cancellationToken);
+
+                _logger.LogTrace("Cache hit for {ContextKey} in {CacheType} ({Latency}ms)", contextKey, cacheType, latencyMs); // Trace 레벨 사용
+
+                return EventResult.CreateSuccess(contextKey);
+            }
+            catch (OperationCanceledException) { return EventResult.CreateFailure("Operation canceled", false); } // 메트릭 기록 취소는 무시
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle OnCacheHitAsync for {ContextKey}", contextKey);
                 return EventResult.CreateFailure(ex.Message, false);
             }
         }
 
-
-        public async Task<EventResult> OnPromotedToHotPathAsync(
-            ConnectedIdContext context,
-            int accessCount,
-            int threshold)
+        public async Task<EventResult> OnCacheMissAsync(
+            string contextKey,
+            string cacheType,
+            bool fallbackUsed = false, // 캐시 미스 시 DB 등 다른 소스에서 로드했는지 여부
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                _logger.LogInformation(
-                    "Context promoted to Hot Path: {ContextKey}, Access count: {AccessCount}",
-                    context.ContextKey, accessCount);
+                // 메트릭 기록
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.miss.{cacheType.ToLower()}", cancellationToken: cancellationToken);
+                if (fallbackUsed)
+                {
+                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cache.miss.fallback_used.{cacheType.ToLower()}", cancellationToken: cancellationToken);
+                }
 
-                context.IsHotPath = true;
-                context.GrpcCacheEnabled = true; // Hot Path는 gRPC 캐시도 활성화
+                _logger.LogDebug("Cache miss for {ContextKey} in {CacheType}. Fallback used: {FallbackUsed}", contextKey, cacheType, fallbackUsed); // Debug 레벨 사용
 
-                // 1. 감사 로그
-                await LogAuditAsync(
-                    Guid.Empty,
-                    "HOT_PATH_PROMOTED",
-                    $"Context {context.ContextKey} promoted to Hot Path",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Info,
-                    new Dictionary<string, object>
-                    {
-                        ["AccessCount"] = accessCount,
-                        ["Threshold"] = threshold
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.hotpath.promoted");
-
-                // 3. 캐시 우선순위 상승
-                context.Priority = 10; // 최고 우선순위
-
-                return EventResult.CreateSuccess(context.Id.ToString(), 1);
+                return EventResult.CreateSuccess(contextKey);
             }
+            catch (OperationCanceledException) { return EventResult.CreateFailure("Operation canceled", false); }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to handle hot path promotion event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnDemotedFromHotPathAsync(
-            ConnectedIdContext context,
-            string reason)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Context demoted from Hot Path: {ContextKey}, Reason: {Reason}",
-                    context.ContextKey, reason);
-
-                context.IsHotPath = false;
-                context.Priority = 5; // 기본 우선순위로 복귀
-
-                // 1. 감사 로그
-                await LogAuditAsync(
-                    Guid.Empty,
-                    "HOT_PATH_DEMOTED",
-                    $"Context {context.ContextKey} demoted from Hot Path: {reason}",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Info,
-                    new Dictionary<string, object>
-                    {
-                        ["Reason"] = reason
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.hotpath.demoted");
-
-                return EventResult.CreateSuccess(context.Id.ToString(), 1);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle hot path demotion event");
+                _logger.LogError(ex, "Failed to handle OnCacheMissAsync for {ContextKey}", contextKey);
                 return EventResult.CreateFailure(ex.Message, false);
             }
         }
 
         #endregion
 
-        #region 권한 및 역할 변경 이벤트
+        #region 권한 및 역할 변경 이벤트 (IConnectedIdContextEventHandler 구현)
 
         public async Task<EventResult> OnPermissionContextChangedAsync(
-            ConnectedIdContext context,
+            ConnectedIdContext context, // 전체 컨텍스트 객체 필요
             List<string> addedPermissions,
             List<string> removedPermissions,
-            Guid changedBy)
+            Guid changedBy,
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 _logger.LogInformation(
-                    "Permission context changed for {ContextKey}: +{Added}, -{Removed}",
-                    context.ContextKey, addedPermissions.Count, removedPermissions.Count);
+                    "Handling OnPermissionContextChangedAsync for {ContextKey}: +{AddedCount}, -{RemovedCount}",
+                    context.ContextKey, addedPermissions?.Count ?? 0, removedPermissions?.Count ?? 0);
+                var stopwatch = Stopwatch.StartNew();
 
                 // 1. 감사 로그
-                await LogAuditAsync(
-                    changedBy,
-                    "PERMISSIONS_CHANGED",
-                    $"Permissions changed for context {context.ContextKey}",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Warning,
-                    new Dictionary<string, object>
-                    {
-                        ["AddedPermissions"] = addedPermissions,
-                        ["RemovedPermissions"] = removedPermissions
-                    });
+                await LogContextActionAsync(
+                   AuditActionType.PermissionUpdated, // 구체적인 타입 사용
+                   "PERMISSIONS_CHANGED",
+                   changedBy,
+                   $"Permissions changed for context {context.ContextKey}",
+                   context,
+                   new Dictionary<string, object>
+                   {
+                       ["AddedPermissions"] = addedPermissions ?? new List<string>(), // null 처리
+                       ["RemovedPermissions"] = removedPermissions ?? new List<string>() // null 처리
+                   },
+                   cancellationToken);
 
                 // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.permissions.changed");
+                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.permissions.changed", cancellationToken: cancellationToken);
+                if (addedPermissions?.Any() ?? false)
+                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.permissions.added", addedPermissions.Count, cancellationToken: cancellationToken);
+                if (removedPermissions?.Any() ?? false)
+                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.permissions.removed", removedPermissions.Count, cancellationToken: cancellationToken);
+
+                // 3. 캐시 무효화 (권한 변경은 즉시 반영 필요)
+                await _cacheService.RemoveAsync(context.ContextKey, cancellationToken);
 
-                // 3. 캐시 무효화 (권한 변경은 즉시 반영)
-                await _cacheService.RemoveAsync(context.ContextKey);
-
-                return EventResult.CreateSuccess(context.Id.ToString(), 1);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle permission context changed event");
-                return EventResult.CreateFailure(ex.Message, true);
-            }
-        }
-
-        public async Task<EventResult> OnRoleContextChangedAsync(
-            ConnectedIdContext context,
-            List<Guid> addedRoles,
-            List<Guid> removedRoles,
-            Guid changedBy)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Role context changed for {ContextKey}: +{Added}, -{Removed}",
-                    context.ContextKey, addedRoles.Count, removedRoles.Count);
-
-                // 1. 감사 로그
-                await LogAuditAsync(
-                    changedBy,
-                    "ROLES_CHANGED",
-                    $"Roles changed for context {context.ContextKey}",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Warning,
-                    new Dictionary<string, object>
-                    {
-                        ["AddedRoles"] = addedRoles.Select(r => r.ToString()).ToList(),
-                        ["RemovedRoles"] = removedRoles.Select(r => r.ToString()).ToList()
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.roles.changed");
-
-                // 3. 캐시 무효화
-                await _cacheService.RemoveAsync(context.ContextKey);
-
-                return EventResult.CreateSuccess(context.Id.ToString(), 1);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle role context changed event");
-                return EventResult.CreateFailure(ex.Message, true);
-            }
-        }
-
-        public async Task<EventResult> OnPermissionValidationFailedAsync(
-            Guid connectedId,
-            Guid applicationId,
-            string requestedPermission,
-            string failureReason)
-        {
-            try
-            {
-                _logger.LogWarning(
-                    "Permission validation failed for ConnectedId {ConnectedId}, App {ApplicationId}, Permission: {Permission}, Reason: {Reason}",
-                    connectedId, applicationId, requestedPermission, failureReason);
-
-                // 1. 감사 로그 (보안 이벤트)
-                await LogAuditAsync(
-                    connectedId,
-                    "PERMISSION_DENIED",
-                    $"Permission denied: {requestedPermission}",
-                    null,
-                    null,
-                    AuditEventSeverity.Warning,
-                    new Dictionary<string, object>
-                    {
-                        ["ApplicationId"] = applicationId,
-                        ["RequestedPermission"] = requestedPermission,
-                        ["FailureReason"] = failureReason
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.permissions.denied");
-
-                return EventResult.CreateSuccess();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle permission validation failed event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        #endregion
-
-        #region 세션 관련 이벤트
-
-        public async Task<EventResult> OnSessionContextsCreatedAsync(
-            Guid sessionId,
-            Guid connectedId,
-            int contextCount)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Session contexts created for Session {SessionId}, ConnectedId {ConnectedId}, Count: {Count}",
-                    sessionId, connectedId, contextCount);
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.session.created", contextCount);
-
-                return EventResult.CreateSuccess(sessionId.ToString(), contextCount);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle session contexts created event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnSessionContextsClearedAsync(
-            Guid sessionId,
-            int clearedCount,
-            string reason)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Session contexts cleared for Session {SessionId}, Cleared: {Count}, Reason: {Reason}",
-                    sessionId, clearedCount, reason);
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.session.cleared", clearedCount);
-
-                // 캐시 정리
-                await _cacheService.RemoveByPatternAsync($"{CACHE_KEY_PREFIX}:*session:{sessionId}*");
-
-                return EventResult.CreateSuccess(sessionId.ToString(), clearedCount);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle session contexts cleared event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        #endregion
-
-        #region 애플리케이션 관련 이벤트
-
-        public async Task<EventResult> OnApplicationContextsInitializedAsync(
-            Guid applicationId,
-            Guid connectedId,
-            List<ConnectedIdContextType> initialContexts)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Application contexts initialized for App {ApplicationId}, ConnectedId {ConnectedId}, Types: {Types}",
-                    applicationId, connectedId, string.Join(", ", initialContexts));
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.application.initialized", initialContexts.Count);
-
-                return EventResult.CreateSuccess(applicationId.ToString(), initialContexts.Count);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle application contexts initialized event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnApplicationAccessChangedAsync(
-            Guid connectedId,
-            Guid applicationId,
-            string? oldAccessLevel,
-            string newAccessLevel)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Application access changed for ConnectedId {ConnectedId}, App {ApplicationId}: {Old} -> {New}",
-                    connectedId, applicationId, oldAccessLevel ?? "None", newAccessLevel);
-
-                // 관련 컨텍스트 캐시 무효화
-                await _cacheService.RemoveByPatternAsync($"{CACHE_KEY_PREFIX}:*{connectedId}*{applicationId}*");
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.application.access.changed");
-
-                return EventResult.CreateSuccess();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle application access changed event");
-                return EventResult.CreateFailure(ex.Message, true);
-            }
-        }
-
-        #endregion
-
-        #region 무결성 및 동기화 이벤트
-
-        public async Task<EventResult> OnIntegrityValidationFailedAsync(
-            ConnectedIdContext context,
-            List<string> validationErrors,
-            bool autoFixed = false)
-        {
-            try
-            {
-                _logger.LogError(
-                    "Integrity validation failed for context {ContextKey}: {Errors}",
-                    context.ContextKey, string.Join(", ", validationErrors));
-
-                // 1. 감사 로그 (Critical)
-                await LogAuditAsync(
-                    Guid.Empty,
-                    "INTEGRITY_FAILED",
-                    $"Integrity validation failed for {context.ContextKey}",
-                    context.Id,
-                    context.OrganizationId,
-                    AuditEventSeverity.Critical,
-                    new Dictionary<string, object>
-                    {
-                        ["ValidationErrors"] = validationErrors,
-                        ["AutoFixed"] = autoFixed
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.integrity.failed");
-
-                if (autoFixed)
-                {
-                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.integrity.autofixed");
-                }
-
-                return EventResult.CreateSuccess(context.Id.ToString(), autoFixed ? 1 : 0);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle integrity validation failed event");
-                return EventResult.CreateFailure(ex.Message, true);
-            }
-        }
-
-        public async Task<EventResult> OnChecksumMismatchAsync(
-            Guid contextId,
-            string expectedChecksum,
-            string actualChecksum,
-            string action)
-        {
-            try
-            {
-                _logger.LogError(
-                    "Checksum mismatch for context {ContextId}: Expected {Expected}, Actual {Actual}, Action: {Action}",
-                    contextId, expectedChecksum, actualChecksum, action);
-
-                // 1. 감사 로그 (Critical - 데이터 무결성 문제)
-                await LogAuditAsync(
-                    Guid.Empty,
-                    "CHECKSUM_MISMATCH",
-                    $"Checksum mismatch detected for context {contextId}",
-                    contextId,
-                    null,
-                    AuditEventSeverity.Critical,
-                    new Dictionary<string, object>
-                    {
-                        ["ExpectedChecksum"] = expectedChecksum,
-                        ["ActualChecksum"] = actualChecksum,
-                        ["Action"] = action
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.checksum.mismatch");
-
-                return EventResult.CreateSuccess(contextId.ToString());
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle checksum mismatch event");
-                return EventResult.CreateFailure(ex.Message, true);
-            }
-        }
-
-        public async Task<EventResult> OnSyncCompletedAsync(
-            Guid organizationId,
-            string syncId,
-            int successCount,
-            int failureCount,
-            TimeSpan duration)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Sync completed for Org {OrganizationId}, SyncId {SyncId}: Success {Success}, Failed {Failed}, Duration {Duration}ms",
-                    organizationId, syncId, successCount, failureCount, duration.TotalMilliseconds);
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.sync.completed");
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.sync.success", successCount);
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.sync.failed", failureCount);
-                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.sync.duration", (long)duration.TotalMilliseconds);
-
-                return EventResult.CreateSuccess(syncId, successCount);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle sync completed event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        #endregion
-
-        #region 정리 및 유지보수 이벤트
-
-        public async Task<EventResult> OnExpiredContextsCleanedAsync(
-            Guid organizationId,
-            int cleanedCount,
-            int retentionDays)
-        {
-            try
-            {
-                _logger.LogInformation(
-                    "Expired contexts cleaned for Org {OrganizationId}: {Count} contexts older than {Days} days",
-                    organizationId, cleanedCount, retentionDays);
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.cleanup.expired", cleanedCount);
-
-                return EventResult.CreateSuccess(organizationId.ToString(), cleanedCount);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle expired contexts cleaned event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnAutoRefreshedAsync(
-            ConnectedIdContext context,
-            DateTime oldExpiryTime,
-            DateTime newExpiryTime)
-        {
-            try
-            {
-                var extension = newExpiryTime - oldExpiryTime;
-                _logger.LogInformation(
-                    "Context auto-refreshed: {ContextKey}, Extended by {Minutes} minutes",
-                    context.ContextKey, extension.TotalMinutes);
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.autorefresh");
-
-                // 캐시 TTL 업데이트
-                await _cacheService.SetAsync(
-                    context.ContextKey,
-                    JsonSerializer.Serialize(context),
-                    newExpiryTime - _dateTimeProvider.UtcNow);
-
-                return EventResult.CreateSuccess(context.Id.ToString(), 1);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle auto refresh event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        #endregion
-
-        #region 알림 및 경고 이벤트
-
-        public async Task<EventResult> OnContextExpiringAsync(
-            ConnectedIdContext context,
-            int minutesRemaining,
-            bool notificationSent = false)
-        {
-            try
-            {
-                _logger.LogWarning(
-                    "Context expiring soon: {ContextKey}, Minutes remaining: {Minutes}",
-                    context.ContextKey, minutesRemaining);
-
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.expiring");
-
-                if (notificationSent)
-                {
-                    await _metricsService.IncrementAsync($"{METRICS_PREFIX}.expiring.notified");
-                }
-
-                return EventResult.CreateSuccess(context.Id.ToString());
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle context expiring event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        public async Task<EventResult> OnMemoryPressureAsync(
-            Guid organizationId,
-            int contextCount,
-            long memoryUsageMB,
-            long threshold)
-        {
-            try
-            {
-                _logger.LogWarning(
-                    "Memory pressure detected for Org {OrganizationId}: {Count} contexts using {Memory}MB (threshold: {Threshold}MB)",
-                    organizationId, contextCount, memoryUsageMB, threshold);
-
-                // 1. 감사 로그
-                await LogAuditAsync(
-                    Guid.Empty,
-                    "MEMORY_PRESSURE",
-                    $"Memory pressure detected: {memoryUsageMB}MB / {threshold}MB",
-                    null,
-                    organizationId,
-                    AuditEventSeverity.Warning,
-                    new Dictionary<string, object>
-                    {
-                        ["ContextCount"] = contextCount,
-                        ["MemoryUsageMB"] = memoryUsageMB,
-                        ["ThresholdMB"] = threshold
-                    });
-
-                // 2. 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.memory.pressure");
-                await _metricsService.SetGaugeAsync($"{METRICS_PREFIX}.memory.usage", memoryUsageMB);
-
-                // 3. 자동 정리 트리거 (Low priority contexts)
-                if (memoryUsageMB > threshold * 0.9) // 90% 초과 시
-                {
-                    // 낮은 우선순위 컨텍스트 정리 로직 호출
-                    _logger.LogWarning("Triggering automatic cleanup of low-priority contexts");
-                }
-
-                return EventResult.CreateSuccess(organizationId.ToString());
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to handle memory pressure event");
-                return EventResult.CreateFailure(ex.Message, false);
-            }
-        }
-
-        #endregion
-
-        #region 일괄 처리
-
-        public async Task<BatchEventResult> ProcessBatchEventsAsync(IEnumerable<ContextEvent> events)
-        {
-            var result = new BatchEventResult();
-            var stopwatch = Stopwatch.StartNew();
-
-            try
-            {
-                var eventList = events.ToList();
-                result.ProcessedCount = eventList.Count;
-
-                // 병렬 처리 (최대 10개씩)
-                var tasks = new List<Task<EventResult>>();
-                var semaphore = new SemaphoreSlim(10);
-
-                foreach (var evt in eventList)
-                {
-                    await semaphore.WaitAsync();
-
-                    var task = ProcessSingleEventAsync(evt).ContinueWith(t =>
-                    {
-                        semaphore.Release();
-                        return t.Result;
-                    });
-
-                    tasks.Add(task);
-                }
-
-                var results = await Task.WhenAll(tasks);
-
-                // 결과 집계
-                foreach (var eventResult in results)
-                {
-                    result.Results.Add(eventResult);
-                    if (eventResult.Success)
-                        result.SuccessCount++;
-                    else
-                        result.FailureCount++;
-                }
-
-                result.AllSucceeded = result.FailureCount == 0;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to process batch events");
-                result.AllSucceeded = false;
-            }
-            finally
-            {
                 stopwatch.Stop();
-                result.ProcessingTimeMs = stopwatch.ElapsedMilliseconds;
+                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.permissions.changed.duration", stopwatch.ElapsedMilliseconds, cancellationToken: cancellationToken);
 
-                // 메트릭 기록
-                await _metricsService.IncrementAsync($"{METRICS_PREFIX}.batch.processed", result.ProcessedCount);
-                await _metricsService.RecordTimingAsync($"{METRICS_PREFIX}.batch.duration", result.ProcessingTimeMs);
+
+                return EventResult.CreateSuccess(context.Id.ToString(), 1);
             }
-
-            return result;
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling OnPermissionContextChangedAsync for ContextKey={ContextKey} was canceled.", context.ContextKey);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to handle OnPermissionContextChangedAsync for ContextKey={ContextKey}", context.ContextKey);
+                return EventResult.CreateFailure(ex.Message, true); // 권한 변경 실패는 중요할 수 있음
+            }
         }
 
-        private async Task<EventResult> ProcessSingleEventAsync(ContextEvent evt)
-        {
-            // 이벤트 타입에 따라 적절한 핸들러 메서드 호출
-            // 실제 구현에서는 이벤트 타입별 처리 로직 구현 필요
-            await Task.Delay(10); // 시뮬레이션
-            return EventResult.CreateSuccess();
-        }
+        // OnRoleContextChangedAsync 구현 (IConnectedIdContextEventHandler에는 없지만 필요할 수 있음)
+        // ...
 
         #endregion
+
+        // --- 배치 처리 및 기타 필요한 메서드는 생략 ---
 
         #region Private Helper Methods
 
-        private async Task LogAuditAsync(
-            Guid performedByConnectedId,
+        // 감사 로그 기록 헬퍼 (IAuditService 사용하도록 수정)
+        // 감사 로그 기록 헬퍼 (IAuditService.LogActionAsync 시그니처에 맞게 수정)
+        private async Task LogContextActionAsync(
+            AuditActionType actionType,
             string action,
-            string description,
-            Guid? resourceId,
-            Guid? organizationId,
-            AuditEventSeverity severity,
-            Dictionary<string, object>? metadata = null)
+            Guid performedByConnectedId,
+            string description, // 설명은 metadata에 포함
+            ConnectedIdContext context,
+            Dictionary<string, object>? metadata = null, // 추가 메타데이터
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                var auditLog = new AuditLog
+                // 기본 메타데이터 구성
+                var fullMetadata = new Dictionary<string, object>
                 {
-                    Id = Guid.NewGuid(),
-                    PerformedByConnectedId = performedByConnectedId,
-                    TargetOrganizationId = organizationId,
-                    Timestamp = _dateTimeProvider.UtcNow,
-                    ActionType = DetermineActionType(action),
-                    Action = action,
-                    ResourceType = "ConnectedIdContext",
-                    ResourceId = resourceId?.ToString(),
-                    Success = true,
-                    Metadata = metadata != null ? JsonSerializer.Serialize(metadata) : null,
-                    Severity = severity,
-                    CreatedAt = _dateTimeProvider.UtcNow,
-                    CreatedByConnectedId = performedByConnectedId
+                    ["Description"] = description, // 설명을 메타데이터에 추가
+                    ["ContextId"] = context.Id,
+                    ["ContextKey"] = context.ContextKey,
+                    ["ContextType"] = context.ContextType.ToString(),
+                    ["ConnectedId"] = context.ConnectedId,
+                    ["OrganizationId"] = context.OrganizationId, // OrganizationId를 메타데이터에 추가
+                    ["ApplicationId"] = context.ApplicationId ?? Guid.Empty // Nullable 처리
+                    // 필요시 severity 추가: ["Severity"] = DetermineSeverity(actionType).ToString()
                 };
 
-                await _auditRepository.AddAsync(auditLog);
+                // 전달받은 추가 메타데이터 병합
+                if (metadata != null)
+                {
+                    foreach (var kvp in metadata)
+                    {
+                        // 기본 메타데이터와 키가 겹치지 않도록 하거나, 덮어쓰기 정책 결정
+                        if (!fullMetadata.ContainsKey(kvp.Key))
+                        {
+                            fullMetadata[kvp.Key] = kvp.Value;
+                        }
+                        // else { /* 키 충돌 시 로깅 또는 처리 */ }
+                    }
+                }
+
+                // 수정된 LogActionAsync 호출 (organizationId, description, severity 제거)
+                await _auditService.LogActionAsync(
+                   actionType: actionType,
+                   action: action,
+                   connectedId: performedByConnectedId,
+                   resourceType: "ConnectedIdContext",
+                   resourceId: context.Id.ToString(),
+                   // success: 기본값 true 사용 (필요시 조정)
+                   // errorMessage: 기본값 null 사용 (필요시 조정)
+                   metadata: fullMetadata, // 병합된 메타데이터 전달
+                   cancellationToken: cancellationToken);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to log audit for action {Action}", action);
+                _logger.LogError(ex, "Failed to log audit for action {Action} on context {ContextKey}", action, context.ContextKey);
+                // 감사 로깅 실패 시 예외를 다시 던지지 않음
             }
         }
 
-        private AuditActionType DetermineActionType(string action)
+        // DetermineSeverity 메서드는 LogActionAsync 시그니처에 severity가 없으므로 제거
+        // private AuditEventSeverity DetermineSeverity(AuditActionType action
+        // 액션 타입에 따른 심각도 결정 (예시)
+        private AuditEventSeverity DetermineSeverity(AuditActionType actionType)
         {
-            return action switch
+            return actionType switch
             {
-                "CONTEXT_CREATED" => AuditActionType.Create,
-                "CONTEXT_UPDATED" => AuditActionType.Update,
-                "CONTEXT_DELETED" => AuditActionType.Delete,
-                "CONTEXT_EXPIRED" => AuditActionType.Delete,
-                "CONTEXT_REFRESHED" => AuditActionType.Update,
-                "PERMISSIONS_CHANGED" => AuditActionType.Update,
-                "ROLES_CHANGED" => AuditActionType.Update,
-                _ => AuditActionType.Others
+                AuditActionType.Delete => AuditEventSeverity.Warning,
+                AuditActionType.Blocked => AuditEventSeverity.Critical,
+                AuditActionType.PermissionUpdated => AuditEventSeverity.Warning,
+                AuditActionType.Create => AuditEventSeverity.Info,
+                AuditActionType.Update => AuditEventSeverity.Info,
+                _ => AuditEventSeverity.Info,
             };
         }
+
+
+        // 배치 처리 관련 메서드는 제거됨 (인터페이스에 없으므로)
 
         #endregion
     }
 }
+
+// 참고: ContextEvent 클래스 정의가 필요합니다.
+// namespace AuthHive.Core.Models.Auth.ConnectedId.Events
+// {
+//     public class ContextEvent { /* 이벤트 관련 속성 정의 */ }
+// }
+
+// 참고: BatchEventResult 클래스 정의가 필요합니다.
+// namespace AuthHive.Core.Models.Common
+// {
+//     public class BatchEventResult
+//     {
+//         public bool AllSucceeded { get; set; }
+//         public int ProcessedCount { get; set; }
+//         public int SuccessCount { get; set; }
+//         public int FailureCount { get; set; }
+//         public long ProcessingTimeMs { get; set; }
+//         public List<EventResult> Results { get; set; } = new List<EventResult>();
+//     }
+// }

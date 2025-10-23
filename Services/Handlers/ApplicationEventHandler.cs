@@ -1,18 +1,22 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
+using System.Text.Json; // 일부 LogActionAsync 호출에서 여전히 사용될 수 있음
+using System.Threading;
 using System.Threading.Tasks;
+using AuthHive.Core.Enums.Audit; // AuditActionType 사용
 using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Interfaces.Application.Service;
+using AuthHive.Core.Interfaces.Application.Service; // IService 인터페이스 사용
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.PlatformApplication.Handler;
 using AuthHive.Core.Interfaces.PlatformApplication.Repository;
+using AuthHive.Core.Models.Business.Commerce.Points.Events; // InsufficientPointsAlert 사용
+using AuthHive.Core.Models.PlatformApplication.Common;     // ApiBlockInfo 사용
 using AuthHive.Core.Models.PlatformApplication.Events;
-using Microsoft.EntityFrameworkCore;
+// 분리된 Warning 클래스 사용
 using Microsoft.Extensions.Logging;
 
 namespace AuthHive.Auth.Handlers
@@ -26,7 +30,7 @@ namespace AuthHive.Auth.Handlers
         private readonly IAuditService _auditService;
         private readonly ICacheService _cacheService;
         private readonly IPlatformApplicationRepository _applicationRepository;
-        private readonly IPlatformApplicationService _applicationService;
+        // private readonly IPlatformApplicationService _applicationService; // 현재 사용되지 않음
         private readonly IDateTimeProvider _dateTimeProvider;
         private readonly ILogger<ApplicationEventHandler> _logger;
         private readonly IEventBus _eventBus;
@@ -45,7 +49,7 @@ namespace AuthHive.Auth.Handlers
             IAuditService auditService,
             ICacheService cacheService,
             IPlatformApplicationRepository applicationRepository,
-            IPlatformApplicationService applicationService,
+            IPlatformApplicationService applicationService, // 생성자에 유지 (DI)
             IDateTimeProvider dateTimeProvider,
             ILogger<ApplicationEventHandler> logger,
             IEventBus eventBus,
@@ -54,7 +58,7 @@ namespace AuthHive.Auth.Handlers
             _auditService = auditService;
             _cacheService = cacheService;
             _applicationRepository = applicationRepository;
-            _applicationService = applicationService;
+            // _applicationService = applicationService;
             _dateTimeProvider = dateTimeProvider;
             _logger = logger;
             _eventBus = eventBus;
@@ -74,11 +78,17 @@ namespace AuthHive.Auth.Handlers
         {
             try
             {
-                return await _cacheService.IsHealthyAsync(cancellationToken) &&
-                       await _auditService.IsHealthyAsync(cancellationToken);
+                // 의존성 서비스들의 상태 확인
+                var cacheHealthy = await _cacheService.IsHealthyAsync(cancellationToken);
+                var auditHealthy = await _auditService.IsHealthyAsync(cancellationToken);
+                // 필요하다면 리포지토리(DB 연결) 상태 확인 로직 추가
+                // var repoHealthy = await _applicationRepository.IsHealthyAsync(cancellationToken);
+
+                return cacheHealthy && auditHealthy; // && repoHealthy;
             }
             catch (OperationCanceledException)
             {
+                _logger.LogWarning("ApplicationEventHandler health check canceled.");
                 return false;
             }
             catch (Exception ex)
@@ -91,913 +101,1002 @@ namespace AuthHive.Auth.Handlers
         #endregion
 
 
-        #region Core Application Events (필수 기능만 구현)
+        #region Core Application Events (IApplicationEventHandler 구현)
 
-        public async Task HandleApplicationCreatedAsync(ApplicationCreatedEvent eventData)
+        public async Task HandleApplicationCreatedAsync(ApplicationCreatedEvent eventData, CancellationToken cancellationToken = default)
         {
+            // 애플리케이션 이벤트는 AggregateId가 ApplicationId임
+            var applicationId = eventData.AggregateId;
+
+            // OrganizationId는 BaseEvent에서 nullable이므로 확인 필요
+            if (!eventData.OrganizationId.HasValue || eventData.OrganizationId.Value == Guid.Empty)
+            {
+                _logger.LogError("Cannot handle ApplicationCreatedEvent: OrganizationId is missing for ApplicationId {ApplicationId}.", applicationId);
+                return; // 테넌트 격리를 위해 OrganizationId 없이 진행 불가
+            }
+            var organizationId = eventData.OrganizationId.Value;
+
             try
             {
-                _logger.LogInformation("Application created: AppId={ApplicationId}, OrgId={OrganizationId}, Type={Type}",
-                    eventData.ApplicationId, eventData.OrganizationId, eventData.ApplicationType);
+                _logger.LogInformation("Handling ApplicationCreatedEvent: AppId={ApplicationId}, OrgId={OrganizationId}, Type={Type}",
+                    applicationId, organizationId, eventData.ApplicationType);
 
-                // 1. 감사 로그 - 동적 데이터 처리
-                var auditData = BuildDynamicAuditData(eventData, new Dictionary<string, object>
+                // 1. 감사 로그 (Dictionary 사용)
+                var auditMetadata = new Dictionary<string, object>
                 {
                     ["ApplicationKey"] = eventData.ApplicationKey,
                     ["ApplicationType"] = eventData.ApplicationType.ToString(),
-                    ["OrganizationId"] = eventData.OrganizationId
-                });
+                    ["OrganizationId"] = organizationId
+                    // 필요시 eventData의 다른 관련 속성 추가
+                };
 
                 await _auditService.LogActionAsync(
-                    eventData.CreatedByConnectedId,
-                    "APPLICATION_CREATED",
-                    AuditActionType.Create,
-                    "Application",
-                    eventData.ApplicationId.ToString(),
-                    true,
-                    JsonSerializer.Serialize(auditData));
+                    actionType: AuditActionType.Create,
+                    action: "APPLICATION_CREATED",
+                    connectedId: eventData.CreatedByConnectedId, // connectedId 파라미터 이름 사용
+                    resourceType: "Application",
+                    resourceId: applicationId.ToString(),
+                    metadata: auditMetadata, // Dictionary 전달
+                    cancellationToken: cancellationToken);
 
-                // 2. 캐시 설정 - 테넌트별 격리
-                await CacheApplicationWithTenantIsolationAsync(eventData);
+                // 2. 캐시 설정 (테넌트 격리)
+                await CacheApplicationWithTenantIsolationAsync(applicationId, organizationId, eventData, cancellationToken);
 
-                // 3. 기본 설정 초기화 (플랜별 기본값 적용)
-                await InitializeApplicationDefaultsAsync(eventData);
+                // 3. 기본 설정 초기화
+                await InitializeApplicationDefaultsAsync(applicationId, eventData.ApplicationType, cancellationToken);
 
                 // 4. 조직의 애플리케이션 목록 캐시 무효화
-                await InvalidateOrganizationApplicationListCacheAsync(eventData.OrganizationId);
+                await InvalidateOrganizationApplicationListCacheAsync(organizationId, cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
-                _logger.LogDebug("Application created successfully for organization {OrgId}", eventData.OrganizationId);
+                _logger.LogDebug("Application created successfully handled for AppId={ApplicationId}, OrgId={OrganizationId}", applicationId, organizationId);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ApplicationCreatedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken); // 롤백 시도
+                throw; // 취소 예외는 다시 던짐
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling application created event");
-                await _unitOfWork.RollbackTransactionAsync();
-                throw;
+                _logger.LogError(ex, "Error handling ApplicationCreatedEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw; // 일반 예외도 다시 던짐
             }
         }
 
-        public async Task HandleApplicationUpdatedAsync(ApplicationUpdatedEvent eventData)
+        public async Task HandleApplicationUpdatedAsync(ApplicationUpdatedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
+            if (!eventData.OrganizationId.HasValue || eventData.OrganizationId.Value == Guid.Empty)
+            {
+                _logger.LogError("Cannot handle ApplicationUpdatedEvent: OrganizationId is missing for ApplicationId {ApplicationId}.", applicationId);
+                return;
+            }
+            var organizationId = eventData.OrganizationId.Value;
+
             try
             {
-                // 변경된 속성만 로깅 (효율성)
-                if (eventData.ChangedProperties.Any())
+                if (eventData.ChangedProperties != null && eventData.ChangedProperties.Any())
                 {
-                    _logger.LogInformation("Application updated: AppId={ApplicationId}, ChangedFields={Fields}",
-                        eventData.ApplicationId, string.Join(",", eventData.ChangedProperties.Keys));
+                    _logger.LogInformation("Handling ApplicationUpdatedEvent: AppId={ApplicationId}, ChangedFields={Fields}",
+                        applicationId, string.Join(",", eventData.ChangedProperties.Keys));
 
-                    // 중요한 변경사항만 감사 로그
                     if (ShouldAuditUpdate(eventData.ChangedProperties))
                     {
+                        var auditMetadata = eventData.ChangedProperties
+                                                .Where(kvp => kvp.Value != null)
+                                                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value!);
+
                         await _auditService.LogActionAsync(
-                            eventData.UpdatedByConnectedId,
-                            "APPLICATION_UPDATED",
-                            AuditActionType.Update,
-                            "Application",
-                            eventData.ApplicationId.ToString(),
-                            true,
-                            JsonSerializer.Serialize(eventData.ChangedProperties));
+                             actionType: AuditActionType.Update,
+                             action: "APPLICATION_UPDATED",
+                             connectedId: eventData.UpdatedByConnectedId,
+                             resourceType: "Application",
+                             resourceId: applicationId.ToString(),
+                             metadata: auditMetadata,
+                             cancellationToken: cancellationToken);
                     }
 
-                    // 캐시 업데이트 (전체 무효화 대신 부분 업데이트)
-                    await UpdateApplicationCacheAsync(eventData);
+                    await UpdateApplicationCacheAsync(applicationId, organizationId, eventData.ChangedProperties, cancellationToken);
+                }
+                else
+                {
+                    _logger.LogInformation("Handling ApplicationUpdatedEvent for AppId={ApplicationId}: No properties changed.", applicationId);
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ApplicationUpdatedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling application updated event");
-                await _unitOfWork.RollbackTransactionAsync();
+                _logger.LogError(ex, "Error handling ApplicationUpdatedEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 throw;
             }
         }
 
-        public async Task HandleApplicationDeletedAsync(ApplicationDeletedEvent eventData)
+        public async Task HandleApplicationDeletedAsync(ApplicationDeletedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
+            if (!eventData.OrganizationId.HasValue || eventData.OrganizationId.Value == Guid.Empty)
+            {
+                _logger.LogError("Cannot handle ApplicationDeletedEvent: OrganizationId is missing for ApplicationId {ApplicationId}.", applicationId);
+                return;
+            }
+            var organizationId = eventData.OrganizationId.Value;
+
             try
             {
-                _logger.LogInformation("Application deleted: AppId={ApplicationId}, IsSoftDelete={IsSoftDelete}",
-                    eventData.ApplicationId, eventData.IsSoftDelete);
+                _logger.LogInformation("Handling ApplicationDeletedEvent: AppId={ApplicationId}, OrgId={OrganizationId}, IsSoftDelete={IsSoftDelete}",
+                    applicationId, organizationId, eventData.IsSoftDelete);
 
-                // 감사 로그
                 await _auditService.LogActionAsync(
-                    eventData.DeletedByConnectedId,
-                    eventData.IsSoftDelete ? "APPLICATION_SOFT_DELETED" : "APPLICATION_DELETED",
-                    AuditActionType.Delete,
-                    "Application",
-                    eventData.ApplicationId.ToString(),
-                    true,
-                    JsonSerializer.Serialize(new { IsSoftDelete = eventData.IsSoftDelete }));
+                    actionType: AuditActionType.Delete,
+                    action: eventData.IsSoftDelete ? "APPLICATION_SOFT_DELETED" : "APPLICATION_DELETED",
+                    connectedId: eventData.DeletedByConnectedId,
+                    resourceType: "Application",
+                    resourceId: applicationId.ToString(),
+                    metadata: new Dictionary<string, object> { ["IsSoftDelete"] = eventData.IsSoftDelete },
+                    cancellationToken: cancellationToken);
 
-                // 캐시 정리
-                await CleanupApplicationCacheAsync(eventData.ApplicationId);
+                await CleanupApplicationCacheAsync(applicationId, organizationId, cancellationToken);
+                await InvalidateOrganizationApplicationListCacheAsync(organizationId, cancellationToken);
 
-                // Soft delete의 경우 상태만 변경
                 if (eventData.IsSoftDelete)
                 {
-                    // 관련 서비스들에 애플리케이션 비활성화 알림
-                    await _eventBus.PublishAsync(new ApplicationDeactivatedNotification
-                    {
-                        ApplicationId = eventData.ApplicationId,
-                        DeactivatedAt = eventData.DeletedAt
-                    });
+                    // 외부 클래스 사용 및 Correlation/Causation 전달
+                    await _eventBus.PublishAsync(new ApplicationDeactivatedNotification(
+                        applicationId,
+                        eventData.DeletedAt,
+                        eventData.CorrelationId, // 원본 이벤트의 CorrelationId 사용
+                        eventData.EventId        // 원본 이벤트를 CausationId로 사용
+                    ), cancellationToken);
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ApplicationDeletedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling application deleted event");
-                await _unitOfWork.RollbackTransactionAsync();
+                _logger.LogError(ex, "Error handling ApplicationDeletedEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 throw;
             }
         }
 
-        public async Task HandleApplicationStatusChangedAsync(ApplicationStatusChangedEvent eventData)
+        public async Task HandleApplicationStatusChangedAsync(ApplicationStatusChangedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
+            if (!eventData.OrganizationId.HasValue || eventData.OrganizationId.Value == Guid.Empty)
+            {
+                _logger.LogError("Cannot handle ApplicationStatusChangedEvent: OrganizationId is missing for ApplicationId {ApplicationId}.", applicationId);
+                return;
+            }
+            var organizationId = eventData.OrganizationId.Value;
+
             try
             {
-                _logger.LogInformation("Application status changed: AppId={ApplicationId}, {OldStatus} -> {NewStatus}",
-                    eventData.ApplicationId, eventData.OldStatus, eventData.NewStatus);
+                _logger.LogInformation("Handling ApplicationStatusChangedEvent: AppId={ApplicationId}, OrgId={OrganizationId}, {OldStatus} -> {NewStatus}",
+                    applicationId, organizationId, eventData.OldStatus, eventData.NewStatus);
 
-                // 중요한 상태 변경만 감사
                 if (IsImportantStatusChange(eventData.OldStatus, eventData.NewStatus))
                 {
                     await _auditService.LogActionAsync(
-                        eventData.ChangedByConnectedId,
-                        "APPLICATION_STATUS_CHANGED",
-                        AuditActionType.StatusChange,
-                        "Application",
-                        eventData.ApplicationId.ToString(),
-                        true,
-                        JsonSerializer.Serialize(new
+                        actionType: AuditActionType.StatusChange,
+                        action: "APPLICATION_STATUS_CHANGED",
+                        connectedId: eventData.ChangedByConnectedId,
+                        resourceType: "Application",
+                        resourceId: applicationId.ToString(),
+                        metadata: new Dictionary<string, object>
                         {
-                            OldStatus = eventData.OldStatus.ToString(),
-                            NewStatus = eventData.NewStatus.ToString(),
-                            Reason = eventData.Reason
-                        }));
+                            ["OldStatus"] = eventData.OldStatus.ToString(),
+                            ["NewStatus"] = eventData.NewStatus.ToString(),
+                            ["Reason"] = eventData.Reason ?? (object)"" // null 처리
+                        },
+                        cancellationToken: cancellationToken);
                 }
 
-                // 상태별 처리
-                await ProcessStatusChangeAsync(eventData);
+                // 상태별 처리 (알림 발행 포함)
+                await ProcessStatusChangeAsync(eventData, cancellationToken);
 
                 // 캐시 업데이트
-                await UpdateApplicationStatusInCacheAsync(eventData);
+                await UpdateApplicationStatusInCacheAsync(applicationId, organizationId, eventData.NewStatus, eventData.ChangedAt, cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ApplicationStatusChangedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling application status changed event");
-                await _unitOfWork.RollbackTransactionAsync();
+                _logger.LogError(ex, "Error handling ApplicationStatusChangedEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
                 throw;
             }
         }
 
         #endregion
 
-        #region Settings Events (간소화된 구현)
+        #region Settings Events (Implement IApplicationEventHandler)
 
-        public async Task HandleApplicationSettingsChangedAsync(ApplicationSettingsChangedEvent eventData)
+        public async Task HandleApplicationSettingsChangedAsync(ApplicationSettingsChangedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
+            // OrganizationId는 이 이벤트에 없을 수 있으므로, 필요하다면 Repository에서 조회해야 함
+
             try
             {
-                // 설정 변경은 자주 발생하므로 배치로 처리
-                var cacheKey = GetApplicationSettingsCacheKey(eventData.ApplicationId);
+                var cacheKey = GetApplicationSettingsCacheKey(applicationId);
 
-                // 기존 설정 가져오기
-                var settings = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey)
+                // 기존 설정 가져오기 (Locking 고려 필요)
+                // 실제 환경에서는 설정 업데이트 시 Race Condition 방지를 위해 Locking 메커니즘이 필요할 수 있음
+                var settings = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey, cancellationToken)
                     ?? new Dictionary<string, object>();
 
-                // 동적 설정 업데이트
-                // After (Corrected)
+                // 설정 업데이트
                 if (eventData.NewValue != null)
                 {
                     settings[eventData.SettingKey] = eventData.NewValue;
                 }
                 else
                 {
-                    // If the new value is null, remove the key from the settings.
-                    settings.Remove(eventData.SettingKey);
+                    settings.Remove(eventData.SettingKey); // 값이 null이면 설정 제거
                 }
-                // 캐시 업데이트
-                await _cacheService.SetAsync(cacheKey, settings, SettingsCacheTTL);
 
-                // 중요한 설정 변경만 로깅
+                // 캐시 업데이트
+                await _cacheService.SetAsync(cacheKey, settings, SettingsCacheTTL, cancellationToken);
+
+                // 중요한 설정 변경만 로깅 및 감사 (감사 로그 추가)
                 if (IsImportantSetting(eventData.SettingKey))
                 {
-                    _logger.LogInformation("Important setting changed: App={AppId}, Key={Key}",
-                        eventData.ApplicationId, eventData.SettingKey);
-                }
+                    _logger.LogInformation("Important application setting changed: AppId={ApplicationId}, Key={Key}",
+                        applicationId, eventData.SettingKey);
 
-                await _unitOfWork.CommitTransactionAsync();
+                    // 감사 로그 기록
+                    await _auditService.LogActionAsync(
+                        actionType: AuditActionType.Configuration,
+                        action: "APPLICATION_SETTING_CHANGED",
+                        connectedId: eventData.ChangedByConnectedId, // eventData에 ChangedByConnectedId가 있어야 함
+                        resourceType: "ApplicationSetting",
+                        resourceId: $"{applicationId}:{eventData.SettingKey}",
+                        metadata: new Dictionary<string, object>
+                        {
+                            ["SettingKey"] = eventData.SettingKey,
+                            ["OldValue"] = eventData.OldValue ?? "N/A", // null 처리
+                            ["NewValue"] = eventData.NewValue ?? "N/A"  // null 처리
+                        },
+                        cancellationToken: cancellationToken);
+                }
+                // Commit은 보통 요청 단위로 이루어지므로, 이벤트 핸들러에서 매번 Commit하는 것이 적절한지는 설계에 따라 다름
+                // 여기서는 각 핸들러가 독립적인 트랜잭션 단위라고 가정
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ApplicationSettingsChangedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                // 설정 변경 실패는 크리티컬하지 않을 수 있으므로, throw 여부 결정 필요
+                // throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling settings changed event");
-                await _unitOfWork.RollbackTransactionAsync();
-                // 설정 변경 실패는 크리티컬하지 않으므로 예외 전파하지 않음
+                _logger.LogError(ex, "Error handling ApplicationSettingsChangedEvent for AppId={ApplicationId}, Key={Key}",
+                                 applicationId, eventData.SettingKey);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                // 설정 변경 실패는 크리티컬하지 않을 수 있으므로, throw 여부 결정 필요
             }
         }
 
-        public async Task HandleOAuthSettingsChangedAsync(OAuthSettingsChangedEvent eventData)
+        public async Task HandleOAuthSettingsChangedAsync(OAuthSettingsChangedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
+                _logger.LogInformation("Handling OAuthSettingsChangedEvent for AppId={ApplicationId}", applicationId);
+
                 // OAuth 설정은 보안상 중요하므로 항상 감사
                 await _auditService.LogActionAsync(
-                    eventData.ChangedByConnectedId,
-                    "OAUTH_SETTINGS_CHANGED",
-                    AuditActionType.Configuration,
-                    "Application",
-                    eventData.ApplicationId.ToString(),
-                    true,
-                    JsonSerializer.Serialize(new
+                    actionType: AuditActionType.Configuration,
+                    action: "OAUTH_SETTINGS_CHANGED",
+                    connectedId: eventData.ChangedByConnectedId,
+                    resourceType: "ApplicationOAuthSettings",
+                    resourceId: applicationId.ToString(),
+                    metadata: new Dictionary<string, object>
                     {
-                        CallbackUrlsChanged = !AreListsEqual(eventData.OldCallbackUrls, eventData.NewCallbackUrls),
-                        AllowedOriginsChanged = !AreListsEqual(eventData.OldAllowedOrigins, eventData.NewAllowedOrigins)
-                    }));
+                        // List 비교 결과를 문자열로 저장하거나, 변경된 항목만 저장하는 방식 고려
+                        ["CallbackUrlsChanged"] = !AreListsEqual(eventData.OldCallbackUrls, eventData.NewCallbackUrls),
+                        ["AllowedOriginsChanged"] = !AreListsEqual(eventData.OldAllowedOrigins, eventData.NewAllowedOrigins),
+                        // 필요시 ["OldCallbackUrls"], ["NewCallbackUrls"] 등 추가 (단, 데이터 크기 주의)
+                    },
+                    cancellationToken: cancellationToken);
 
-                // OAuth 캐시 무효화 (보안상 즉시 적용)
-                await InvalidateOAuthCacheAsync(eventData.ApplicationId);
+                // OAuth 관련 캐시 무효화 (보안상 즉시 적용)
+                await InvalidateOAuthCacheAsync(applicationId, cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling OAuthSettingsChangedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling OAuth settings changed event");
-                await _unitOfWork.RollbackTransactionAsync();
-                throw;
+                _logger.LogError(ex, "Error handling OAuthSettingsChangedEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw; // OAuth 설정 실패는 중요할 수 있음
             }
         }
 
-        public async Task HandleResourceQuotaChangedAsync(ResourceQuotaChangedEvent eventData)
+        public async Task HandleResourceQuotaChangedAsync(ResourceQuotaChangedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
-                _logger.LogInformation("Resource quota changed: App={AppId}, Type={Type}, {Old} -> {New}",
-                    eventData.ApplicationId, eventData.ResourceType, eventData.OldQuota, eventData.NewQuota);
+                _logger.LogInformation("Handling ResourceQuotaChangedEvent: AppId={ApplicationId}, Type={Type}, {Old} -> {New}",
+                    applicationId, eventData.ResourceType, eventData.OldQuota, eventData.NewQuota);
 
                 // 할당량 캐시 업데이트
-                var quotaKey = GetResourceQuotaCacheKey(eventData.ApplicationId, eventData.ResourceType);
-                await _cacheService.SetAsync<object>(quotaKey, eventData.NewQuota, TimeSpan.FromHours(24));
+                var quotaKey = GetResourceQuotaCacheKey(applicationId, eventData.ResourceType);
+                // SetAsync의 제네릭 타입을 object로 지정하거나, NewQuota의 타입에 맞게 조정 필요
+                await _cacheService.SetAsync<object>(quotaKey, eventData.NewQuota, TimeSpan.FromHours(24), cancellationToken);
 
-                // 할당량 감소 시 경고
+                // 할당량 감소 시 경고 이벤트 발행 (외부 클래스 사용)
                 if (eventData.NewQuota < eventData.OldQuota)
                 {
-                    await _eventBus.PublishAsync(new ResourceQuotaReducedWarning
-                    {
-                        ApplicationId = eventData.ApplicationId,
-                        ResourceType = eventData.ResourceType,
-                        NewQuota = eventData.NewQuota
-                    });
+                    await _eventBus.PublishAsync(new ResourceQuotaReducedWarning(
+                        applicationId,
+                        eventData.ResourceType,
+                        eventData.NewQuota, // decimal로 가정
+                        eventData.CorrelationId,
+                        eventData.EventId
+                    ), cancellationToken);
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
+                // 감사 로그 (할당량 변경도 감사 대상일 수 있음)
+                await _auditService.LogActionAsync(
+                    actionType: AuditActionType.Configuration, // 또는 Update
+                    action: "RESOURCE_QUOTA_CHANGED",
+                    // eventData에 ChangedByConnectedId가 필요함 (없다면 시스템 ID 등 사용)
+                    connectedId: eventData.TriggeredBy ?? Guid.Empty, // BaseEvent의 TriggeredBy 사용 (Nullable)
+                    resourceType: "ApplicationQuota",
+                    resourceId: $"{applicationId}:{eventData.ResourceType}",
+                    metadata: new Dictionary<string, object>
+                    {
+                        ["ResourceType"] = eventData.ResourceType,
+                        ["OldQuota"] = eventData.OldQuota,
+                        ["NewQuota"] = eventData.NewQuota
+                    },
+                    cancellationToken: cancellationToken);
+
+
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ResourceQuotaChangedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling resource quota changed event");
-                await _unitOfWork.RollbackTransactionAsync();
-                throw;
+                _logger.LogError(ex, "Error handling ResourceQuotaChangedEvent for AppId={ApplicationId}, Type={Type}",
+                                 applicationId, eventData.ResourceType);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw; // 할당량 변경 실패는 중요할 수 있음
             }
         }
 
         #endregion
 
-        #region Usage Events (핵심 비즈니스 로직)
+        #region Usage Events (Implement IApplicationEventHandler)
 
-        public async Task HandleApiUsageThresholdReachedAsync(ApiUsageThresholdEvent eventData)
+        public async Task HandleApiUsageThresholdReachedAsync(ApiUsageThresholdEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
+                // Quota가 0인 경우 나누기 오류 방지
+                if (eventData.Quota <= 0)
+                {
+                    _logger.LogWarning("Cannot process ApiUsageThresholdEvent for AppId={ApplicationId}: Quota is zero or negative.", applicationId);
+                    return;
+                }
                 var usagePercentage = (decimal)eventData.CurrentUsage / eventData.Quota;
 
-                _logger.LogWarning("API usage threshold reached: App={AppId}, Usage={Percentage:P}, Type={Type}",
-                    eventData.ApplicationId, usagePercentage, eventData.ThresholdType);
+                _logger.LogWarning("API usage threshold reached: AppId={ApplicationId}, Usage={Percentage:P2}, Type={Type}",
+                    applicationId, usagePercentage, eventData.ThresholdType);
 
                 // 임계값별 처리
                 if (usagePercentage >= 1.0m) // 100% 도달
                 {
-                    // API 차단 이벤트 발행
-                    await _eventBus.PublishAsync(new ApiQuotaExceededEvent
-                    {
-                        ApplicationId = eventData.ApplicationId,
-                        QuotaType = eventData.ThresholdType,
-                        BlockedAt = _dateTimeProvider.UtcNow
-                    });
+                    // API 차단 이벤트 발행 (외부 클래스 사용)
+                    await _eventBus.PublishAsync(new ApiQuotaExceededEvent(
+                        applicationId,
+                        eventData.ThresholdType,
+                        _dateTimeProvider.UtcNow, // BlockedAt 시간
+                        eventData.CorrelationId,
+                        eventData.EventId
+                    ), cancellationToken);
                 }
-                else if (usagePercentage >= DefaultApiUsageThreshold) // 80% 이상
+                // 설정된 임계값 (eventData.ThresholdPercentage)과 비교
+                else if (usagePercentage >= eventData.ThresholdPercentage)
                 {
-                    // 경고 알림 발송
-                    await SendUsageWarningNotificationAsync(eventData);
+                    // 경고 알림 발송 (외부 클래스 사용)
+                    await SendUsageWarningNotificationAsync(eventData, cancellationToken);
                 }
 
                 // 사용량 통계 캐싱 (대시보드용)
-                await UpdateUsageStatsCacheAsync(eventData);
+                await UpdateUsageStatsCacheAsync(eventData, cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
+                // 사용량 이벤트는 Commit이 필요 없을 수 있음 (다른 트랜잭션에서 처리될 수 있음)
+                // await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling ApiUsageThresholdReachedAsync for AppId={ApplicationId} was canceled.", applicationId);
+                // 롤백할 트랜잭션이 없을 수 있음
+                // await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                // throw; // 사용량 이벤트는 취소되어도 괜찮을 수 있음
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling API usage threshold event");
-                // 사용량 추적 실패는 서비스를 중단시키지 않음
+                _logger.LogError(ex, "Error handling ApiUsageThresholdReachedAsync for AppId={ApplicationId}", applicationId);
+                // 사용량 추적 실패는 서비스를 중단시키지 않음, throw 하지 않음
             }
         }
 
-        public async Task HandleStorageUsageThresholdReachedAsync(StorageUsageThresholdEvent eventData)
+        public async Task HandleStorageUsageThresholdReachedAsync(StorageUsageThresholdEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
+                // QuotaGB가 0인 경우 나누기 오류 방지
+                if (eventData.QuotaGB <= 0)
+                {
+                    _logger.LogWarning("Cannot process StorageUsageThresholdReachedAsync for AppId={ApplicationId}: QuotaGB is zero or negative.", applicationId);
+                    return;
+                }
                 var usagePercentage = eventData.CurrentUsageGB / eventData.QuotaGB;
 
-                _logger.LogWarning("Storage threshold reached: App={AppId}, Usage={Current:F2}GB/{Quota:F2}GB ({Percentage:P})",
-                    eventData.ApplicationId, eventData.CurrentUsageGB, eventData.QuotaGB, usagePercentage);
+                _logger.LogWarning("Storage usage threshold reached: AppId={ApplicationId}, Usage={Current:F2}GB/{Quota:F2}GB ({Percentage:P2})",
+                    applicationId, eventData.CurrentUsageGB, eventData.QuotaGB, usagePercentage);
 
-                // 90% 이상 시 자동 정리 제안
-                if (usagePercentage >= DefaultStorageThreshold)
+                // 설정된 임계값 (eventData.ThresholdPercentage) 이상 시 정리 제안
+                if (usagePercentage >= eventData.ThresholdPercentage)
                 {
-                    await _eventBus.PublishAsync(new StorageCleanupSuggestionEvent
-                    {
-                        ApplicationId = eventData.ApplicationId,
-                        CurrentUsageGB = eventData.CurrentUsageGB,
-                        SuggestedActions = new[] { "Archive old data", "Delete temporary files", "Compress large files" }
-                    });
+                    // 기본 제안 액션 (나중에 설정에서 가져오도록 변경 가능)
+                    var defaultActions = new[] { "Archive old data", "Delete temporary files", "Compress large files" };
+
+                    await _eventBus.PublishAsync(new StorageCleanupSuggestionEvent(
+                        applicationId,
+                        eventData.CurrentUsageGB,
+                        defaultActions, // 설정이나 기본값 사용
+                        eventData.CorrelationId,
+                        eventData.EventId
+                    ), cancellationToken);
                 }
 
-                await _unitOfWork.CommitTransactionAsync();
+                // 이 이벤트도 Commit이 필요 없을 수 있음
+                // await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling StorageUsageThresholdReachedAsync for AppId={ApplicationId} was canceled.", applicationId);
+                // await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                // throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling storage usage threshold event");
+                _logger.LogError(ex, "Error handling StorageUsageThresholdReachedAsync for AppId={ApplicationId}", applicationId);
+                // 스토리지 사용량 이벤트 실패도 throw하지 않음
             }
         }
 
-        public async Task HandleUsageResetAsync(UsageResetEvent eventData)
+        public async Task HandleUsageResetAsync(UsageResetEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
-                _logger.LogInformation("Usage reset: App={AppId}, Type={Type}, PreviousUsage={Usage}",
-                    eventData.ApplicationId, eventData.ResetType, eventData.PreviousUsage);
+                _logger.LogInformation("Handling UsageResetEvent: AppId={ApplicationId}, Type={Type}, PreviousUsage={Usage}",
+                    applicationId, eventData.ResetType, eventData.PreviousUsage);
 
-                // 사용량 리셋 전 통계 저장
-                await StoreUsageHistoryAsync(eventData);
+                // 사용량 리셋 전 통계 저장 (캐시 또는 DB)
+                await StoreUsageHistoryAsync(eventData, cancellationToken);
 
-                // 캐시 초기화
-                var usageKey = GetUsageCacheKey(eventData.ApplicationId, eventData.ResetType);
-                await _cacheService.RemoveAsync(usageKey);
+                // 관련 사용량 캐시 초기화
+                var usageKey = GetUsageCacheKey(applicationId, eventData.ResetType);
+                await _cacheService.RemoveAsync(usageKey, cancellationToken);
+                // 관련된 통계 캐시도 제거할 수 있음
+                var statsKey = $"app:{applicationId}:stats:usage:{eventData.ResetType}"; // 예시 키
+                await _cacheService.RemoveAsync(statsKey, cancellationToken);
 
-                // 리셋 알림
-                await _eventBus.PublishAsync(new UsageResetNotification
-                {
-                    ApplicationId = eventData.ApplicationId,
-                    ResetType = eventData.ResetType,
-                    NextResetDate = CalculateNextResetDate(eventData.ResetType)
-                });
 
-                await _unitOfWork.CommitTransactionAsync();
+                // 리셋 알림 이벤트 발행 (외부 클래스 사용)
+                await _eventBus.PublishAsync(new UsageResetNotification(
+                    applicationId,
+                    eventData.ResetType,
+                    CalculateNextResetDate(eventData.ResetType), // 다음 리셋 날짜 계산
+                    eventData.CorrelationId,
+                    eventData.EventId
+                ), cancellationToken);
+
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling UsageResetEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling usage reset event");
-                await _unitOfWork.RollbackTransactionAsync();
-                throw;
+                _logger.LogError(ex, "Error handling UsageResetEvent for AppId={ApplicationId}, Type={Type}",
+                                 applicationId, eventData.ResetType);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw; // 사용량 리셋 실패는 중요할 수 있음
             }
         }
 
         #endregion
 
-        #region Point Events (SaaS 핵심 - 과금 관련)
+        #region Point Events (Implement IApplicationEventHandler)
 
-        public async Task HandleApiBlockedDueToInsufficientPointsAsync(InsufficientPointsEvent eventData)
+        public async Task HandleApiBlockedDueToInsufficientPointsAsync(InsufficientPointsEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
-                _logger.LogWarning("API blocked due to insufficient points: App={AppId}, Required={Required}, Available={Available}",
-                    eventData.ApplicationId, eventData.RequiredPoints, eventData.AvailablePoints);
+                _logger.LogWarning("API blocked due to insufficient points: AppId={ApplicationId}, Required={Required}, Available={Available}, Endpoint={Endpoint}",
+                    applicationId, eventData.RequiredPoints, eventData.AvailablePoints, eventData.ApiEndpoint);
 
-                // 즉시 API 차단 설정
-                var blockKey = GetApiBlockCacheKey(eventData.ApplicationId);
-                await _cacheService.SetAsync(blockKey, new ApiBlockInfo
+                // 즉시 API 차단 상태 캐싱
+                var blockKey = GetApiBlockCacheKey(applicationId);
+                await _cacheService.SetAsync(blockKey, new ApiBlockInfo // 외부 클래스 사용
                 {
                     IsBlocked = true,
                     BlockedAt = _dateTimeProvider.UtcNow,
                     Reason = "InsufficientPoints",
                     RequiredPoints = eventData.RequiredPoints,
                     AvailablePoints = eventData.AvailablePoints
-                }, TimeSpan.FromMinutes(5)); // 5분 후 재시도 허용
+                }, TimeSpan.FromMinutes(5), cancellationToken); // 5분 후 재시도 허용 (TTL 설정)
 
-                // 긴급 알림 발송
-                await SendInsufficientPointsAlertAsync(eventData);
+                // 긴급 알림 이벤트 발송 (외부 클래스 사용)
+                await SendInsufficientPointsAlertAsync(eventData, cancellationToken);
 
                 // 감사 로그
                 await _auditService.LogActionAsync(
-                    eventData.ConnectedId,
-                    "API_BLOCKED_INSUFFICIENT_POINTS",
-                    AuditActionType.Blocked,
-                    "Application",
-                    eventData.ApplicationId.ToString(),
-                    false,
-                    JsonSerializer.Serialize(new
+                    actionType: AuditActionType.Blocked,
+                    action: "API_BLOCKED_INSUFFICIENT_POINTS",
+                    // InsufficientPointsEvent에 ConnectedId가 필요함
+                    connectedId: eventData.ConnectedId, // eventData에 ConnectedId 속성 가정
+                    resourceType: "ApiCall", // 리소스 타입을 ApiCall 등으로 구체화
+                    resourceId: $"{applicationId}:{eventData.ApiEndpoint}", // 리소스 ID 구체화
+                    success: false, // 실패한 작업으로 기록
+                    errorMessage: "Insufficient points", // 에러 메시지 추가
+                    metadata: new Dictionary<string, object>
                     {
-                        ApiEndpoint = eventData.ApiEndpoint,
-                        RequiredPoints = eventData.RequiredPoints,
-                        AvailablePoints = eventData.AvailablePoints
-                    }));
+                        ["ApiEndpoint"] = eventData.ApiEndpoint,
+                        ["RequiredPoints"] = eventData.RequiredPoints,
+                        ["AvailablePoints"] = eventData.AvailablePoints,
+                        ["ApplicationId"] = applicationId // 명시적으로 추가
+                    },
+                    cancellationToken: cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling InsufficientPointsEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling insufficient points event");
-                // API 차단은 중요하므로 예외 전파
-                throw;
+                _logger.LogError(ex, "Error handling InsufficientPointsEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw; // API 차단은 중요하므로 예외 전파
             }
         }
 
-        public async Task HandlePointSettingsChangedAsync(PointSettingsChangedEvent eventData)
+        public async Task HandlePointSettingsChangedAsync(PointSettingsChangedEvent eventData, CancellationToken cancellationToken = default)
         {
+            var applicationId = eventData.AggregateId;
             try
             {
-                // 포인트 설정 변경은 과금에 직접적 영향
-                _logger.LogInformation("Point settings changed: App={AppId}, UsePoints={Old}->{New}, Rate={OldRate}->{NewRate}",
-                    eventData.ApplicationId,
+                _logger.LogInformation("Handling PointSettingsChangedEvent: AppId={ApplicationId}, UsePoints={Old}->{New}, Rate={OldRate}->{NewRate}",
+                    applicationId,
                     eventData.OldUsePointsForApiCalls, eventData.NewUsePointsForApiCalls,
                     eventData.OldPointsPerApiCall, eventData.NewPointsPerApiCall);
 
                 // 중요 변경사항 감사
                 await _auditService.LogActionAsync(
-                    eventData.ChangedByConnectedId,
-                    "POINT_SETTINGS_CHANGED",
-                    AuditActionType.Configuration,
-                    "Application",
-                    eventData.ApplicationId.ToString(),
-                    true,
-                    JsonSerializer.Serialize(new
+                    actionType: AuditActionType.Configuration,
+                    action: "POINT_SETTINGS_CHANGED",
+                    connectedId: eventData.ChangedByConnectedId,
+                    resourceType: "ApplicationPointSettings",
+                    resourceId: applicationId.ToString(),
+                    metadata: new Dictionary<string, object>
                     {
-                        UsePointsChanged = eventData.OldUsePointsForApiCalls != eventData.NewUsePointsForApiCalls,
-                        RateChanged = eventData.OldPointsPerApiCall != eventData.NewPointsPerApiCall,
-                        OldRate = eventData.OldPointsPerApiCall,
-                        NewRate = eventData.NewPointsPerApiCall
-                    }));
+                        ["UsePointsChanged"] = eventData.OldUsePointsForApiCalls != eventData.NewUsePointsForApiCalls,
+                        ["RateChanged"] = eventData.OldPointsPerApiCall != eventData.NewPointsPerApiCall,
+                        ["OldUsePoints"] = eventData.OldUsePointsForApiCalls,
+                        ["NewUsePoints"] = eventData.NewUsePointsForApiCalls,
+                        ["OldRate"] = eventData.OldPointsPerApiCall,
+                        ["NewRate"] = eventData.NewPointsPerApiCall
+                    },
+                    cancellationToken: cancellationToken);
 
                 // 포인트 설정 캐시 업데이트
-                await UpdatePointSettingsCacheAsync(eventData);
+                await UpdatePointSettingsCacheAsync(eventData, cancellationToken);
 
-                await _unitOfWork.CommitTransactionAsync();
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Handling PointSettingsChangedEvent for AppId={ApplicationId} was canceled.", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling point settings changed event");
-                await _unitOfWork.RollbackTransactionAsync();
-                throw;
+                _logger.LogError(ex, "Error handling PointSettingsChangedEvent for AppId={ApplicationId}", applicationId);
+                await _unitOfWork.RollbackTransactionAsync(cancellationToken);
+                throw; // 포인트 설정 변경 실패는 중요할 수 있음
             }
         }
 
         #endregion
 
-        #region Private Helper Methods - SaaS Optimized
+        #region Private Helper Methods - SaaS Optimized & Async/Cancellation Token
 
-        private string GetApplicationCacheKey(Guid organizationId, Guid applicationId)
+        // 캐시 키 생성 메서드들
+        private string GetApplicationCacheKey(Guid organizationId, Guid applicationId) => $"tenant:{organizationId}:app:{applicationId}";
+        private string GetOrganizationApplicationListCacheKey(Guid organizationId) => $"tenant:{organizationId}:apps";
+        private string GetApplicationSettingsCacheKey(Guid applicationId) => $"app:{applicationId}:settings";
+        private string GetResourceQuotaCacheKey(Guid applicationId, string resourceType) => $"app:{applicationId}:quota:{resourceType}";
+        private string GetUsageCacheKey(Guid applicationId, string usageType) => $"app:{applicationId}:usage:{usageType}"; // 사용량 유형별 키
+        private string GetUsageStatsCacheKey(Guid applicationId, string thresholdType) => $"app:{applicationId}:stats:usage:{thresholdType}"; // 통계 유형별 키
+        private string GetApiBlockCacheKey(Guid applicationId) => $"app:{applicationId}:api:blocked";
+        private string GetOAuthCachePattern(Guid applicationId) => $"app:{applicationId}:oauth:*"; // OAuth 패턴
+        private string GetApiKeyCachePattern(Guid applicationId) => $"app:{applicationId}:apikeys:*"; // API 키 패턴
+        private string GetApplicationReactivationKey(Guid applicationId) => $"app:{applicationId}:needs-reactivation"; // 활성화 플래그 키
+        private string GetPointSettingsCacheKey(Guid applicationId) => $"app:{applicationId}:points:settings"; // 포인트 설정 키
+        private string GetUsageHistoryCacheKey(Guid applicationId, string resetType, DateTime resetAt) => $"app:{applicationId}:history:{resetType}:{resetAt:yyyyMMdd}"; // 사용량 히스토리 키
+
+
+        // 감사 데이터 생성 (더 이상 사용하지 않을 수 있음, LogActionAsync에 Dictionary 직접 전달)
+        // private Dictionary<string, object> BuildDynamicAuditData(object eventData, Dictionary<string, object> baseData) { ... }
+        // private bool IsJsonSerializable(object value) { ... }
+
+        private async Task CacheApplicationWithTenantIsolationAsync(Guid applicationId, Guid organizationId, ApplicationCreatedEvent eventData, CancellationToken cancellationToken)
         {
-            return $"tenant:{organizationId}:app:{applicationId}";
-        }
+            var appCacheKey = GetApplicationCacheKey(organizationId, applicationId);
 
-        private string GetApplicationSettingsCacheKey(Guid applicationId)
-        {
-            return $"app:{applicationId}:settings";
-        }
-
-        private string GetResourceQuotaCacheKey(Guid applicationId, string resourceType)
-        {
-            return $"app:{applicationId}:quota:{resourceType}";
-        }
-
-        private string GetUsageCacheKey(Guid applicationId, string usageType)
-        {
-            return $"app:{applicationId}:usage:{usageType}";
-        }
-
-        private string GetApiBlockCacheKey(Guid applicationId)
-        {
-            return $"app:{applicationId}:api:blocked";
-        }
-
-        private Dictionary<string, object> BuildDynamicAuditData(object eventData, Dictionary<string, object> baseData)
-        {
-            // 동적 데이터 처리 - SaaS 특성상 어떤 데이터가 올지 모름
-            var properties = eventData.GetType().GetProperties();
-            foreach (var prop in properties)
-            {
-                var key = prop.Name;
-                if (!baseData.ContainsKey(key))
-                {
-                    var value = prop.GetValue(eventData);
-                    if (value != null && IsJsonSerializable(value))
-                    {
-                        baseData[key] = value;
-                    }
-                }
-            }
-            return baseData;
-        }
-
-        private bool IsJsonSerializable(object value)
-        {
-            // 기본 타입과 컬렉션만 허용
-            return value is string || value is bool || value is DateTime ||
-                   value is Guid || value.GetType().IsPrimitive ||
-                   value is IEnumerable<object>;
-        }
-
-        private async Task CacheApplicationWithTenantIsolationAsync(ApplicationCreatedEvent eventData)
-        {
-            var cacheKey = GetApplicationCacheKey(eventData.OrganizationId, eventData.ApplicationId);
-
-            // 최소한의 필수 정보만 캐싱 (메모리 효율)
+            // 캐시할 최소 정보
             var appData = new Dictionary<string, object>
             {
-                ["Id"] = eventData.ApplicationId,
-                ["OrganizationId"] = eventData.OrganizationId,
+                ["Id"] = applicationId,
+                ["OrganizationId"] = organizationId,
                 ["ApplicationKey"] = eventData.ApplicationKey,
                 ["ApplicationType"] = eventData.ApplicationType.ToString(),
                 ["CreatedAt"] = eventData.CreatedAt,
-                ["Status"] = ApplicationStatus.Active.ToString()
+                ["Status"] = ApplicationStatus.Active.ToString() // 생성 시 기본 상태
             };
+            await _cacheService.SetAsync(appCacheKey, appData, ApplicationCacheTTL, cancellationToken);
 
-            await _cacheService.SetAsync(cacheKey, appData, ApplicationCacheTTL);
-
-            // 조직별 애플리케이션 목록 업데이트
-            var orgAppsKey = $"tenant:{eventData.OrganizationId}:apps";
-            var appList = await _cacheService.GetAsync<List<Guid>>(orgAppsKey) ?? new List<Guid>();
-            appList.Add(eventData.ApplicationId);
-            await _cacheService.SetAsync(orgAppsKey, appList, TimeSpan.FromDays(1));
+            // 조직별 앱 목록 업데이트 (동시성 문제 고려 필요 - Lock 또는 원자적 연산 사용)
+            var orgAppsKey = GetOrganizationApplicationListCacheKey(organizationId);
+            // 이 부분은 Lock 또는 Redis의 SetAdd 같은 원자적 연산으로 개선 필요
+            var appList = await _cacheService.GetAsync<List<Guid>>(orgAppsKey, cancellationToken) ?? new List<Guid>();
+            if (!appList.Contains(applicationId))
+            {
+                appList.Add(applicationId);
+                await _cacheService.SetAsync(orgAppsKey, appList, TimeSpan.FromDays(1), cancellationToken); // TTL 적절히 설정
+            }
         }
 
-        private async Task UpdateApplicationCacheAsync(ApplicationUpdatedEvent eventData)
+        private async Task UpdateApplicationCacheAsync(Guid applicationId, Guid organizationId, Dictionary<string, object?> changedProperties, CancellationToken cancellationToken)
         {
-            // 부분 캐시 업데이트 (전체 무효화 대신)
-            var app = await _applicationRepository.GetByIdAsync(eventData.ApplicationId);
-            if (app != null)
-            {
-                var cacheKey = GetApplicationCacheKey(app.OrganizationId, app.Id);
-                var cachedData = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey);
+            var cacheKey = GetApplicationCacheKey(organizationId, applicationId);
+            var cachedData = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey, cancellationToken);
 
-                if (cachedData != null)
+            if (cachedData != null)
+            {
+                bool updated = false;
+                foreach (var change in changedProperties)
                 {
-                    // 변경된 속성만 업데이트
-                    foreach (var change in eventData.ChangedProperties)
+                    // 캐시 데이터 타입과 호환되는지, 직렬화 가능한지 확인
+                    if (change.Value != null /* && IsJsonSerializable(change.Value) */) // IsJsonSerializable은 단순 Dictionary에서는 불필요
                     {
-                        // After (Corrected)
-                        if (change.Value != null && IsJsonSerializable(change.Value))
+                        // 기존 값과 다를 경우 업데이트
+                        if (!cachedData.TryGetValue(change.Key, out var existingValue) || !Equals(existingValue, change.Value))
                         {
                             cachedData[change.Key] = change.Value;
+                            updated = true;
                         }
                     }
-
-                    await _cacheService.SetAsync(cacheKey, cachedData, ApplicationCacheTTL);
+                    else if (cachedData.ContainsKey(change.Key)) // 값이 null이면 키 제거
+                    {
+                        cachedData.Remove(change.Key);
+                        updated = true;
+                    }
                 }
-            }
-        }
 
-        private async Task UpdateApplicationStatusInCacheAsync(ApplicationStatusChangedEvent eventData)
-        {
-            var app = await _applicationRepository.GetByIdAsync(eventData.ApplicationId);
-            if (app != null)
-            {
-                var cacheKey = GetApplicationCacheKey(app.OrganizationId, app.Id);
-                var cachedData = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey);
-
-                if (cachedData != null)
+                if (updated)
                 {
-                    cachedData["Status"] = eventData.NewStatus.ToString();
-                    cachedData["StatusChangedAt"] = eventData.ChangedAt;
-
-                    await _cacheService.SetAsync(cacheKey, cachedData, ApplicationCacheTTL);
+                    await _cacheService.SetAsync(cacheKey, cachedData, ApplicationCacheTTL, cancellationToken);
+                    _logger.LogDebug("Updated application cache for AppId={ApplicationId}", applicationId);
                 }
             }
-        }
-
-        private async Task CleanupApplicationCacheAsync(Guid applicationId)
-        {
-            var app = await _applicationRepository.GetByIdAsync(applicationId);
-            if (app != null)
+            else
             {
-                // 애플리케이션 캐시 제거
-                var appKey = GetApplicationCacheKey(app.OrganizationId, app.Id);
-                await _cacheService.RemoveAsync(appKey);
-
-                // 설정 캐시 제거
-                var settingsKey = GetApplicationSettingsCacheKey(app.Id);
-                await _cacheService.RemoveAsync(settingsKey);
-
-                // 사용량 캐시 패턴 제거
-                var usagePattern = $"app:{app.Id}:*";
-                await _cacheService.RemoveByPatternAsync(usagePattern);
+                _logger.LogWarning("Application cache data not found for AppId={ApplicationId} during update.", applicationId);
+                // 필요하다면 DB에서 다시 로드하여 캐시 설정
+                // await ReloadAndCacheApplicationAsync(applicationId, organizationId, cancellationToken);
             }
         }
 
-        private async Task InvalidateOrganizationApplicationListCacheAsync(Guid organizationId)
+        private async Task UpdateApplicationStatusInCacheAsync(Guid applicationId, Guid organizationId, ApplicationStatus newStatus, DateTime changedAt, CancellationToken cancellationToken)
         {
-            var orgAppsKey = $"tenant:{organizationId}:apps";
-            await _cacheService.RemoveAsync(orgAppsKey);
+            var cacheKey = GetApplicationCacheKey(organizationId, applicationId);
+            var cachedData = await _cacheService.GetAsync<Dictionary<string, object>>(cacheKey, cancellationToken);
+
+            if (cachedData != null)
+            {
+                cachedData["Status"] = newStatus.ToString();
+                cachedData["StatusChangedAt"] = changedAt;
+                await _cacheService.SetAsync(cacheKey, cachedData, ApplicationCacheTTL, cancellationToken);
+                _logger.LogDebug("Updated application status in cache for AppId={ApplicationId} to {Status}", applicationId, newStatus);
+            }
+            else
+            {
+                _logger.LogWarning("Application cache data not found for AppId={ApplicationId} during status update.", applicationId);
+            }
         }
 
-        private async Task InvalidateOAuthCacheAsync(Guid applicationId)
+        // Cleanup 시에는 OrganizationId가 필요함 (Repository 조회 또는 이벤트 데이터 활용)
+        private async Task CleanupApplicationCacheAsync(Guid applicationId, Guid organizationId, CancellationToken cancellationToken)
         {
-            var oauthKey = $"app:{applicationId}:oauth:*";
-            await _cacheService.RemoveByPatternAsync(oauthKey);
+            // 애플리케이션 기본 캐시 제거
+            var appKey = GetApplicationCacheKey(organizationId, applicationId);
+            await _cacheService.RemoveAsync(appKey, cancellationToken);
+
+            // 관련 설정/통계 등 다른 캐시 키 제거
+            await _cacheService.RemoveAsync(GetApplicationSettingsCacheKey(applicationId), cancellationToken);
+            await _cacheService.RemoveAsync(GetApiBlockCacheKey(applicationId), cancellationToken);
+            await _cacheService.RemoveAsync(GetPointSettingsCacheKey(applicationId), cancellationToken);
+            // 패턴 기반 삭제 (지원하는 경우)
+            await _cacheService.RemoveByPatternAsync(GetOAuthCachePattern(applicationId), cancellationToken);
+            await _cacheService.RemoveByPatternAsync(GetApiKeyCachePattern(applicationId), cancellationToken);
+            await _cacheService.RemoveByPatternAsync($"app:{applicationId}:quota:*", cancellationToken);
+            await _cacheService.RemoveByPatternAsync($"app:{applicationId}:usage:*", cancellationToken);
+            await _cacheService.RemoveByPatternAsync($"app:{applicationId}:stats:*", cancellationToken);
+            await _cacheService.RemoveByPatternAsync($"app:{applicationId}:history:*", cancellationToken);
+
+            _logger.LogDebug("Cleaned up caches related to AppId={ApplicationId}", applicationId);
         }
 
-        private async Task InitializeApplicationDefaultsAsync(ApplicationCreatedEvent eventData)
+        private async Task InvalidateOrganizationApplicationListCacheAsync(Guid organizationId, CancellationToken cancellationToken)
         {
-            // 조직의 플랜에 따른 기본 설정 적용
-            var defaultSettings = await GetDefaultSettingsForApplicationTypeAsync(eventData.ApplicationType);
-
-            var settingsKey = GetApplicationSettingsCacheKey(eventData.ApplicationId);
-            await _cacheService.SetAsync(settingsKey, defaultSettings, SettingsCacheTTL);
+            var orgAppsKey = GetOrganizationApplicationListCacheKey(organizationId);
+            await _cacheService.RemoveAsync(orgAppsKey, cancellationToken);
+            _logger.LogDebug("Invalidated organization application list cache for OrgId={OrganizationId}", organizationId);
         }
 
+        private async Task InvalidateOAuthCacheAsync(Guid applicationId, CancellationToken cancellationToken)
+        {
+            await _cacheService.RemoveByPatternAsync(GetOAuthCachePattern(applicationId), cancellationToken);
+            _logger.LogDebug("Invalidated OAuth cache for AppId={ApplicationId}", applicationId);
+        }
+
+        private async Task InitializeApplicationDefaultsAsync(Guid applicationId, ApplicationType applicationType, CancellationToken cancellationToken)
+        {
+            var defaultSettings = await GetDefaultSettingsForApplicationTypeAsync(applicationType);
+            if (defaultSettings.Any())
+            {
+                var settingsKey = GetApplicationSettingsCacheKey(applicationId);
+                await _cacheService.SetAsync(settingsKey, defaultSettings, SettingsCacheTTL, cancellationToken);
+                _logger.LogDebug("Initialized default settings in cache for AppId={ApplicationId}", applicationId);
+            }
+        }
+
+        // 기본 설정 조회 (비동기 불필요 시 Task 제거 가능)
         private Task<Dictionary<string, object>> GetDefaultSettingsForApplicationTypeAsync(ApplicationType type)
         {
-            // 애플리케이션 타입별 기본 설정
             var settings = type switch
             {
-                ApplicationType.Web => new Dictionary<string, object>
-                {
-                    ["MaxSessionDuration"] = 3600,
-                    ["EnableCors"] = true,
-                    ["DefaultApiRateLimit"] = 1000
-                },
-                ApplicationType.Mobile => new Dictionary<string, object>
-                {
-                    ["MaxSessionDuration"] = 86400,
-                    ["EnablePushNotifications"] = true,
-                    ["DefaultApiRateLimit"] = 500
-                },
-                ApplicationType.Api => new Dictionary<string, object>
-                {
-                    ["MaxSessionDuration"] = 7200,
-                    ["RequireApiKey"] = true,
-                    ["DefaultApiRateLimit"] = 10000
-                },
+                ApplicationType.Web => new Dictionary<string, object> { ["MaxSessionDuration"] = 3600, ["EnableCors"] = true, ["DefaultApiRateLimit"] = 1000 },
+                ApplicationType.Mobile => new Dictionary<string, object> { ["MaxSessionDuration"] = 86400, ["EnablePushNotifications"] = true, ["DefaultApiRateLimit"] = 500 },
+                ApplicationType.Api => new Dictionary<string, object> { ["MaxSessionDuration"] = 7200, ["RequireApiKey"] = true, ["DefaultApiRateLimit"] = 10000 },
                 _ => new Dictionary<string, object>()
             };
-
-            return Task.FromResult(settings);
+            return Task.FromResult(settings); // 비동기가 아니므로 Task.FromResult 사용
         }
 
-        private async Task ProcessStatusChangeAsync(ApplicationStatusChangedEvent eventData)
+        // 상태 변경에 따른 추가 처리 및 알림 발행
+        private async Task ProcessStatusChangeAsync(ApplicationStatusChangedEvent eventData, CancellationToken cancellationToken)
         {
             switch (eventData.NewStatus)
             {
                 case ApplicationStatus.Suspended:
-                    // 애플리케이션 비활성화 알림
-                    await _eventBus.PublishAsync(new ApplicationSuspendedNotification
-                    {
-                        ApplicationId = eventData.ApplicationId,
-                        SuspendedAt = eventData.ChangedAt,
-                        Reason = eventData.Reason
-                    });
-
-                    // API 키 관련 캐시 무효화
-                    var apiKeyCachePattern = $"app:{eventData.ApplicationId}:apikeys:*";
-                    await _cacheService.RemoveByPatternAsync(apiKeyCachePattern);
+                    await _eventBus.PublishAsync(new ApplicationSuspendedNotification(
+                        eventData.AggregateId,
+                        eventData.ChangedAt,
+                        eventData.Reason,
+                        eventData.CorrelationId,
+                        eventData.EventId
+                    ), cancellationToken);
+                    // 관련된 API 키 캐시 무효화
+                    await _cacheService.RemoveByPatternAsync(GetApiKeyCachePattern(eventData.AggregateId), cancellationToken);
+                    _logger.LogInformation("Published ApplicationSuspendedNotification and invalidated API key cache for AppId={ApplicationId}", eventData.AggregateId);
                     break;
 
                 case ApplicationStatus.Active:
-                    // 애플리케이션 활성화 알림
-                    await _eventBus.PublishAsync(new ApplicationActivatedNotification
+                    // 비활성 상태에서 활성 상태로 변경된 경우 알림
+                    if (eventData.OldStatus != ApplicationStatus.Active)
                     {
-                        ApplicationId = eventData.ApplicationId,
-                        ActivatedAt = eventData.ChangedAt
-                    });
-
-                    // API 키 캐시 재구성 필요 플래그 설정
-                    var reactivateKey = $"app:{eventData.ApplicationId}:needs-reactivation";
-                    await _cacheService.SetAsync(reactivateKey, new { NeedsReactivation = true }, TimeSpan.FromMinutes(5));
+                        await _eventBus.PublishAsync(new ApplicationActivatedNotification(
+                            eventData.AggregateId,
+                            eventData.ChangedAt,
+                            eventData.CorrelationId,
+                            eventData.EventId
+                        ), cancellationToken);
+                        // API 키 캐시 재구성 필요 플래그 설정 (백그라운드 작업 등에서 사용)
+                        var reactivateKey = GetApplicationReactivationKey(eventData.AggregateId);
+                        await _cacheService.SetAsync<object>(reactivateKey, true, TimeSpan.FromMinutes(5), cancellationToken);
+                        _logger.LogInformation("Published ApplicationActivatedNotification and set reactivation flag for AppId={ApplicationId}", eventData.AggregateId);
+                    }
                     break;
 
-                case ApplicationStatus.Deleted:
-                    // 완전 삭제 처리
-                    await CleanupApplicationCacheAsync(eventData.ApplicationId);
-                    break;
+                    // Deleted 상태는 HandleApplicationDeletedAsync에서 처리되므로 여기서는 특별한 처리 없음
+                    // case ApplicationStatus.Deleted:
+                    //     break;
             }
         }
 
-        private async Task UpdateUsageStatsCacheAsync(ApiUsageThresholdEvent eventData)
+        private async Task UpdateUsageStatsCacheAsync(ApiUsageThresholdEvent eventData, CancellationToken cancellationToken)
         {
-            var statsKey = $"app:{eventData.ApplicationId}:stats:usage";
+            // Quota가 0 이하이면 계산 불가
+            if (eventData.Quota <= 0) return;
+
+            var statsKey = GetUsageStatsCacheKey(eventData.AggregateId, eventData.ThresholdType);
             var stats = new Dictionary<string, object>
             {
                 ["CurrentUsage"] = eventData.CurrentUsage,
                 ["Quota"] = eventData.Quota,
                 ["Percentage"] = (decimal)eventData.CurrentUsage / eventData.Quota,
-                ["UpdatedAt"] = eventData.OccurredAt,
+                ["UpdatedAt"] = eventData.OccurredAt, // 이벤트 발생 시간 사용
                 ["ThresholdType"] = eventData.ThresholdType
             };
-
-            await _cacheService.SetAsync(statsKey, stats, UsageStatsCacheTTL);
+            await _cacheService.SetAsync(statsKey, stats, UsageStatsCacheTTL, cancellationToken);
+            _logger.LogDebug("Updated usage stats cache for AppId={ApplicationId}, Type={Type}", eventData.AggregateId, eventData.ThresholdType);
         }
 
-        private async Task UpdatePointSettingsCacheAsync(PointSettingsChangedEvent eventData)
+        private async Task UpdatePointSettingsCacheAsync(PointSettingsChangedEvent eventData, CancellationToken cancellationToken)
         {
-            var pointKey = $"app:{eventData.ApplicationId}:points:settings";
+            var pointKey = GetPointSettingsCacheKey(eventData.AggregateId);
             var settings = new Dictionary<string, object>
             {
                 ["UsePointsForApiCalls"] = eventData.NewUsePointsForApiCalls,
                 ["PointsPerApiCall"] = eventData.NewPointsPerApiCall,
-                ["UpdatedAt"] = eventData.ChangedAt
+                ["UpdatedAt"] = eventData.OccurredAt // 이벤트의 변경 시간 사용
             };
-
-            await _cacheService.SetAsync(pointKey, settings, TimeSpan.FromHours(12));
+            await _cacheService.SetAsync(pointKey, settings, TimeSpan.FromHours(12), cancellationToken); // TTL 적절히 설정
+            _logger.LogDebug("Updated point settings cache for AppId={ApplicationId}", eventData.AggregateId);
         }
 
-        private async Task StoreUsageHistoryAsync(UsageResetEvent eventData)
+        private async Task StoreUsageHistoryAsync(UsageResetEvent eventData, CancellationToken cancellationToken)
         {
-            // 히스토리는 영구 저장이 필요하므로 DB에 직접 저장
-            var historyKey = $"app:{eventData.ApplicationId}:history:{eventData.ResetType}:{eventData.ResetAt:yyyyMMdd}";
-            await _cacheService.SetAsync(historyKey, new
+            // 캐시를 사용한 히스토리 저장 (만료 시간 설정)
+            var historyKey = GetUsageHistoryCacheKey(eventData.AggregateId, eventData.ResetType, eventData.OccurredAt);
+            var historyData = new
             {
                 PreviousUsage = eventData.PreviousUsage,
-                ResetAt = eventData.ResetAt,
+                ResetAt = eventData.OccurredAt,
                 ResetType = eventData.ResetType
-            }, TimeSpan.FromDays(90)); // 90일 보관
+            };
+            // 장기 보관이 필요하면 DB 사용 고려
+            await _cacheService.SetAsync(historyKey, historyData, TimeSpan.FromDays(90), cancellationToken); // 90일 보관 예시
+            _logger.LogDebug("Stored usage history in cache for AppId={ApplicationId}, Type={Type}", eventData.AggregateId, eventData.ResetType);
         }
 
-        private async Task SendUsageWarningNotificationAsync(ApiUsageThresholdEvent eventData)
+        private async Task SendUsageWarningNotificationAsync(ApiUsageThresholdEvent eventData, CancellationToken cancellationToken)
         {
-            await _eventBus.PublishAsync(new UsageWarningNotification
-            {
-                ApplicationId = eventData.ApplicationId,
-                CurrentUsage = eventData.CurrentUsage,
-                Quota = eventData.Quota,
-                ThresholdPercentage = eventData.ThresholdPercentage,
-                NotificationType = "API_USAGE_WARNING"
-            });
+            // Quota가 0 이하이면 계산 불가
+            if (eventData.Quota <= 0) return;
+
+            await _eventBus.PublishAsync(new UsageWarningNotification(
+                eventData.AggregateId,
+                eventData.CurrentUsage,
+                eventData.Quota,
+                eventData.ThresholdPercentage,
+                $"API_USAGE_{eventData.ThresholdType.ToUpper()}_WARNING", // 알림 타입 구체화
+                eventData.CorrelationId,
+                eventData.EventId
+            ), cancellationToken);
+            _logger.LogInformation("Published UsageWarningNotification for AppId={ApplicationId}, Type={Type}", eventData.AggregateId, eventData.ThresholdType);
         }
 
-        private async Task SendInsufficientPointsAlertAsync(InsufficientPointsEvent eventData)
+        private async Task SendInsufficientPointsAlertAsync(InsufficientPointsEvent eventData, CancellationToken cancellationToken)
         {
-            await _eventBus.PublishAsync(new InsufficientPointsAlert
-            {
-                ApplicationId = eventData.ApplicationId,
-                ConnectedId = eventData.ConnectedId,
-                RequiredPoints = eventData.RequiredPoints,
-                AvailablePoints = eventData.AvailablePoints,
-                ApiEndpoint = eventData.ApiEndpoint,
-                AlertLevel = "CRITICAL"
-            });
+            await _eventBus.PublishAsync(new InsufficientPointsAlert(
+                eventData.AggregateId, // ApplicationId
+                eventData.ConnectedId,
+                eventData.RequiredPoints,
+                eventData.AvailablePoints,
+                eventData.ApiEndpoint,
+                "CRITICAL", // AlertLevel
+                eventData.CorrelationId,
+                eventData.EventId
+            ), cancellationToken);
+            _logger.LogCritical("Published InsufficientPointsAlert for AppId={ApplicationId}, UserContext={ConnectedId}", eventData.AggregateId, eventData.ConnectedId);
         }
 
-        private bool AreListsEqual(List<string>? list1, List<string>? list2)
+        // 리스트 비교 헬퍼
+        // [FIX] CS1503: Change parameter type from List<string>? to IReadOnlyList<string>?
+        private bool AreListsEqual(IReadOnlyList<string>? list1, IReadOnlyList<string>? list2)
         {
-            if (list1 == null && list2 == null) return true;
-            if (list1 == null || list2 == null) return false;
+            if (ReferenceEquals(list1, list2)) return true; // Same instance or both null
+            if (list1 is null || list2 is null) return false; // One is null, the other isn't
+            if (list1.Count != list2.Count) return false; // Different counts
+
+            // SequenceEqual works with IEnumerable<T>, which IReadOnlyList<T> implements
             return list1.SequenceEqual(list2);
         }
-
+        // 업데이트 감사 대상 필드 확인
         private bool ShouldAuditUpdate(Dictionary<string, object?> changes)
         {
-            // 중요한 필드 변경만 감사
-            var importantFields = new[] { "ApplicationKey", "ApplicationType", "OrganizationId", "Status" };
-            return changes.Keys.Any(k => importantFields.Contains(k, StringComparer.OrdinalIgnoreCase));
+            var importantFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { "ApplicationKey", "ApplicationType", "OrganizationId", "Status", /* 다른 중요 필드 */ };
+            return changes.Keys.Any(importantFields.Contains);
         }
 
+        // 감사 대상 상태 변경 확인
         private bool IsImportantStatusChange(ApplicationStatus oldStatus, ApplicationStatus newStatus)
         {
-            // Active <-> Suspended/Deleted 변경은 중요
-            return (oldStatus == ApplicationStatus.Active && newStatus != ApplicationStatus.Active) ||
-                   (oldStatus != ApplicationStatus.Active && newStatus == ApplicationStatus.Active);
+            // Active 상태 변경 또는 Active로의 복귀는 중요
+            return oldStatus != newStatus &&
+                   (oldStatus == ApplicationStatus.Active || newStatus == ApplicationStatus.Active);
         }
 
+        // 감사 대상 설정 키 확인
         private bool IsImportantSetting(string settingKey)
         {
-            var importantSettings = new[] { "ApiRateLimit", "MaxSessionDuration", "RequireApiKey", "SecurityLevel" };
-            return importantSettings.Contains(settingKey, StringComparer.OrdinalIgnoreCase);
+            var importantSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { "ApiRateLimit", "MaxSessionDuration", "RequireApiKey", "SecurityLevel", /* 다른 중요 설정 */ };
+            return importantSettings.Contains(settingKey);
         }
 
+        // 다음 사용량 리셋 날짜 계산
         private DateTime CalculateNextResetDate(string resetType)
         {
-            var now = _dateTimeProvider.UtcNow;
-            return resetType.ToLower() switch
+            var now = _dateTimeProvider.UtcNow.Date; // 날짜 기준으로 계산
+            return resetType.ToLowerInvariant() switch // ToLowerInvariant 사용
             {
-                "daily" => now.AddDays(1).Date,
-                "weekly" => now.AddDays(7 - (int)now.DayOfWeek).Date,
+                "daily" => now.AddDays(1),
+                "weekly" => now.AddDays(7 - (int)now.DayOfWeek % 7), // 주의 시작을 일요일(0)로 가정
                 "monthly" => new DateTime(now.Year, now.Month, 1).AddMonths(1),
-                _ => now.AddDays(1)
+                _ => now.AddDays(1) // 알 수 없는 타입은 기본값으로 다음 날
             };
         }
 
         #endregion
     }
-
-    #region Internal Event Classes (최소한만 유지)
-
-    internal class ApplicationDeactivatedNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public DateTime DeactivatedAt { get; set; }
-    }
-
-    internal class ApiQuotaExceededEvent : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public string QuotaType { get; set; } = string.Empty;
-        public DateTime BlockedAt { get; set; }
-    }
-
-    internal class StorageCleanupSuggestionEvent : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public decimal CurrentUsageGB { get; set; }
-        public string[] SuggestedActions { get; set; } = Array.Empty<string>();
-    }
-
-    internal class UsageResetNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public string ResetType { get; set; } = string.Empty;
-        public DateTime NextResetDate { get; set; }
-    }
-
-    internal class ResourceQuotaReducedWarning : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public string ResourceType { get; set; } = string.Empty;
-        public decimal NewQuota { get; set; }
-    }
-
-    internal class UsageWarningNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public long CurrentUsage { get; set; }
-        public long Quota { get; set; }
-        public decimal ThresholdPercentage { get; set; }
-        public string NotificationType { get; set; } = string.Empty;
-    }
-
-    internal class InsufficientPointsAlert : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public Guid ConnectedId { get; set; }
-        public decimal RequiredPoints { get; set; }
-        public decimal AvailablePoints { get; set; }
-        public string ApiEndpoint { get; set; } = string.Empty;
-        public string AlertLevel { get; set; } = string.Empty;
-    }
-
-    internal class ApiBlockInfo
-    {
-        public bool IsBlocked { get; set; }
-        public DateTime BlockedAt { get; set; }
-        public string Reason { get; set; } = string.Empty;
-        public decimal RequiredPoints { get; set; }
-        public decimal AvailablePoints { get; set; }
-    }
-
-    internal class ApplicationSuspendedNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public DateTime SuspendedAt { get; set; }
-        public string? Reason { get; set; }
-    }
-
-    internal class ApplicationActivatedNotification : IDomainEvent
-    {
-        public Guid EventId { get; set; } = Guid.NewGuid();
-        public Guid AggregateId { get; private set; }
-        public DateTime OccurredAt { get; set; } = DateTime.UtcNow;
-        public Guid ApplicationId { get; set; }
-        public DateTime ActivatedAt { get; set; }
-    }
-
-    #endregion
 }

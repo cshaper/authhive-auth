@@ -350,7 +350,8 @@ namespace AuthHive.Auth.Services.Handlers
                     cancellationToken: cancellationToken);
 
                 // 2. 계정 잠금 확인 및 처리
-                var user = await _userRepository.GetByUsernameAsync(eventData.Username, includeDeleted: false, cancellationToken);
+                // [FIX] CS1061: GetByUsernameAsync -> FindByUsernameAsync 메서드 이름 변경
+                var user = await _userRepository.FindByUsernameAsync(eventData.Username, includeDeleted: false, cancellationToken);
                 if (user != null)
                 {
                     var lockStatus = await _authAttemptService.CheckAccountLockStatusAsync(user.Id, cancellationToken);
