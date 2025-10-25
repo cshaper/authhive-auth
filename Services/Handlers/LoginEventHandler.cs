@@ -33,6 +33,7 @@ using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Auth.Authentication.Events;
 using AuthHive.Core.Models.User.Events;
 using AuthHive.Core.Models.Auth.Session.Events;
+using AuthHive.Core.Models.User.Events.Lifecycle;
 
 namespace AuthHive.Auth.Services.Handlers
 {

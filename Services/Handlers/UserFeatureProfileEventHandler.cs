@@ -12,6 +12,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Models.User.Events.Features;
 
 namespace AuthHive.Auth.Handlers.User
 {
