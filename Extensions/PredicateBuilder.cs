@@ -2,7 +2,7 @@ using System;
 using System.Linq;
 using System.Linq.Expressions;
 
-namespace AuthHive.Auth.Extensions // ✨ 네임스페이스 확인
+namespace AuthHive.Auth.Extensions
 {
     /// <summary>
     /// LINQ Expression<Func<T, bool>> 타입의 Predicate(조건자)를 조합하는 확장 메서드를 제공합니다.

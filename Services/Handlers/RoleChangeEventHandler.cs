@@ -93,7 +93,7 @@ namespace AuthHive.Auth.Handlers
                 var isCacheHealthy = await _cacheService.IsHealthyAsync(cancellationToken);
                 var isAuditHealthy = await _auditLogService.IsHealthyAsync(cancellationToken); // (가정) IAuditLogService에 IsHealthyAsync 존재
                 var isNotificationHealthy = await _notificationService.IsHealthyAsync(cancellationToken); // (가정) INotificationService에 IsHealthyAsync 존재
-                
+
                 return isCacheHealthy && isAuditHealthy && isNotificationHealthy;
             }
             catch (Exception ex)
@@ -128,10 +128,10 @@ namespace AuthHive.Auth.Handlers
                     Metadata = JsonSerializer.Serialize(eventData)
                     // (수정) CreatedAt 제거
                 };
-                
+
                 // (수정) CreateAsync 호출 (CancellationToken 제거)
                 ServiceResult<AuditLogResponse> auditResult = await _auditLogService.CreateAsync(
-                    auditRequest, 
+                    auditRequest,
                     eventData.ConnectedId // (가정) 이벤트 모델에 AssignedByConnectedId가 있어야 함
                 );
 
@@ -149,21 +149,25 @@ namespace AuthHive.Auth.Handlers
                         { "UserName", user.Username ?? "Member" },
                         { "RoleName", eventData.RoleName ?? "a new role" }
                     };
-                    
+
                     var notificationRequest = new NotificationSendRequest
                     {
-                        RecipientConnectedIds = new List<Guid> { eventData.ConnectedId },
-                        TemplateKey = "USER_ROLE_ASSIGNED",
-                        TemplateVariables = templateVariables,
-                        ChannelOverride = NotificationChannel.Email,
-                        Priority = NotificationPriority.Normal,
-                        SendImmediately = true
+                        // (한글 주석) ❗️ 수정됨: RecipientType과 RecipientIdentifiers 사용
+                        RecipientType = RecipientType.User, // 수신자 타입: 사용자
+                                                            // (한글 주석) ❗️ ConnectedId를 문자열 리스트로 전달합니다. (eventData 객체가 있다고 가정)
+                        RecipientIdentifiers = new List<string> { eventData.ConnectedId.ToString() }, // ❗️ 수정됨
+
+                        TemplateKey = "USER_ROLE_ASSIGNED", // 템플릿 키
+                        TemplateVariables = templateVariables, // 템플릿 변수
+                        Channels = new List<NotificationChannel> { NotificationChannel.Email },
+                        Priority = NotificationPriority.Normal, // 우선 순위
+                        SendImmediately = true // 즉시 발송
                     };
-                    
+
                     // (유지) 알림 서비스는 CancellationToken 전달
                     await _notificationService.SendImmediateNotificationAsync(notificationRequest, cancellationToken);
                 }
-                
+
                 _logger.LogInformation("RoleAssignedEvent processed - ConnectedId: {ConnectedId}", eventData.ConnectedId);
             }
             catch (Exception ex)
@@ -196,10 +200,10 @@ namespace AuthHive.Auth.Handlers
                     Metadata = JsonSerializer.Serialize(eventData)
                     // (수정) CreatedAt 제거
                 };
-                
+
                 // (수정) CreateAsync 호출 (CancellationToken 제거)
                 ServiceResult<AuditLogResponse> auditResult = await _auditLogService.CreateAsync(
-                    auditRequest, 
+                    auditRequest,
                     eventData.ConnectedId // (가정) 이벤트 모델에 RemovedByConnectedId가 있어야 함
                 );
 
@@ -207,7 +211,7 @@ namespace AuthHive.Auth.Handlers
                 {
                     _logger.LogWarning("Failed to create audit log for role removal: {Error}", auditResult.ErrorMessage);
                 }
-                
+
                 _logger.LogInformation("RoleRemovedEvent processed - ConnectedId: {ConnectedId}", eventData.ConnectedId);
             }
             catch (Exception ex)
@@ -256,10 +260,10 @@ namespace AuthHive.Auth.Handlers
                     Metadata = JsonSerializer.Serialize(new { OldRole = eventData.OldRoleName, NewRole = eventData.NewRoleName /*, eventData.Changes */ })
                     // (수정) CreatedAt 제거
                 };
-                
+
                 // (수정) CreateAsync 호출 (CancellationToken 제거)
                 ServiceResult<AuditLogResponse> auditResult = await _auditLogService.CreateAsync(
-                    auditRequest, 
+                    auditRequest,
                     eventData.ChangedByUserId // (가정) 이벤트 모델에 ChangedByConnectedId가 있어야 함
                 );
 
@@ -298,10 +302,10 @@ namespace AuthHive.Auth.Handlers
                     Metadata = JsonSerializer.Serialize(eventData)
                     // (수정) CreatedAt 제거
                 };
-                
+
                 // (수정) CreateAsync 호출 (CancellationToken 제거)
                 ServiceResult<AuditLogResponse> auditResult = await _auditLogService.CreateAsync(
-                    auditRequest, 
+                    auditRequest,
                     eventData.CreatedByUserId // (가정) 이벤트 모델에 CreatedByConnectedId가 있어야 함
                 );
 
@@ -358,13 +362,13 @@ namespace AuthHive.Auth.Handlers
                     Metadata = JsonSerializer.Serialize(eventData)
                     // (수정) CreatedAt 제거
                 };
-                
+
                 // (수정) CreateAsync 호출 (CancellationToken 제거)
                 ServiceResult<AuditLogResponse> auditResult = await _auditLogService.CreateAsync(
-                    auditRequest, 
+                    auditRequest,
                     eventData.DeletedByConnectedId // (가정) 이벤트 모델에 DeletedByConnectedId가 있어야 함
                 );
-                
+
                 if (!auditResult.IsSuccess)
                 {
                     _logger.LogWarning("Failed to create audit log for role deletion: {Error}", auditResult.ErrorMessage);
@@ -400,11 +404,11 @@ namespace AuthHive.Auth.Handlers
                     Metadata = JsonSerializer.Serialize(eventData)
                     // (수정) CreatedAt 제거
                 };
-                
+
                 // (수정) CreateAsync 호출 (CancellationToken 제거)
                 // 행위자(Performer)는 FromConnectedId (제공된 DTO에 명시됨)
                 ServiceResult<AuditLogResponse> auditResult = await _auditLogService.CreateAsync(
-                    auditRequest, 
+                    auditRequest,
                     eventData.FromConnectedId
                 );
 

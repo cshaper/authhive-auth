@@ -25,7 +25,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
     /// <see cref="UserJoinedOrganizationEvent"/>를 처리하는 알림 핸들러입니다.
     /// (수정) 실제 DTO를 사용하여 템플릿 기반 알림을 호출합니다.
     /// </summary>
-    public class SendWelcomeNotificationHandler 
+    public class SendWelcomeNotificationHandler
         : IDomainEventHandler<UserJoinedOrganizationEvent>
     {
         public int Priority => 200;
@@ -70,7 +70,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                     _logger.LogError("Notification failed: User({UserId}) not found.", @event.UserId);
                     return;
                 }
-                
+
                 if (organization == null)
                 {
                     _logger.LogError("Notification failed: Organization({OrgId}) not found.", @event.OrganizationId.Value);
@@ -82,7 +82,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                     user.Email, organization.Name);
 
                 // 2. 실제 NotificationSendRequest DTO를 사용하여 요청 생성
-                
+
                 // --- (수정 CS8604) ---
                 // user.Username과 user.DisplayName이 모두 null일 수 있으므로, 
                 // "User" 또는 "Member"와 같은 null이 아닌 기본값을 제공합니다.
@@ -95,19 +95,19 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                     { "UserName", userName },
                     { "OrganizationName", organization.Name }
                 };
-                
+
                 var notificationRequest = new NotificationSendRequest
                 {
-                    RecipientConnectedIds = new List<Guid> { @event.ConnectedId },
+                    RecipientIdentifiers = new List<string> { @event.ConnectedId.ToString() },
                     TemplateKey = "USER_JOINED_ORGANIZATION",
-                    TemplateVariables = templateVariables, 
+                    TemplateVariables = templateVariables,
                     SendImmediately = true,
                     Priority = NotificationPriority.Normal
                 };
 
                 // 3. 알림 서비스 호출
                 await _notificationService.SendImmediateNotificationAsync(
-                    notificationRequest, 
+                    notificationRequest,
                     cancellationToken);
 
                 _logger.LogInformation(
@@ -120,7 +120,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                 _logger.LogWarning("Welcome notification was cancelled. (User: {UserId}, Org: {OrgId})",
                     @event.UserId,
                     @event.OrganizationId);
-                throw; 
+                throw;
             }
             catch (Exception ex)
             {

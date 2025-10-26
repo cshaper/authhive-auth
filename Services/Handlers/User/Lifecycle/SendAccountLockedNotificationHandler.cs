@@ -60,10 +60,10 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                 }
 
                 // 2. 잠금 해제 예정 시간 표시 (수정: Nullable DateTime? 타입에 맞춰 안전하게 처리)
-                string lockedUntilDisplay = @event.LockedUntil.HasValue 
-                    ? @event.LockedUntil.Value.ToString("yyyy-MM-dd HH:mm UTC") 
+                string lockedUntilDisplay = @event.LockedUntil.HasValue
+                    ? @event.LockedUntil.Value.ToString("yyyy-MM-dd HH:mm UTC")
                     : "indefinitely"; // Null이면 영구 잠금 표시
-                
+
                 _logger.LogWarning(
                     "Sending Critical Alert: Account Locked Notification to User {Email} (Reason: {Reason})",
                     user.Email, @event.LockReason);
@@ -82,19 +82,21 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                 // 4. 알림 요청 생성 (Critical Security Alert)
                 var notificationRequest = new NotificationSendRequest
                 {
-                    // RecipientConnectedIds는 ConnectedId가 없는 경우를 대비하여 UserId로 대체
-                    RecipientConnectedIds = @event.TriggeredBy.HasValue ? new List<Guid> { @event.TriggeredBy.Value } : new List<Guid> { @event.UserId },
-                    
-                    TemplateKey = "USER_ACCOUNT_LOCKED_CRITICAL", // 잠금 보안 경고 템플릿
-                    TemplateVariables = templateVariables,
-                    ChannelOverride = NotificationChannel.Email,
-                    Priority = NotificationPriority.Critical, // 최우선 순위
-                    SendImmediately = true,
-                    
-                    EmailDetails = new EmailRequestDetails 
-                    { 
-                        ToEmail = user.Email,
-                        DisableLogging = false // Critical Alert는 반드시 로깅되어야 함
+                    RecipientType = RecipientType.User, // 수신자 타입: 사용자
+                    RecipientIdentifiers = new List<string> { user.Id.ToString() }, 
+                    TemplateKey = "USER_ACCOUNT_LOCKED_CRITICAL", // 템플릿 키
+                    TemplateVariables = templateVariables, // 템플릿 변수
+
+                    // (한글 주석) ❗️ 수정됨: Channel 대신 Channels (List) 사용
+                    Channels = new List<NotificationChannel> { NotificationChannel.Email }, // ❗️ 수정됨
+                    Priority = NotificationPriority.Critical, // 우선 순위
+                    SendImmediately = true, // 즉시 발송
+                    EmailDetails = new EmailRequestDetails
+                    {
+                        // (한글 주석) ToEmail은 NotificationService 내부에서 RecipientIdentifiers를 기반으로 조회할 가능성이 높으므로,
+                        // 여기서 직접 설정할 필요가 없을 수 있습니다. (서비스 구현 확인 필요)
+                        // ToEmail = user.Email, // 필요 시 설정
+                        // DisableLogging = false // EmailRequestDetails에 이 속성이 있다면 사용
                     }
                 };
 

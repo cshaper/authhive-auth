@@ -61,7 +61,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Profile
             {
                 // 1. 알림에 필요한 정보 조회 (ConnectedId는 없으므로 UserId로 조회)
                 var user = await _userRepository.GetByIdAsync(@event.UserId, cancellationToken);
-                
+
                 if (user == null)
                 {
                     _logger.LogError("Notification failed: User({UserId}) not found for profile creation event.", @event.UserId);
@@ -69,7 +69,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Profile
                 }
 
                 string userName = user.Username ?? user.Email.Split('@')[0];
-                
+
                 _logger.LogInformation(
                     "Sending welcome notification to User {Email} after profile creation. (Source: {Source})",
                     user.Email, @event.Source);
@@ -86,26 +86,29 @@ namespace AuthHive.Auth.Services.Handlers.User.Profile
                 // 3. NotificationSendRequest DTO 구성
                 var notificationRequest = new NotificationSendRequest
                 {
-                    // ConnectedId가 없을 수 있으므로 RecipientConnectedIds는 빈 리스트로 두고,
-                    // EmailDetails를 사용하여 직접 이메일로 보냅니다. (NotificationService의 내부 로직에 의존)
-                    RecipientConnectedIds = new List<Guid>(),
-                    
-                    TemplateKey = "USER_PROFILE_CREATED_WELCOME", // 온보딩/환영 알림 템플릿
-                    TemplateVariables = templateVariables,
-                    
-                    ChannelOverride = NotificationChannel.Email, 
-                    Priority = NotificationPriority.Normal,
-                    SendImmediately = true,
-                    
+                    // (한글 주석) ❗️ 수정됨: RecipientType과 RecipientIdentifiers 사용
+                    RecipientType = RecipientType.User, // 수신자 타입: 사용자
+                                                        // (한글 주석) ❗️ EmailDetails.ToEmail을 사용하므로 식별자는 빈 리스트로 둘 수 있음 (NotificationService 구현에 따라 다름)
+                                                        // 또는 UserId를 식별자로 제공할 수 있음: RecipientIdentifiers = new List<string> { user.Id.ToString() },
+                    RecipientIdentifiers = new List<string>(), // ❗️ 수정됨 (비워둠)
+
+                    TemplateKey = "USER_PROFILE_CREATED_WELCOME", // 템플릿 키
+                    TemplateVariables = templateVariables, // 템플릿 변수
+
+                    // (한글 주석) ❗️ 수정됨: ChannelOverride 대신 Channels (List) 사용
+                    Channels = new List<NotificationChannel> { NotificationChannel.Email }, // ❗️ 수정됨
+
+                    Priority = NotificationPriority.Normal, // 우선 순위
+                    SendImmediately = true, // 즉시 발송
+
                     // 이메일 상세 정보 설정
-                    EmailDetails = new EmailRequestDetails 
-                    { 
-                        ToEmail = user.Email,
-                        // 이메일 내용 로깅을 비활성화하여 개인정보 보호 강화 (선택적)
-                        DisableLogging = false
+                    EmailDetails = new EmailRequestDetails
+                    {
+                        ToEmail = user.Email, // 직접 이메일 주소 지정
+                                              // DisableLogging = false // EmailRequestDetails에 이 속성이 있다면 사용
                     }
                 };
-                
+
                 // 4. 알림 서비스 호출
                 // ConnectedId가 없는 경우, UserId의 기본 이메일 설정에 따라 전송되어야 합니다.
                 await _notificationService.SendImmediateNotificationAsync(notificationRequest, cancellationToken);

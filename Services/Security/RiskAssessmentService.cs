@@ -1,3 +1,4 @@
+// File: AuthHive.Auth/Services/Security/RiskAssessmentService.cs
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -11,6 +12,8 @@ using AuthHive.Core.Entities.User;
 using AuthHive.Core.Enums.Auth;
 using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Enums.Infra.Monitoring;
+using AuthHive.Core.Enums.Infra.Security; // ❗️ [수정] RiskLevel enum을 위해 추가
+using static AuthHive.Core.Enums.Infra.Security.SecurityEnums; // ❗️ [수정] RiskLevel enum을 위해 추가
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Base;
@@ -250,7 +253,7 @@ namespace AuthHive.Auth.Services.Security
                 {
                     AssessmentId = Guid.NewGuid(),
                     RiskScore = riskScore,
-                    RiskLevel = DetermineRiskLevel(riskScore),
+                    RiskLevel = DetermineRiskLevel(riskScore), // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
                     RiskFactors = riskFactors,
                     RequiresMfa = riskScore >= _settings.MfaRequiredThreshold,
                     RequiresAdditionalVerification = riskScore >= _settings.AdditionalVerificationThreshold,
@@ -318,7 +321,7 @@ namespace AuthHive.Auth.Services.Security
                 {
                     AssessmentId = Guid.NewGuid(),
                     RiskScore = riskScore,
-                    RiskLevel = DetermineRiskLevel(riskScore),
+                    RiskLevel = DetermineRiskLevel(riskScore), // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
                     RiskFactors = riskFactors,
                     RequiresMfa = riskScore >= _settings.MfaRequiredThreshold,
                     RequiresAdditionalVerification = riskScore >= _settings.AdditionalVerificationThreshold,
@@ -379,7 +382,7 @@ namespace AuthHive.Auth.Services.Security
                 {
                     AssessmentId = Guid.NewGuid(),
                     RiskScore = riskScore,
-                    RiskLevel = DetermineRiskLevel(riskScore),
+                    RiskLevel = DetermineRiskLevel(riskScore), // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
                     RiskFactors = riskFactors,
                     RequiresMfa = riskScore >= _settings.MfaRequiredThreshold,
                     RequiresAdditionalVerification = riskScore >= _settings.AdditionalVerificationThreshold,
@@ -445,7 +448,7 @@ namespace AuthHive.Auth.Services.Security
                 var assessment = new TransactionRiskAssessment
                 {
                     RiskScore = riskScore,
-                    RiskLevel = DetermineTransactionRiskLevel(riskScore),
+                    RiskLevel = DetermineTransactionRiskLevel(riskScore), // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
                     RiskFactors = riskFactors,
                     RequiresAdditionalVerification = riskScore >= 70,
                     RecommendedAction = GenerateTransactionRecommendation(riskScore)
@@ -991,11 +994,6 @@ namespace AuthHive.Auth.Services.Security
         /// <summary>
         /// 위험 이벤트 기록 및 고위험 인증 이벤트 발행 (이벤트 버스 사용)
         /// </summary>
-// Path: AuthHive.Auth.Services.Security.RiskAssessmentService.cs (994번째 줄 주변)
-
-        /// <summary>
-        /// 위험 이벤트 기록 및 고위험 인증 이벤트 발행 (이벤트 버스 사용)
-        /// </summary>
         public async Task<ServiceResult> LogRiskEventAsync(RiskEvent riskEvent, CancellationToken cancellationToken = default)
         {
             try
@@ -1011,32 +1009,51 @@ namespace AuthHive.Auth.Services.Security
 
                     // 💡 수정된 로직: OrganizationId 조회
                     Guid organizationId = Guid.Empty;
+                    Guid? connectedId = null; // ❗️ [수정] ConnectedId 변수
                     var eventData = riskEvent.EventData;
 
                     if (eventData != null) // Dictionary가 null이 아닌 경우에만 로직 실행
                     {
                         // ConnectedId를 통해 OrganizationId를 찾습니다.
-                        if (eventData.TryGetValue("ConnectedId", out var connectedIdObj) && connectedIdObj is Guid connectedId)
+                        if (eventData.TryGetValue("ConnectedId", out var connectedIdObj) && connectedIdObj is Guid cId)
                         {
-                            var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(connectedId, cancellationToken);
+                            connectedId = cId; // ❗️ [수정] ConnectedId 할당
+                            var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(cId, cancellationToken);
                             if (connectedIdEntity != null)
                             {
                                 organizationId = connectedIdEntity.OrganizationId;
                             }
                         }
 
-                        // HighRiskAuthenticationEvent 생성 및 발행
-                        var highRiskEvent = new HighRiskAuthenticationEvent(organizationId)
-                        {
-                            UserId = riskEvent.UserId,
-                            Username = eventData.GetValueOrDefault("Username") as string ?? "N/A",
-                            IpAddress = eventData.GetValueOrDefault("IpAddress") as string ?? CommonDefaults.UnknownDevice,
-                            RiskScore = riskEvent.RiskScore,
-                            RiskLevel = DetermineRiskLevel(riskEvent.RiskScore / 100.0),
-                            RiskFactors = (eventData.GetValueOrDefault("RiskFactors") as List<string>) ?? new List<string>(),
-                            RequiresMfa = riskEvent.RiskScore >= _settings.MfaRequiredThreshold * 100,
-                            RequiresAdditionalVerification = riskEvent.RiskScore >= _settings.AdditionalVerificationThreshold * 100
-                        };
+                        // [❗️ 수정됨] HighRiskAuthenticationEvent 생성 및 발행 (생성자 사용)
+                        
+                        // 1. 생성자에 필요한 파라미터 준비
+                        var userId = riskEvent.UserId; // Guid?
+                        var username = eventData.GetValueOrDefault("Username") as string ?? "N/A";
+                        var ipAddress = eventData.GetValueOrDefault("IpAddress") as string ?? CommonDefaults.UnknownDevice;
+                        var riskScoreDouble = riskEvent.RiskScore / 100.0; // int(80) -> double(0.8)
+                        
+                        // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
+                        var riskLevel = DetermineRiskLevel(riskScoreDouble); 
+                        
+                        var riskFactors = (eventData.GetValueOrDefault("RiskFactors") as List<string>) ?? new List<string>();
+                        var requiresMfa = riskEvent.RiskScore >= _settings.MfaRequiredThreshold * 100;
+                        var requiresVerification = riskEvent.RiskScore >= _settings.AdditionalVerificationThreshold * 100;
+
+                        // 2. 새 생성자 호출
+                        var highRiskEvent = new HighRiskAuthenticationEvent(
+                            userId: userId,
+                            connectedId: connectedId, // ❗️ ConnectedId 전달
+                            username: username,
+                            ipAddress: ipAddress,
+                            riskScore: riskScoreDouble,
+                            riskLevel: riskLevel, // ❗️ 수정된 enum 값 전달
+                            riskFactors: riskFactors,
+                            requiresMfa: requiresMfa,
+                            requiresAdditionalVerification: requiresVerification,
+                            organizationId: organizationId, // BaseEvent AggregateId
+                            correlationId: riskEvent.Id // RiskEvent의 ID를 CorrelationId로 사용
+                        );
 
                         await _eventBus.PublishAsync(highRiskEvent, cancellationToken);
                     }
@@ -1173,7 +1190,7 @@ namespace AuthHive.Auth.Services.Security
                 {
                     UserId = userId,
                     CurrentScore = score,
-                    RiskLevel = DetermineTransactionRiskLevel(score),
+                    RiskLevel = DetermineTransactionRiskLevel(score), // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
                     RiskFactors = riskFactors,
                     CalculatedAt = _dateTimeProvider.UtcNow // IDateTimeProvider 사용
                 };
@@ -1615,9 +1632,9 @@ namespace AuthHive.Auth.Services.Security
 
                 return allAttempts
                     .Where(a => a.Username == username &&
-                               !a.IsSuccess &&
-                               a.AttemptedAt >= startTime &&
-                               a.AttemptedAt <= endTime)
+                                !a.IsSuccess &&
+                                a.AttemptedAt >= startTime &&
+                                a.AttemptedAt <= endTime)
                     .OrderByDescending(a => a.AttemptedAt);
             }
             catch (Exception ex)
@@ -2007,7 +2024,7 @@ namespace AuthHive.Auth.Services.Security
                 // CancellationToken 전달
                 var allAttempts = await _authAttemptRepository.GetAllAsync(cancellationToken);
                 return allAttempts.Count(a => a.UserId == userId && !a.IsSuccess &&
-                                             a.AttemptedAt >= startTime && a.AttemptedAt <= endTime);
+                                            a.AttemptedAt >= startTime && a.AttemptedAt <= endTime);
             }
             catch (Exception ex)
             {
@@ -2276,27 +2293,29 @@ namespace AuthHive.Auth.Services.Security
             return R * c;
         }
 
-        private string DetermineRiskLevel(double riskScore)
+        // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
+        private RiskLevel DetermineRiskLevel(double riskScore)
         {
             return riskScore switch
             {
-                >= 0.8 => "Critical",
-                >= 0.6 => "High",
-                >= 0.4 => "Medium",
-                >= 0.2 => "Low",
-                _ => "Minimal"
+                >= 0.8 => RiskLevel.Critical,
+                >= 0.6 => RiskLevel.High,
+                >= 0.4 => RiskLevel.Medium,
+                >= 0.2 => RiskLevel.Low,
+                _ => RiskLevel.Info
             };
         }
 
-        private string DetermineTransactionRiskLevel(int riskScore)
+        // ❗️ [수정] CS0029 오류 수정 (string -> enum 반환)
+        private RiskLevel DetermineTransactionRiskLevel(int riskScore)
         {
             return riskScore switch
             {
-                >= 80 => "Critical",
-                >= 60 => "High",
-                >= 40 => "Medium",
-                >= 20 => "Low",
-                _ => "Minimal"
+                >= 80 => RiskLevel.Critical,
+                >= 60 => RiskLevel.High,
+                >= 40 => RiskLevel.Medium,
+                >= 20 => RiskLevel.Low,
+                _ => RiskLevel.Info
             };
         }
 
