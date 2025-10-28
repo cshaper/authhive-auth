@@ -194,7 +194,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 감사 로그 비동기 기록 (Fire-and-forget 방식)
         /// </summary>
-        public async Task LogAsync(AuditLog auditLog)
+        public async Task LogAsync(AuditLog auditLog, CancellationToken cancellationToken = default)    
         {
             try
             {
@@ -203,8 +203,8 @@ namespace AuthHive.Auth.Services.Audit
                 {
                     try
                     {
-                        await _auditLogRepository.AddAsync(auditLog);
-                        await _unitOfWork.SaveChangesAsync();
+                        await _auditLogRepository.AddAsync(auditLog, cancellationToken);
+                        await _unitOfWork.SaveChangesAsync(cancellationToken);
                     }
                     catch (Exception ex)
                     {
