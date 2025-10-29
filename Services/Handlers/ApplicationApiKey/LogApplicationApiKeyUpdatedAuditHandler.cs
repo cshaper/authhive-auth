@@ -1,5 +1,5 @@
 // File: AuthHive.Auth/Services/Handlers/ApplicationApiKey/LogApplicationApiKeyUpdatedAuditHandler.cs
-using AuthHive.Auth.Extensions;
+
 using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Audit; // IAuditService
 using AuthHive.Core.Interfaces.Base;

@@ -13,7 +13,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions; // 확장 메서드 사용 (선택적)
+ // 확장 메서드 사용 (선택적)
 
 namespace AuthHive.Auth.Handlers.User.Lifecycle
 {

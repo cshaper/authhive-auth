@@ -14,7 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions;
+
 
 namespace AuthHive.Auth.Handlers.Authentication.Audit
 {

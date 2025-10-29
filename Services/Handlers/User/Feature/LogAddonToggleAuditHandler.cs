@@ -15,7 +15,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions; // ❗️ 확장 메서드 사용을 위한 using 추가
+ // ❗️ 확장 메서드 사용을 위한 using 추가
 
 namespace AuthHive.Auth.Handlers.User.Features
 {

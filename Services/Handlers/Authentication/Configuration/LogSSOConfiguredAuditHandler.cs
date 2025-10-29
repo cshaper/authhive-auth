@@ -4,7 +4,7 @@ using AuthHive.Core.Enums.Auth; // For ConfigurationActionType
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Auth.Events; // SSOConfiguredEvent
-using AuthHive.Auth.Extensions;
+
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

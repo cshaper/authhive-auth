@@ -15,7 +15,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions;
+
 using static AuthHive.Core.Enums.Infra.Security.SecurityEnums;
 
 namespace AuthHive.Auth.Handlers.Authentication.RiskAndAnomaly

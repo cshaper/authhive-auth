@@ -9,7 +9,7 @@ using AuthHive.Core.Entities.Base;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Auth.Data.Context;
-using AuthHive.Auth.Extensions;
+
 
 namespace AuthHive.Auth.Repositories.Base
 {

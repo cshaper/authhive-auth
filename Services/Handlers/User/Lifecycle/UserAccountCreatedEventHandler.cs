@@ -19,7 +19,7 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Organization.Service;
-using AuthHive.Auth.Extensions; // 필요시 사용 (BaseEvent 등)
+ // 필요시 사용 (BaseEvent 등)
 
 namespace AuthHive.Auth.Handlers.User.Lifecycle // 하위 네임스페이스 사용 추천
 {

@@ -3,7 +3,7 @@ using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Audit; // IAuditService
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.PlatformApplication.Events; // OAuthSettingsChangedEvent
-using AuthHive.Auth.Extensions;
+using AuthHive.Core.Extensions;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

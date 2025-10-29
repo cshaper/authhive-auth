@@ -16,7 +16,7 @@ using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService namespace
 using AuthHive.Core.Models.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using AuthHive.Auth.Extensions;
+
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 
 namespace AuthHive.Auth.Repositories

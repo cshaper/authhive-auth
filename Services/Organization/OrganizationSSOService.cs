@@ -37,7 +37,7 @@ using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Enums.Audit;
 using AuthHive.Core.Models;
 using System.Text.Json.Serialization;
-using AuthHive.Auth.Extensions; // SamlConfiguration 엔티티
+ // SamlConfiguration 엔티티
 
 namespace AuthHive.Auth.Services.Organization
 {

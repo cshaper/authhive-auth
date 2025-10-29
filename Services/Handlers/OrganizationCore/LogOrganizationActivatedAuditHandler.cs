@@ -4,7 +4,7 @@ using AuthHive.Core.Enums.Core; // ❗️ 요청하신 using 구문
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Organization.Events; // ❗️ OrganizationActivatedEvent
-using AuthHive.Auth.Extensions;
+using AuthHive.Core.Extensions;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

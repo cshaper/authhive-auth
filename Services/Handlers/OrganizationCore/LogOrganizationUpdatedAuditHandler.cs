@@ -3,7 +3,7 @@ using AuthHive.Core.Enums.Audit;
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Organization.Events; // ❗️ 방금 보여주신 OrganizationUpdatedEvent
-using AuthHive.Auth.Extensions;
+using AuthHive.Core.Extensions;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

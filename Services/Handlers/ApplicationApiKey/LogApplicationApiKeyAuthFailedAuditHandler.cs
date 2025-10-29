@@ -1,9 +1,9 @@
 // File: AuthHive.Auth/Services/Handlers/ApplicationApiKey/LogApplicationApiKeyAuthFailedAuditHandler.cs
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Extensions;
 using AuthHive.Core.Interfaces.Audit; // IAuditService
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.PlatformApplication.Events; // ApplicationApiKeyAuthFailedEvent
-using AuthHive.Auth.Extensions; // (필요시)
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

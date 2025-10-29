@@ -19,7 +19,7 @@ using System.Linq;
 using System.Text.Json; // ❗️ 확장 메서드에서 사용 안 하므로 필요 없을 수 있음 (확인 필요)
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions; // ❗️ 확장 메서드 사용 위한 using 추가
+ // ❗️ 확장 메서드 사용 위한 using 추가
 
 namespace AuthHive.Auth.Handlers.User.Activity
 {

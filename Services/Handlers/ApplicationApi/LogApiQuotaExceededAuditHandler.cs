@@ -1,9 +1,9 @@
 // File: AuthHive.Auth/Services/Handlers/ApplicationApi/LogApiQuotaExceededAuditHandler.cs
 using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Extensions;
 using AuthHive.Core.Interfaces.Audit; // IAuditService
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.PlatformApplication.Events; // ApplicationApiQuotaExceededEvent
-using AuthHive.Auth.Extensions;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

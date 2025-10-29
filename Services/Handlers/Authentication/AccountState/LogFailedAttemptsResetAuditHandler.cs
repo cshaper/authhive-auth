@@ -14,7 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions; // 확장 메서드 사용
+ // 확장 메서드 사용
 
 namespace AuthHive.Auth.Handlers.Authentication.AccountState // (한글 주석) Authentication/AccountState 폴더 경로
 {

@@ -3,7 +3,7 @@ using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Auth.Permissions.Events; // PermissionRevokedEvent
-using AuthHive.Auth.Extensions;
+
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;

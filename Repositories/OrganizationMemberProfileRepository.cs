@@ -12,7 +12,7 @@ using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
-using AuthHive.Auth.Extensions;
+
 
 namespace AuthHive.Auth.Repositories
 {

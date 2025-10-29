@@ -3,12 +3,12 @@ using AuthHive.Core.Enums.Core;
 using AuthHive.Core.Interfaces.Audit; // IAuditService
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.PlatformApplication.Events; // ApplicationSuspiciousApiKeyActivityEvent
-using AuthHive.Auth.Extensions;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using AuthHive.Core.Extensions;
 
 namespace AuthHive.Auth.Handlers.ApplicationApiKey
 {

@@ -16,7 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions; // 확장 메서드 사용
+ // 확장 메서드 사용
 
 namespace AuthHive.Auth.Handlers.Authentication.Mfa // (한글 주석) Authentication/Mfa 폴더 경로
 {

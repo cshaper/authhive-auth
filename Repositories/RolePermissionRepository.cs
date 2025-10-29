@@ -11,7 +11,7 @@ using AuthHive.Auth.Repositories.Base;
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Auth.Extensions;
+
 using AuthHive.Core.Models.Base.Summaries;
 using AuthHive.Core.Models.Common;
 using AuthHive.Core.Interfaces.Infra.Cache; // 💡 ICacheService 네임스페이스 추가

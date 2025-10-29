@@ -14,7 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions;
+
 using AuthHive.Core.Entities.User; // User 엔티티
 
 namespace AuthHive.Auth.Handlers.Authentication.AccountState

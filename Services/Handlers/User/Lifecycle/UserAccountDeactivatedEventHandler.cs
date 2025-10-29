@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Auth.Extensions; // (필요 시) 확장 메서드용
+ // (필요 시) 확장 메서드용
 using AuthHive.Core.Enums.Core; // AuditActionType
 using AuthHive.Core.Interfaces.Audit;
 using AuthHive.Core.Interfaces.Auth.Service; // IAuthenticationCacheService
