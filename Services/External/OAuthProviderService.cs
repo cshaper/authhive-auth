@@ -180,28 +180,28 @@ namespace AuthHive.Auth.Services.External
             return Task.FromResult(ServiceResult<List<OAuthProviderConfiguration>>.Success(providers));
         }
 
-        public Task<ServiceResult<AuthenticationResponse>> InitiateAuthAsync(
+        public Task<ServiceResult<AuthenticationResult>> InitiateAuthAsync(
             string provider, string redirectUri, List<string>? scopes = null, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
+            return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        public Task<ServiceResult<AuthenticationResponse>> ProcessCallbackAsync(
+        public Task<ServiceResult<AuthenticationResult>> ProcessCallbackAsync(
             string provider, string code, string state, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
+            return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        public Task<ServiceResult<TokenIssueResponse>> ExchangeTokenAsync(
+        public Task<ServiceResult<TokenIssueResult>> ExchangeTokenAsync(
             string provider, string code, string redirectUri, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(ServiceResult<TokenIssueResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
+            return Task.FromResult(ServiceResult<TokenIssueResult>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
-        public Task<ServiceResult<TokenRefreshResponse>> RefreshTokenAsync(
+        public Task<ServiceResult<TokenRefreshResult>> RefreshTokenAsync(
             string provider, string refreshToken, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(ServiceResult<TokenRefreshResponse>.Failure("Not implemented", "NOT_IMPLEMENTED"));
+            return Task.FromResult(ServiceResult<TokenRefreshResult>.Failure("Not implemented", "NOT_IMPLEMENTED"));
         }
 
         public async Task<ServiceResult<UserProfileDto>> GetUserProfileAsync(

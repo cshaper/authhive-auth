@@ -109,7 +109,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 감사 로그를 생성하고, 중요 이벤트인 경우 이벤트 버스를 통해 시스템에 알립니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> CreateAuditLogAsync(
+        public async Task<ServiceResult<AuditLogResponse>> CreateAuditLogAsync(
             CreateAuditLogRequest request,
             Guid connectedId,
             CancellationToken cancellationToken = default)
@@ -120,7 +120,7 @@ namespace AuthHive.Auth.Services.Audit
                 var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(connectedId, cancellationToken);
                 if (connectedIdEntity == null)
                 {
-                    return ServiceResult<AuditLogDto>.Failure(
+                    return ServiceResult<AuditLogResponse>.Failure(
                         "Invalid ConnectedId. All operations must be performed by a valid ConnectedId.",
                         AuthConstants.ErrorCodes.INVALID_USER_ID);
                 }
@@ -178,7 +178,7 @@ namespace AuthHive.Auth.Services.Audit
                     "Audit log created: {Action} by ConnectedId {ConnectedId} for Org {OrgId}",
                     auditLog.Action, connectedId, auditLog.TargetOrganizationId);
 
-                return ServiceResult<AuditLogDto>.Success(dto);
+                return ServiceResult<AuditLogResponse>.Success(dto);
             }
             catch (Exception ex)
             {
@@ -186,7 +186,7 @@ namespace AuthHive.Auth.Services.Audit
                     "Failed to create audit log for action {Action} by ConnectedId {ConnectedId}",
                     request.Action, connectedId);
 
-                return ServiceResult<AuditLogDto>.Failure(
+                return ServiceResult<AuditLogResponse>.Failure(
                     "An unexpected error occurred while creating the audit log.",
                     "AUDIT_CREATE_ERROR");
             }
@@ -225,7 +225,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 감사 로그 자동 생성 (내부 시스템 사용)
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogActionAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogActionAsync(
             AuditActionType actionType,
             string action,
             Guid connectedId,
@@ -405,7 +405,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 특정 리소스의 감사 로그 조회 - v15: ConnectedId 기반 권한 검증
         /// </summary>
-        public async Task<ServiceResult<List<AuditLogDto>>> GetResourceAuditLogsAsync(
+        public async Task<ServiceResult<List<AuditLogResponse>>> GetResourceAuditLogsAsync(
             string resourceType,
             string resourceId,
             Guid connectedId,
@@ -418,7 +418,7 @@ namespace AuthHive.Auth.Services.Audit
                 var connectedIdEntity = await _connectedIdRepository.GetByIdAsync(connectedId, cancellationToken);
                 if (connectedIdEntity == null)
                 {
-                    return ServiceResult<List<AuditLogDto>>.Failure(
+                    return ServiceResult<List<AuditLogResponse>>.Failure(
                         "Invalid ConnectedId",
                         AuthConstants.ErrorCodes.INVALID_USER_ID);
                 }
@@ -435,14 +435,14 @@ namespace AuthHive.Auth.Services.Audit
 
                 var logs = await finalQuery.Select(a => MapToDto(a)).ToListAsync(cancellationToken);
 
-                return ServiceResult<List<AuditLogDto>>.Success(logs);
+                return ServiceResult<List<AuditLogResponse>>.Success(logs);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
                     "Failed to get resource audit logs for {ResourceType}:{ResourceId}",
                     resourceType, resourceId);
-                return ServiceResult<List<AuditLogDto>>.Failure(
+                return ServiceResult<List<AuditLogResponse>>.Failure(
                     "Failed to retrieve resource audit logs",
                     "RESOURCE_AUDIT_ERROR");
             }
@@ -455,7 +455,7 @@ namespace AuthHive.Auth.Services.Audit
         /// 특정 사용자의 활동 로그를 조회합니다.
         /// 요청자는 자기 자신의 로그를 보거나, 대상 사용자와 같은 조직의 관리자여야 합니다.
         /// </summary>
-        public async Task<ServiceResult<List<AuditLogDto>>> GetUserActivityLogsAsync(
+        public async Task<ServiceResult<List<AuditLogResponse>>> GetUserActivityLogsAsync(
             Guid targetConnectedId,
             DateTime? startDate,
             DateTime? endDate,
@@ -470,7 +470,7 @@ namespace AuthHive.Auth.Services.Audit
                 var hasAccess = await ValidateUserActivityAccessAsync(requestingConnectedId, targetConnectedId, cancellationToken);
                 if (!hasAccess)
                 {
-                    return ServiceResult<List<AuditLogDto>>.Failure(
+                    return ServiceResult<List<AuditLogResponse>>.Failure(
                         "Access denied to user activity logs",
                         AuthConstants.ErrorCodes.InsufficientPermissions);
                 }
@@ -493,14 +493,14 @@ namespace AuthHive.Auth.Services.Audit
                 // ✅ 3. CancellationToken을 ToListAsync에 전달
                 var logs = await finalQuery.Select(a => MapToDto(a)).ToListAsync(cancellationToken);
 
-                return ServiceResult<List<AuditLogDto>>.Success(logs);
+                return ServiceResult<List<AuditLogResponse>>.Success(logs);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
                     "Failed to get user activity logs for ConnectedId {ConnectedId}",
                     targetConnectedId);
-                return ServiceResult<List<AuditLogDto>>.Failure(
+                return ServiceResult<List<AuditLogResponse>>.Failure(
                     "Failed to retrieve user activity logs",
                     "USER_ACTIVITY_ERROR");
             }
@@ -711,7 +711,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 엔티티의 생성, 수정, 삭제 변경 사항을 자동으로 감지하여 감사 로그와 상세 변경 이력을 생성합니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogEntityChangeAsync<TEntity>(
+        public async Task<ServiceResult<AuditLogResponse>> LogEntityChangeAsync<TEntity>(
             TEntity? oldEntity,
             TEntity? newEntity,
             AuditActionType actionType,
@@ -769,7 +769,7 @@ namespace AuthHive.Auth.Services.Audit
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to log entity change for {EntityType}", typeof(TEntity).Name);
-                return ServiceResult<AuditLogDto>.Failure(
+                return ServiceResult<AuditLogResponse>.Failure(
                     "Failed to log entity change",
                     "ENTITY_CHANGE_ERROR");
             }
@@ -787,7 +787,7 @@ namespace AuthHive.Auth.Services.Audit
         /// 로그인 시도(성공/실패)를 감사 로그에 기록합니다.
         /// 반복된 실패 시도는 자동으로 심각도를 'Critical'로 격상시키고 보안 이벤트를 발생시킵니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogLoginAttemptAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogLoginAttemptAsync(
             string? username,
             bool success,
             string? ipAddress,
@@ -836,7 +836,7 @@ namespace AuthHive.Auth.Services.Audit
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to log login attempt for username: {Username}", username);
-                return ServiceResult<AuditLogDto>.Failure(
+                return ServiceResult<AuditLogResponse>.Failure(
                     "Failed to log login attempt",
                     "LOGIN_LOG_ERROR");
             }
@@ -845,7 +845,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 특정 리소스에 대한 권한 변경(부여/해제)을 감사 로그에 기록합니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogPermissionChangeAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogPermissionChangeAsync(
             string resourceType,
             string resourceId,
             string permission,
@@ -877,7 +877,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 특정 데이터에 대한 접근(예: 조회)이 발생했음을 감사 로그에 기록합니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogDataAccessAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogDataAccessAsync(
             string resourceType,
             string resourceId,
             string accessType,
@@ -906,7 +906,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 시스템, 조직, 또는 애플리케이션의 설정 변경을 감사 로그에 기록합니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogSettingChangeAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogSettingChangeAsync(
             string settingKey,
             string? oldValue,
             string? newValue,
@@ -944,7 +944,7 @@ namespace AuthHive.Auth.Services.Audit
         /// 일반적인 보안 이벤트를 감사 로그에 기록합니다.
         /// 모든 보안 이벤트는 중앙화된 생성 메서드를 통해 처리되어 일관성을 보장합니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogSecurityEventAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogSecurityEventAsync(
             string eventType,
             AuditEventSeverity severity,
             string description,
@@ -976,7 +976,7 @@ namespace AuthHive.Auth.Services.Audit
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to log security event of type: {EventType}", eventType);
-                return ServiceResult<AuditLogDto>.Failure(
+                return ServiceResult<AuditLogResponse>.Failure(
                     "Failed to log security event.",
                     "SECURITY_EVENT_ERROR");
             }
@@ -1314,7 +1314,7 @@ namespace AuthHive.Auth.Services.Audit
         /// <summary>
         /// 특정 감사 로그의 무결성(데이터 변조 여부 등)을 검증합니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogIntegrityCheckResult>> VerifyAuditLogIntegrityAsync(
+        public async Task<ServiceResult<AuditLogIntegrityCheckResultReadModel>> VerifyAuditLogIntegrityAsync(
             Guid auditLogId,
             Guid connectedId,
             CancellationToken cancellationToken = default) // ✅ 1. CancellationToken 파라미터 추가
@@ -1325,14 +1325,14 @@ namespace AuthHive.Auth.Services.Audit
                 var auditLog = await _auditLogRepository.GetByIdAsync(auditLogId, cancellationToken);
                 if (auditLog == null)
                 {
-                    return ServiceResult<AuditLogIntegrityCheckResult>.Failure(
+                    return ServiceResult<AuditLogIntegrityCheckResultReadModel>.Failure(
                         "Audit log not found",
                         "AUDIT_NOT_FOUND");
                 }
 
                 // TODO: 권한 검증 로직 추가 (connectedId가 이 로그를 볼 권한이 있는지)
 
-                var result = new AuditLogIntegrityCheckResult
+                var result = new AuditLogIntegrityCheckResultReadModel
                 {
                     IsValid = true,
                     CheckedAt = DateTime.UtcNow,
@@ -1364,17 +1364,17 @@ namespace AuthHive.Auth.Services.Audit
                 result.Hash = ComputeHash(dataToHash);
                 // if (auditLog.StoredHash != result.Hash) { result.IsValid = false; ... }
 
-                return ServiceResult<AuditLogIntegrityCheckResult>.Success(result);
+                return ServiceResult<AuditLogIntegrityCheckResultReadModel>.Success(result);
             }
             catch (OperationCanceledException)
             {
                 _logger.LogInformation("Audit log integrity verification was canceled.");
-                return ServiceResult<AuditLogIntegrityCheckResult>.Failure("Operation was canceled.", "OPERATION_CANCELED");
+                return ServiceResult<AuditLogIntegrityCheckResultReadModel>.Failure("Operation was canceled.", "OPERATION_CANCELED");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to verify audit log integrity for AuditLogId {AuditLogId}", auditLogId);
-                return ServiceResult<AuditLogIntegrityCheckResult>.Failure(
+                return ServiceResult<AuditLogIntegrityCheckResultReadModel>.Failure(
                     "Failed to verify integrity.",
                     "INTEGRITY_CHECK_ERROR");
             }
@@ -1385,7 +1385,7 @@ namespace AuthHive.Auth.Services.Audit
         /// UserActivityLog를 기반으로 고위험 보안 경고 감사 로그를 생성합니다.
         /// 이상 징후 탐지 시스템 등에서 감지한 위험 활동을 상세히 기록하는 데 사용됩니다.
         /// </summary>
-        public async Task<ServiceResult<AuditLogDto>> LogSecurityAlertAsync(
+        public async Task<ServiceResult<AuditLogResponse>> LogSecurityAlertAsync(
             AuditActionType actionType,
             string description,
             UserActivityLog activityLog,
@@ -1393,7 +1393,7 @@ namespace AuthHive.Auth.Services.Audit
         {
             if (activityLog == null)
             {
-                return ServiceResult<AuditLogDto>.Failure("UserActivityLog cannot be null.", "INVALID_ARGUMENT");
+                return ServiceResult<AuditLogResponse>.Failure("UserActivityLog cannot be null.", "INVALID_ARGUMENT");
             }
 
             try
@@ -1434,7 +1434,7 @@ namespace AuthHive.Auth.Services.Audit
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to log security alert for UserActivityLog {ActivityId}", activityLog.Id);
-                return ServiceResult<AuditLogDto>.Failure(
+                return ServiceResult<AuditLogResponse>.Failure(
                     "Failed to log security alert.",
                     "SECURITY_ALERT_ERROR");
             }
@@ -1508,9 +1508,9 @@ namespace AuthHive.Auth.Services.Audit
 
         #region Private Helper Methods
 
-        private AuditLogDto MapToDto(AuditLog entity)
+        private AuditLogResponse MapToDto(AuditLog entity)
         {
-            return new AuditLogDto
+            return new AuditLogResponse
             {
                 Id = entity.Id,
                 PerformedByConnectedId = entity.PerformedByConnectedId,
@@ -1796,13 +1796,13 @@ namespace AuthHive.Auth.Services.Audit
             return Convert.ToBase64String(hash);
         }
 
-        private byte[] ExportToJson(List<AuditLogDto> logs)
+        private byte[] ExportToJson(List<AuditLogResponse> logs)
         {
             var json = JsonConvert.SerializeObject(logs, Formatting.Indented);
             return System.Text.Encoding.UTF8.GetBytes(json);
         }
 
-        private byte[] ExportToCsv(List<AuditLogDto> logs)
+        private byte[] ExportToCsv(List<AuditLogResponse> logs)
         {
             // TODO: CSV 변환 로직 구현
             var csv = "Id,Action,Timestamp,Success\n";
@@ -1813,7 +1813,7 @@ namespace AuthHive.Auth.Services.Audit
             return System.Text.Encoding.UTF8.GetBytes(csv);
         }
 
-        private byte[] ExportToExcel(List<AuditLogDto> logs)
+        private byte[] ExportToExcel(List<AuditLogResponse> logs)
         {
             // TODO: Excel 변환 로직 구현 (EPPlus 등 사용)
             return ExportToCsv(logs); // 임시로 CSV 반환

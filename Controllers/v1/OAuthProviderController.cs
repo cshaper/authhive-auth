@@ -99,7 +99,7 @@ namespace AuthHive.Auth.Controllers.v1
         /// </summary>
         [HttpGet("{provider}/initiate")]
         [AllowAnonymous]
-        [ProducesResponseType(typeof(AuthenticationResponse), 200)]
+        [ProducesResponseType(typeof(AuthenticationResult), 200)]
         public async Task<IActionResult> InitiateAuth(
             [FromRoute] string provider,
             [FromQuery] string redirectUri,
@@ -108,8 +108,8 @@ namespace AuthHive.Auth.Controllers.v1
             var result = await _oauthProviderService.InitiateAuthAsync(
                 provider, redirectUri, scopes, HttpContext.RequestAborted);
 
-            // ✅ CS0411 해결: AuthenticationResponse 타입을 명시합니다.
-            return HandleResult<AuthenticationResponse>(result);
+            // ✅ CS0411 해결: AuthenticationResult 타입을 명시합니다.
+            return HandleResult<AuthenticationResult>(result);
         }
 
         /// <summary>
@@ -117,7 +117,7 @@ namespace AuthHive.Auth.Controllers.v1
         /// </summary>
         [HttpGet("{provider}/callback")]
         [AllowAnonymous]
-        [ProducesResponseType(typeof(AuthenticationResponse), 200)]
+        [ProducesResponseType(typeof(AuthenticationResult), 200)]
         public async Task<IActionResult> ProcessCallback(
             [FromRoute] string provider,
             [FromQuery] string code,
@@ -126,8 +126,8 @@ namespace AuthHive.Auth.Controllers.v1
             var result = await _oauthProviderService.ProcessCallbackAsync(
                 provider, code, state, HttpContext.RequestAborted);
 
-            // ✅ CS0411 해결: AuthenticationResponse 타입을 명시합니다.
-            return HandleResult<AuthenticationResponse>(result);
+            // ✅ CS0411 해결: AuthenticationResult 타입을 명시합니다.
+            return HandleResult<AuthenticationResult>(result);
         }
 
         #endregion

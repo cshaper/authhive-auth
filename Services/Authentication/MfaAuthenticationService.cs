@@ -110,16 +110,16 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region MFA 인증 플로우
 
-        public async Task<ServiceResult<MfaChallengeResponse>> InitiateMfaAsync(Guid userId, string method, Guid? sessionId = null)
+        public async Task<ServiceResult<MfaChallengeResult>> InitiateMfaAsync(Guid userId, string method, Guid? sessionId = null)
         {
             try
             {
                 var user = await _userRepository.GetByIdWithProfileAsync(userId);
-                if (user == null) return ServiceResult<MfaChallengeResponse>.Failure("User not found");
-                if (!Enum.TryParse<MfaMethod>(method, true, out var mfaMethod)) return ServiceResult<MfaChallengeResponse>.Failure($"Invalid MFA method: {method}");
+                if (user == null) return ServiceResult<MfaChallengeResult>.Failure("User not found");
+                if (!Enum.TryParse<MfaMethod>(method, true, out var mfaMethod)) return ServiceResult<MfaChallengeResult>.Failure($"Invalid MFA method: {method}");
 
                 var challengeId = Guid.NewGuid().ToString();
-                var challenge = new MfaChallengeResponse
+                var challenge = new MfaChallengeResult
                 {
                     ChallengeId = challengeId,
                     Method = mfaMethod,
@@ -136,7 +136,7 @@ namespace AuthHive.Auth.Services.Authentication
                 switch (mfaMethod)
                 {
                     case MfaMethod.Sms:
-                        if (string.IsNullOrEmpty(user.UserProfile?.PhoneNumber)) return ServiceResult<MfaChallengeResponse>.Failure("Phone number not configured");
+                        if (string.IsNullOrEmpty(user.UserProfile?.PhoneNumber)) return ServiceResult<MfaChallengeResult>.Failure("Phone number not configured");
                         var smsCode = GenerateCode();
                         await SendSmsCode(userId, user.UserProfile.PhoneNumber, smsCode);
                         await CacheCodeAsync(userId, Guid.Parse(challengeId), smsCode);
@@ -155,21 +155,21 @@ namespace AuthHive.Auth.Services.Authentication
 
                 await _auditService.LogActionAsync(GetSystemConnectedId(), "MFA Challenge Initiated", AuditActionType.SecurityEvent, RESOURCE_TYPE, userId.ToString(), true, $"Method: {method}, ChallengeId: {challengeId}");
 
-                return ServiceResult<MfaChallengeResponse>.Success(challenge);
+                return ServiceResult<MfaChallengeResult>.Success(challenge);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to initiate MFA for user {UserId}", userId);
                 await _auditService.LogActionAsync(GetSystemConnectedId(), "MFA Challenge Failed to Initiate", AuditActionType.SecurityEvent, RESOURCE_TYPE, userId.ToString(), false, $"Method: {method}, Error: {ex.Message}");
-                return ServiceResult<MfaChallengeResponse>.Failure("Failed to initiate MFA");
+                return ServiceResult<MfaChallengeResult>.Failure("Failed to initiate MFA");
             }
         }
-        public async Task<ServiceResult<AuthenticationResponse>> CompleteMfaAuthenticationAsync(Guid userId, string code, string method, Guid? sessionId = null)
+        public async Task<ServiceResult<AuthenticationResult>> CompleteMfaAuthenticationAsync(Guid userId, string code, string method, Guid? sessionId = null)
         {
             try
             {
                 var user = await _userRepository.GetByIdAsync(userId);
-                if (user == null) return ServiceResult<AuthenticationResponse>.Failure("User not found");
+                if (user == null) return ServiceResult<AuthenticationResult>.Failure("User not found");
                 bool isValid = await VerifyMfaCode(userId, code, method);
 
                 if (!isValid)
@@ -186,7 +186,7 @@ namespace AuthHive.Auth.Services.Authentication
                         success: false,
                         metadata: $"Method: {method}, Reason: Invalid Code");
 
-                    return ServiceResult<AuthenticationResponse>.Failure("Invalid MFA code");
+                    return ServiceResult<AuthenticationResult>.Failure("Invalid MFA code");
                 }
 
                 UpdateMethodLastUsedTime(userId, method);
@@ -201,27 +201,27 @@ namespace AuthHive.Auth.Services.Authentication
                     success: true,
                     metadata: $"Method: {method}");
 
-                var response = new AuthenticationResponse
+                var response = new AuthenticationResult
                 {
                     Success = true,
                     MfaVerified = true,
                     Message = "MFA verification successful"
                 };
 
-                return ServiceResult<AuthenticationResponse>.Success(response);
+                return ServiceResult<AuthenticationResult>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "MFA completion failed for user {UserId}", userId);
                 await RecordFailedAttempt(userId, method, "System Error");
-                return ServiceResult<AuthenticationResponse>.Failure("MFA verification failed");
+                return ServiceResult<AuthenticationResult>.Failure("MFA verification failed");
             }
         }
-        public async Task<ServiceResult<MfaChallengeResponse>> ResendMfaChallengeAsync(Guid userId, string challengeId)
+        public async Task<ServiceResult<MfaChallengeResult>> ResendMfaChallengeAsync(Guid userId, string challengeId)
         {
             var cacheKey = $"mfa_challenge_{userId}_{challengeId}";
-            var challenge = await _cacheService.GetAsync<MfaChallengeResponse>(cacheKey);
-            if (challenge == null) return ServiceResult<MfaChallengeResponse>.Failure("Challenge not found or expired");
+            var challenge = await _cacheService.GetAsync<MfaChallengeResult>(cacheKey);
+            if (challenge == null) return ServiceResult<MfaChallengeResult>.Failure("Challenge not found or expired");
             return await InitiateMfaAsync(userId, challenge.Method.ToString());
         }
         public async Task<ServiceResult> CancelMfaChallengeAsync(Guid userId, string challengeId)
@@ -287,7 +287,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// MFA 활성화 설정: 사용자 계정에 MFA를 활성화하고, 관련 설정을 업데이트합니다.
         /// </summary>
-        public async Task<ServiceResult<MfaSetupResponse>> EnableMfaAsync(
+        public async Task<ServiceResult<MfaSetupResult>> EnableMfaAsync(
              Guid userId,
              string method,
              MfaSetupRequest request)
@@ -296,12 +296,12 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 var user = await _userRepository.GetByIdWithProfileAsync(userId);
                 if (user == null)
-                    return ServiceResult<MfaSetupResponse>.Failure("User not found");
+                    return ServiceResult<MfaSetupResult>.Failure("User not found");
 
                 if (user.UserProfile == null) user.UserProfile = new UserProfileEntity();
 
                 if (!Enum.TryParse<MfaMethod>(method, true, out var mfaMethod))
-                    return ServiceResult<MfaSetupResponse>.Failure($"Invalid MFA method: {method}");
+                    return ServiceResult<MfaSetupResult>.Failure($"Invalid MFA method: {method}");
 
                 // 업데이트 전 상태 저장 (감사 로그용)
                 bool oldEnable = user.IsTwoFactorEnabled;
@@ -313,7 +313,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // TODO: 실제 TOTP Secret, SMS/Email Code 발송 로직 필요
 
-                var response = new MfaSetupResponse
+                var response = new MfaSetupResult
                 {
                     Success = true,
                     Method = mfaMethod,
@@ -331,12 +331,12 @@ namespace AuthHive.Auth.Services.Authentication
                     organizationId: null,
                     applicationId: null);
 
-                return ServiceResult<MfaSetupResponse>.Success(response);
+                return ServiceResult<MfaSetupResult>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to enable MFA for user {UserId}", userId);
-                return ServiceResult<MfaSetupResponse>.Failure("Failed to enable MFA");
+                return ServiceResult<MfaSetupResult>.Failure("Failed to enable MFA");
             }
         }
 
@@ -420,15 +420,15 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 새로운 MFA 방법을 추가합니다. (기존 메서드를 추가하는 것이 아니므로, 간단한 응답 반환)
         /// </summary>
-        public Task<ServiceResult<MfaMethodSetupResponse>> AddMfaMethodAsync(Guid userId, string method, MfaMethodSetupRequest request)
+        public Task<ServiceResult<MfaMethodSetupResult>> AddMfaMethodAsync(Guid userId, string method, MfaMethodSetupRequest request)
         {
             // 실제 구현은 EnableMfaAsync 내부에서 TotpSecret, PhoneNumber 등을 설정하는 로직에 포함됨.
             // 이 메서드는 외부 API (예: FIDO 등록)를 호출하는 래퍼 역할을 할 수 있음.
             _logger.LogWarning("AddMfaMethodAsync called for user {UserId}. Actual setup occurs in EnableMfaAsync.", userId);
 
             // TODO: IAuditService.LogSettingChangeAsync (Method Added/Initiated) 호출 필요
-            var response = new MfaMethodSetupResponse { Success = true, Method = method, Message = "Setup initiated." };
-            return Task.FromResult(ServiceResult<MfaMethodSetupResponse>.Success(response));
+            var response = new MfaMethodSetupResult { Success = true, Method = method, Message = "Setup initiated." };
+            return Task.FromResult(ServiceResult<MfaMethodSetupResult>.Success(response));
         }
 
         /// <summary>
@@ -489,11 +489,11 @@ namespace AuthHive.Auth.Services.Authentication
         /// 조직의 정책에 따라 사용 가능한 MFA 방법 목록을 가져옵니다.
         /// </summary>
         /// <param name="organizationId">조직 ID (null이면 시스템 기본 정책 적용)</param>
-        public async Task<ServiceResult<IEnumerable<MfaMethodDto>>> GetAvailableMfaMethodsAsync(
+        public async Task<ServiceResult<IEnumerable<MfaMethodResponse>>> GetAvailableMfaMethodsAsync(
             Guid? organizationId = null)
         {
             // 1. 조직 ID가 제공되면 정책을 로드합니다.
-            MfaPolicyDto policy;
+            MfaPolicyResponse policy;
             if (organizationId.HasValue && organizationId.Value != Guid.Empty)
             {
                 // TODO: IOrganizationSettingsRepository 또는 전용 Policy Service를 통해 정책 로드
@@ -502,7 +502,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     // 정책 로드 실패 시, 기본 허용 목록으로 대체하거나 에러 반환
                     _logger.LogWarning("Failed to load MFA policy for organization {OrgId}. Falling back to system defaults.", organizationId.Value);
-                    policy = new MfaPolicyDto { AllowedMethods = new List<string> { "totp", "sms", "email" } };
+                    policy = new MfaPolicyResponse { AllowedMethods = new List<string> { "totp", "sms", "email" } };
                 }
                 else
                 {
@@ -512,42 +512,42 @@ namespace AuthHive.Auth.Services.Authentication
             else
             {
                 // 조직 ID가 없으면 시스템 기본값을 임시로 사용
-                policy = new MfaPolicyDto { AllowedMethods = new List<string> { "totp", "sms", "email" } };
+                policy = new MfaPolicyResponse { AllowedMethods = new List<string> { "totp", "sms", "email" } };
             }
 
             // 2. 정책에 따라 허용된 메서드만 DTO로 매핑
-            var methods = new List<MfaMethodDto>();
+            var methods = new List<MfaMethodResponse>();
 
             if (policy.AllowedMethods.Contains("totp", StringComparer.OrdinalIgnoreCase))
-                methods.Add(new MfaMethodDto { Method = MfaMethod.Totp, DisplayInfo = "Authenticator App" });
+                methods.Add(new MfaMethodResponse { Method = MfaMethod.Totp, DisplayInfo = "Authenticator App" });
 
             if (policy.AllowedMethods.Contains("sms", StringComparer.OrdinalIgnoreCase))
-                methods.Add(new MfaMethodDto { Method = MfaMethod.Sms, DisplayInfo = "SMS" });
+                methods.Add(new MfaMethodResponse { Method = MfaMethod.Sms, DisplayInfo = "SMS" });
 
             if (policy.AllowedMethods.Contains("email", StringComparer.OrdinalIgnoreCase))
-                methods.Add(new MfaMethodDto { Method = MfaMethod.Email, DisplayInfo = "Email" });
+                methods.Add(new MfaMethodResponse { Method = MfaMethod.Email, DisplayInfo = "Email" });
 
             // TODO: BackupCode는 일반적으로 항상 사용 가능하므로, 별도 정책 확인 필요
 
-            return ServiceResult<IEnumerable<MfaMethodDto>>.Success(methods);
+            return ServiceResult<IEnumerable<MfaMethodResponse>>.Success(methods);
         }
 
         /// <summary>
         /// 특정 사용자가 현재 설정한 MFA 방법 목록과 설정 상태를 가져옵니다.
         /// </summary>
         /// <param name="userId">사용자 ID</param>
-        public async Task<ServiceResult<IEnumerable<MfaMethodDto>>> GetUserMfaMethodsAsync(Guid userId)
+        public async Task<ServiceResult<IEnumerable<MfaMethodResponse>>> GetUserMfaMethodsAsync(Guid userId)
         {
             try
             {
                 var user = await _userRepository.GetByIdWithProfileAsync(userId);
                 if (user == null)
-                    return ServiceResult<IEnumerable<MfaMethodDto>>.Failure("User not found");
+                    return ServiceResult<IEnumerable<MfaMethodResponse>>.Failure("User not found");
 
-                var methods = new List<MfaMethodDto>();
+                var methods = new List<MfaMethodResponse>();
 
                 // TOTP 설정 여부 확인
-                methods.Add(new MfaMethodDto
+                methods.Add(new MfaMethodResponse
                 {
                     Method = MfaMethod.Totp,
                     IsConfigured = !string.IsNullOrEmpty(user.TotpSecret),
@@ -558,7 +558,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // SMS 설정 여부 확인
                 if (user.UserProfile != null)
                 {
-                    methods.Add(new MfaMethodDto
+                    methods.Add(new MfaMethodResponse
                     {
                         Method = MfaMethod.Sms,
                         IsConfigured = !string.IsNullOrEmpty(user.UserProfile.PhoneNumber),
@@ -567,7 +567,7 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 // Email 설정 여부 확인 (기본적으로 가능)
-                methods.Add(new MfaMethodDto
+                methods.Add(new MfaMethodResponse
                 {
                     Method = MfaMethod.Email,
                     IsConfigured = true, // 이메일은 사용자 계정 자체이므로 항상 true
@@ -575,7 +575,7 @@ namespace AuthHive.Auth.Services.Authentication
                 });
 
                 // BackupCode 설정 여부 확인
-                methods.Add(new MfaMethodDto
+                methods.Add(new MfaMethodResponse
                 {
                     Method = MfaMethod.BackupCode,
                     IsConfigured = user.BackupCodes?.Any() == true,
@@ -584,12 +584,12 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // TODO: IAuditService.LogDataAccessAsync 호출 필요 (민감한 정보 조회)
 
-                return ServiceResult<IEnumerable<MfaMethodDto>>.Success(methods);
+                return ServiceResult<IEnumerable<MfaMethodResponse>>.Success(methods);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get user MFA methods for user {UserId}", userId);
-                return ServiceResult<IEnumerable<MfaMethodDto>>.Failure("Failed to get MFA methods");
+                return ServiceResult<IEnumerable<MfaMethodResponse>>.Failure("Failed to get MFA methods");
             }
         }
         #endregion
@@ -598,17 +598,17 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// TOTP Secret을 생성하고, 캐시에 임시 저장합니다. (설정 시작)
         /// </summary>
-        public async Task<ServiceResult<TotpSecretResponse>> GenerateTotpSecretAsync(Guid userId)
+        public async Task<ServiceResult<TotpSecretResult>> GenerateTotpSecretAsync(Guid userId)
         {
             try
             {
                 var user = await _userRepository.GetByIdAsync(userId);
-                if (user == null) return ServiceResult<TotpSecretResponse>.Failure("User not found");
+                if (user == null) return ServiceResult<TotpSecretResult>.Failure("User not found");
 
                 var secretKey = GenerateSecureToken();
                 var setupInfo = _twoFactorAuthenticator.GenerateSetupCode(ISSUER, user.Email, secretKey, false, 3);
 
-                var response = new TotpSecretResponse
+                var response = new TotpSecretResult
                 {
                     Secret = secretKey,
                     QrCodeUrl = setupInfo.QrCodeSetupImageUrl,
@@ -620,12 +620,12 @@ namespace AuthHive.Auth.Services.Authentication
                 // ⭐️ ICacheService.SetAsync: Secret을 10분 동안 임시 저장
                 await _cacheService.SetAsync($"totp_setup_{userId}", secretKey, TimeSpan.FromMinutes(10));
 
-                return ServiceResult<TotpSecretResponse>.Success(response);
+                return ServiceResult<TotpSecretResult>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to generate TOTP secret for user {UserId}", userId);
-                return ServiceResult<TotpSecretResponse>.Failure("Failed to generate TOTP secret");
+                return ServiceResult<TotpSecretResult>.Failure("Failed to generate TOTP secret");
             }
         }
 
@@ -678,12 +678,12 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 일회용 백업 코드를 생성하여 사용자 DB에 저장하고, 사용자에게 코드를 반환합니다.
         /// </summary>
-        public async Task<ServiceResult<BackupCodesResponse>> GenerateBackupCodesAsync(Guid userId, int count = 10)
+        public async Task<ServiceResult<BackupCodesResult>> GenerateBackupCodesAsync(Guid userId, int count = 10)
         {
             try
             {
                 var user = await _userRepository.GetByIdAsync(userId);
-                if (user == null) return ServiceResult<BackupCodesResponse>.Failure("User not found");
+                if (user == null) return ServiceResult<BackupCodesResult>.Failure("User not found");
 
                 var codes = Enumerable.Range(0, count).Select(_ => GenerateBackupCode()).ToList();
 
@@ -700,23 +700,23 @@ namespace AuthHive.Auth.Services.Authentication
                     organizationId: null,
                     applicationId: null);
 
-                return ServiceResult<BackupCodesResponse>.Success(new BackupCodesResponse { Codes = codes, GeneratedAt = DateTime.UtcNow, RemainingCount = count });
+                return ServiceResult<BackupCodesResult>.Success(new BackupCodesResult { Codes = codes, GeneratedAt = DateTime.UtcNow, RemainingCount = count });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to generate backup codes for user {UserId}", userId);
-                return ServiceResult<BackupCodesResponse>.Failure("Failed to generate backup codes");
+                return ServiceResult<BackupCodesResult>.Failure("Failed to generate backup codes");
             }
         }
 
         /// <summary>
         /// 일회용 백업 코드를 사용하여 MFA를 통과하고, 사용된 코드를 제거합니다.
         /// </summary>
-        public async Task<ServiceResult<AuthenticationResponse>> UseBackupCodeAsync(Guid userId, string code, Guid? sessionId = null)
+        public async Task<ServiceResult<AuthenticationResult>> UseBackupCodeAsync(Guid userId, string code, Guid? sessionId = null)
         {
             var user = await _userRepository.GetByIdAsync(userId);
             if (user?.BackupCodes == null || !user.BackupCodes.Any())
-                return ServiceResult<AuthenticationResponse>.Failure("No backup codes available");
+                return ServiceResult<AuthenticationResult>.Failure("No backup codes available");
 
             var hashedCode = HashCode(code);
 
@@ -730,7 +730,7 @@ namespace AuthHive.Auth.Services.Authentication
                     userId,
                     new Dictionary<string, object> { { "Reason", "Invalid Code" } });
 
-                return ServiceResult<AuthenticationResponse>.Failure("Invalid backup code");
+                return ServiceResult<AuthenticationResult>.Failure("Invalid backup code");
             }
 
             // 코드 제거 및 업데이트
@@ -745,7 +745,7 @@ namespace AuthHive.Auth.Services.Authentication
                 userId,
                 new Dictionary<string, object> { { "RemainingCodes", user.BackupCodes.Count } });
 
-            return ServiceResult<AuthenticationResponse>.Success(new AuthenticationResponse { Success = true, MfaVerified = true, Message = "Backup code used successfully" });
+            return ServiceResult<AuthenticationResult>.Success(new AuthenticationResult { Success = true, MfaVerified = true, Message = "Backup code used successfully" });
         }
         #endregion
 
@@ -754,7 +754,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// ⭐️ CS0535 해결 ⭐️ 신뢰 장치 목록 조회
         /// </summary>
-        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid userId)
+        public async Task<ServiceResult<IEnumerable<TrustedDeviceResponse>>> GetTrustedDevicesAsync(Guid userId)
         {
             try
             {
@@ -762,10 +762,10 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (!securityResult.IsSuccess || securityResult.Data == null)
                 {
-                    return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure(securityResult.ErrorMessage ?? "Failed to get trusted devices from security service.");
+                    return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Failure(securityResult.ErrorMessage ?? "Failed to get trusted devices from security service.");
                 }
 
-                var dtos = securityResult.Data.Select(sourceDto => new TrustedDeviceDto
+                var dtos = securityResult.Data.Select(sourceDto => new TrustedDeviceResponse
                 {
                     DeviceId = sourceDto.DeviceId,
                     DeviceName = sourceDto.DeviceName,
@@ -778,9 +778,9 @@ namespace AuthHive.Auth.Services.Authentication
                 }).ToList();
 
                 // TODO: IAuditService.LogDataAccessAsync 호출 필요 (민감한 정보 조회)
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Success(dtos);
             }
-            catch (Exception ex) { _logger.LogError(ex, "Failed to get trusted devices for user {UserId}", userId); return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure("Failed to get trusted devices."); }
+            catch (Exception ex) { _logger.LogError(ex, "Failed to get trusted devices for user {UserId}", userId); return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Failure("Failed to get trusted devices."); }
         }
 
         /// <summary>
@@ -816,11 +816,11 @@ namespace AuthHive.Auth.Services.Authentication
         /// MFA 정책 조회: 조직 설정에서 MFA 정책을 비동기적으로 로드합니다.
         /// (TODO 해결 및 감사 로그 추가)
         /// </summary>
-        public async Task<ServiceResult<MfaPolicyDto>> GetMfaPolicyAsync(Guid organizationId)
+        public async Task<ServiceResult<MfaPolicyResponse>> GetMfaPolicyAsync(Guid organizationId)
         {
             if (organizationId == Guid.Empty)
             {
-                return ServiceResult<MfaPolicyDto>.Failure("Organization ID is required to fetch MFA policy.");
+                return ServiceResult<MfaPolicyResponse>.Failure("Organization ID is required to fetch MFA policy.");
             }
 
             try
@@ -834,7 +834,7 @@ namespace AuthHive.Auth.Services.Authentication
                     organizationId, "Security", "MFA_ALLOWED_METHODS");
 
                 // 2. 정책 로드 후 DTO 구성
-                var policy = new MfaPolicyDto
+                var policy = new MfaPolicyResponse
                 {
                     OrganizationId = organizationId,
                     IsRequired = isRequiredSetting?.SettingValue?.ToLower() == "true", // 설정값 반영
@@ -858,7 +858,7 @@ namespace AuthHive.Auth.Services.Authentication
                     additionalInfo: new Dictionary<string, object> { { "OrganizationId", organizationId } }
                 );
 
-                return ServiceResult<MfaPolicyDto>.Success(policy);
+                return ServiceResult<MfaPolicyResponse>.Success(policy);
             }
             catch (Exception ex)
             {
@@ -873,7 +873,7 @@ namespace AuthHive.Auth.Services.Authentication
                     additionalInfo: new Dictionary<string, object> { { "Error", ex.Message } }
                 );
 
-                return ServiceResult<MfaPolicyDto>.Failure("Failed to retrieve MFA policy.");
+                return ServiceResult<MfaPolicyResponse>.Failure("Failed to retrieve MFA policy.");
             }
         }
 
@@ -900,7 +900,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 응급 접근
         public async Task<ServiceResult<MfaBypassTokenDto>> GenerateMfaBypassTokenAsync(Guid userId, string reason, TimeSpan? validity = null) { /* ... 구현 생략 ... */ return await Task.FromResult(ServiceResult<MfaBypassTokenDto>.Failure("Implementation skipped")); }
-        public async Task<ServiceResult<AuthenticationResponse>> UseMfaBypassTokenAsync(string bypassToken) { /* ... 구현 생략 ... */ return await Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Implementation skipped")); }
+        public async Task<ServiceResult<AuthenticationResult>> UseMfaBypassTokenAsync(string bypassToken) { /* ... 구현 생략 ... */ return await Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Implementation skipped")); }
         public async Task<ServiceResult> RequestMfaRecoveryAsync(string email, MfaRecoveryRequest request, string ipAddress) { /* ... 구현 생략 ... */ return await Task.FromResult(ServiceResult.Success("Implementation skipped")); }
         #endregion
 

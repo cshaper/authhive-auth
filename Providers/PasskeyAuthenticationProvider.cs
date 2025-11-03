@@ -175,7 +175,7 @@ namespace AuthHive.Auth.Providers
                 return ServiceResult<AuthenticationOutcome>.Failure("Credential ID is missing in passkey response.", "INVALID_RESPONSE");
             }
             
-            var verificationResult = await _fidoService.VerifyAuthenticationResponseAsync(
+            var verificationResult = await _fidoService.VerifyAuthenticationResultAsync(
                 request.BiometricCredentialId,
                 request.PasskeyResponse,
                 request.PasskeyChallenge ?? "",

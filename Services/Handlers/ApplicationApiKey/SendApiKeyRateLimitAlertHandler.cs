@@ -9,7 +9,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Models.Audit;
-using AuthHive.Core.Enums.Core; // ServiceResult<AuditLogDto> (LogActionAsync 반환 타입)
+using AuthHive.Core.Enums.Core; // ServiceResult<AuditLogResponse> (LogActionAsync 반환 타입)
 
 namespace AuthHive.Auth.Handlers.ApplicationApiKey
 {

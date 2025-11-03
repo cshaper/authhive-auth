@@ -82,7 +82,7 @@ namespace AuthHive.Auth.Services.Authentication
 
 
         #region Main Authentication Flow
-        public async Task<ServiceResult<AuthenticationResponse>> AuthenticateAsync(AuthenticationRequest request)
+        public async Task<ServiceResult<AuthenticationResult>> AuthenticateAsync(AuthenticationRequest request)
         {
             try
             {
@@ -90,18 +90,18 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var securityCheckResult = await PreAuthenticationSecurityCheckAsync(request);
                 if (!securityCheckResult.IsSuccess)
-                    return ServiceResult<AuthenticationResponse>.Failure(securityCheckResult.ErrorMessage ?? "Pre-authentication security check failed.");
+                    return ServiceResult<AuthenticationResult>.Failure(securityCheckResult.ErrorMessage ?? "Pre-authentication security check failed.");
 
                 var primaryAuthResult = await PerformPrimaryAuthenticationAsync(request);
                 if (!primaryAuthResult.IsSuccess || primaryAuthResult.Data == null)
                     // FINAL FIX: Provide a default message if ErrorMessage is null.
-                    return ServiceResult<AuthenticationResponse>.Failure(primaryAuthResult.ErrorMessage ?? "Primary authentication failed.");
+                    return ServiceResult<AuthenticationResult>.Failure(primaryAuthResult.ErrorMessage ?? "Primary authentication failed.");
 
                 var authResponse = primaryAuthResult.Data;
 
                 var mfaHandledResult = await HandleMfaFlowAsync(request, authResponse);
                 if (!mfaHandledResult.IsSuccess || mfaHandledResult.Data == null)
-                    return ServiceResult<AuthenticationResponse>.Failure(mfaHandledResult.ErrorMessage ?? "MFA processing failed.");
+                    return ServiceResult<AuthenticationResult>.Failure(mfaHandledResult.ErrorMessage ?? "MFA processing failed.");
 
                 authResponse = mfaHandledResult.Data;
 
@@ -111,12 +111,12 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 _logger.LogInformation("Authentication process requires MFA for user {UserId}", authResponse.UserId);
-                return ServiceResult<AuthenticationResponse>.Success(authResponse);
+                return ServiceResult<AuthenticationResult>.Success(authResponse);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "An unexpected error occurred during authentication orchestration for method {Method}", request.Method);
-                return ServiceResult<AuthenticationResponse>.Failure("An unexpected server error occurred during authentication.");
+                return ServiceResult<AuthenticationResult>.Failure("An unexpected server error occurred during authentication.");
             }
         }
         #endregion
@@ -145,7 +145,7 @@ namespace AuthHive.Auth.Services.Authentication
             return ServiceResult.Success();
         }
 
-        private Task<ServiceResult<AuthenticationResponse>> PerformPrimaryAuthenticationAsync(AuthenticationRequest request)
+        private Task<ServiceResult<AuthenticationResult>> PerformPrimaryAuthenticationAsync(AuthenticationRequest request)
         {
             return request.Method switch
             {
@@ -153,54 +153,54 @@ namespace AuthHive.Auth.Services.Authentication
                 AuthenticationMethod.OAuth => HandleOAuthAuthenticationAsync(request),
                 AuthenticationMethod.SocialLogin => HandleSocialAuthenticationAsync(request),
                 AuthenticationMethod.ApiKey => HandleApiKeyAuthenticationAsync(request), // FIX: Call the new helper
-                _ => Task.FromResult(ServiceResult<AuthenticationResponse>.Failure($"Unsupported authentication method: {request.Method}"))
+                _ => Task.FromResult(ServiceResult<AuthenticationResult>.Failure($"Unsupported authentication method: {request.Method}"))
             };
         }
 
-        private Task<ServiceResult<AuthenticationResponse>> HandlePasswordAuthenticationAsync(AuthenticationRequest request)
+        private Task<ServiceResult<AuthenticationResult>> HandlePasswordAuthenticationAsync(AuthenticationRequest request)
         {
             if (string.IsNullOrEmpty(request.Username) || string.IsNullOrEmpty(request.Password))
             {
-                return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Username and password are required."));
+                return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Username and password are required."));
             }
             return _passwordService.AuthenticateWithPasswordAsync(request.Username, request.Password, request.OrganizationId);
         }
 
-        private Task<ServiceResult<AuthenticationResponse>> HandleSocialAuthenticationAsync(AuthenticationRequest request)
+        private Task<ServiceResult<AuthenticationResult>> HandleSocialAuthenticationAsync(AuthenticationRequest request)
         {
             if (string.IsNullOrEmpty(request.SocialToken) || string.IsNullOrEmpty(request.SocialProvider))
             {
-                return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Social token and provider are required."));
+                return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Social token and provider are required."));
             }
             return _socialAuthService.AuthenticateWithSocialAsync(request.SocialProvider, request.SocialToken, request.OrganizationId);
         }
 
-        private Task<ServiceResult<AuthenticationResponse>> HandleOAuthAuthenticationAsync(AuthenticationRequest request)
+        private Task<ServiceResult<AuthenticationResult>> HandleOAuthAuthenticationAsync(AuthenticationRequest request)
         {
             // FIX 1: Add null check for RedirectUri
             if (string.IsNullOrEmpty(request.Code) || string.IsNullOrEmpty(request.Provider) || string.IsNullOrEmpty(request.RedirectUri))
-                return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("OAuth provider, authorization code, and redirect URI are required."));
+                return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("OAuth provider, authorization code, and redirect URI are required."));
 
             return _socialAuthService.AuthenticateWithOAuthAsync(request.Provider, request.Code, request.RedirectUri, request.State);
         }
 
         // FINAL FIX: Add the missing helper method for API Key authentication
-        private Task<ServiceResult<AuthenticationResponse>> HandleApiKeyAuthenticationAsync(AuthenticationRequest request)
+        private Task<ServiceResult<AuthenticationResult>> HandleApiKeyAuthenticationAsync(AuthenticationRequest request)
         {
             if (string.IsNullOrEmpty(request.ApiKey))
             {
-                return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("API Key is required."));
+                return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("API Key is required."));
             }
             return _apiKeyAuthService.AuthenticateWithApiKeyAsync(request.ApiKey, request.ApiSecret);
         }
 
-        private async Task<ServiceResult<AuthenticationResponse>> HandleMfaFlowAsync(AuthenticationRequest request, AuthenticationResponse primaryResponse)
+        private async Task<ServiceResult<AuthenticationResult>> HandleMfaFlowAsync(AuthenticationRequest request, AuthenticationResult primaryResponse)
         {
-            if (!primaryResponse.UserId.HasValue) return ServiceResult<AuthenticationResponse>.Success(primaryResponse);
+            if (!primaryResponse.UserId.HasValue) return ServiceResult<AuthenticationResult>.Success(primaryResponse);
 
             var mfaRequirementResult = await _authCacheService.GetMfaRequirementAsync(primaryResponse.UserId.Value, request.OrganizationId);
             if (!mfaRequirementResult.IsSuccess || mfaRequirementResult.Data?.IsRequired != true)
-                return ServiceResult<AuthenticationResponse>.Success(primaryResponse);
+                return ServiceResult<AuthenticationResult>.Success(primaryResponse);
 
             if (!string.IsNullOrEmpty(request.MfaCode))
             {
@@ -209,7 +209,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 var mfaVerifyResult = await _mfaService.CompleteMfaAuthenticationAsync(primaryResponse.UserId.Value, request.MfaCode, mfaMethodToVerify);
                 if (!mfaVerifyResult.IsSuccess)
-                    return ServiceResult<AuthenticationResponse>.Failure(mfaVerifyResult.ErrorMessage ?? "MFA verification failed.");
+                    return ServiceResult<AuthenticationResult>.Failure(mfaVerifyResult.ErrorMessage ?? "MFA verification failed.");
 
                 primaryResponse.MfaVerified = true;
             }
@@ -222,13 +222,13 @@ namespace AuthHive.Auth.Services.Authentication
                     primaryResponse.MfaMethods = availableMethodsResult.Data.EnabledMethods.ToList();
                 }
             }
-            return ServiceResult<AuthenticationResponse>.Success(primaryResponse);
+            return ServiceResult<AuthenticationResult>.Success(primaryResponse);
         }
 
-        private async Task<ServiceResult<AuthenticationResponse>> PostAuthenticationProcessingAsync(AuthenticationRequest request, AuthenticationResponse response)
+        private async Task<ServiceResult<AuthenticationResult>> PostAuthenticationProcessingAsync(AuthenticationRequest request, AuthenticationResult response)
         {
             if (!response.ConnectedId.HasValue)
-                return ServiceResult<AuthenticationResponse>.Failure("ConnectedId is missing for session creation.");
+                return ServiceResult<AuthenticationResult>.Failure("ConnectedId is missing for session creation.");
 
             var sessionResult = await _sessionService.CreateSessionAsync(new CreateSessionRequest
             {
@@ -238,13 +238,13 @@ namespace AuthHive.Auth.Services.Authentication
             });
 
             if (!sessionResult.IsSuccess || sessionResult.Data == null || !sessionResult.Data.SessionId.HasValue)
-                return ServiceResult<AuthenticationResponse>.Failure(sessionResult.ErrorMessage ?? "Failed to create session.");
+                return ServiceResult<AuthenticationResult>.Failure(sessionResult.ErrorMessage ?? "Failed to create session.");
 
             var sessionId = sessionResult.Data.SessionId.Value;
             var tokenResult = await _tokenService.GenerateTokensAsync(sessionId);
 
             if (!tokenResult.IsSuccess || tokenResult.Data == null)
-                return ServiceResult<AuthenticationResponse>.Failure(tokenResult.ErrorMessage ?? "Failed to generate tokens.");
+                return ServiceResult<AuthenticationResult>.Failure(tokenResult.ErrorMessage ?? "Failed to generate tokens.");
 
             response.AccessToken = tokenResult.Data.AccessToken;
             response.RefreshToken = tokenResult.Data.RefreshToken;
@@ -296,7 +296,7 @@ namespace AuthHive.Auth.Services.Authentication
                 });
             }
 
-            return ServiceResult<AuthenticationResponse>.Success(response);
+            return ServiceResult<AuthenticationResult>.Success(response);
         }
         #endregion
 
@@ -358,7 +358,7 @@ namespace AuthHive.Auth.Services.Authentication
         #endregion
 
         #region Delegated Methods
-        public Task<ServiceResult<AuthenticationResponse>> RegisterAsync(string email, string password, string displayName, Guid? organizationId = null)
+        public Task<ServiceResult<AuthenticationResult>> RegisterAsync(string email, string password, string displayName, Guid? organizationId = null)
             => _passwordService.RegisterAsync(email, password, displayName, organizationId);
 
         public Task<ServiceResult<PasswordResetToken>> RequestPasswordResetAsync(string email, Guid? organizationId = null)

@@ -99,7 +99,7 @@ namespace AuthHive.Auth.Providers.OAuth
         }
 
         /// <inheritdoc />
-        public async Task<ServiceResult<OAuthTokenResponse>> ExchangeCodeForTokenAsync(
+        public async Task<ServiceResult<OAuthTokenResult>> ExchangeCodeForTokenAsync(
             string code,
             string redirectUri)
         {
@@ -110,7 +110,7 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (string.IsNullOrEmpty(clientId))
                 {
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Kakao OAuth client ID not configured", "CONFIG_ERROR");
                 }
 
@@ -139,13 +139,13 @@ namespace AuthHive.Auth.Providers.OAuth
                 {
                     _logger.LogError("Kakao token exchange failed: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Failed to exchange authorization code", "TOKEN_EXCHANGE_ERROR");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<JsonElement>(responseContent);
 
-                var tokenResponse = new OAuthTokenResponse
+                var tokenResponse = new OAuthTokenResult
                 {
                     AccessToken = tokenData.GetProperty("access_token").GetString() ?? string.Empty,
                     RefreshToken = tokenData.TryGetProperty("refresh_token", out var refreshToken)
@@ -165,12 +165,12 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 _logger.LogInformation("Successfully exchanged Kakao OAuth code for tokens");
 
-                return ServiceResult<OAuthTokenResponse>.Success(tokenResponse);
+                return ServiceResult<OAuthTokenResult>.Success(tokenResponse);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to exchange Kakao OAuth code for token");
-                return ServiceResult<OAuthTokenResponse>.Failure(
+                return ServiceResult<OAuthTokenResult>.Failure(
                     "Failed to exchange authorization code", "TOKEN_EXCHANGE_ERROR");
             }
         }
@@ -247,7 +247,7 @@ namespace AuthHive.Auth.Providers.OAuth
         }
 
         /// <inheritdoc />
-        public async Task<ServiceResult<OAuthTokenResponse>> RefreshTokenAsync(string refreshToken)
+        public async Task<ServiceResult<OAuthTokenResult>> RefreshTokenAsync(string refreshToken)
         {
             try
             {
@@ -256,7 +256,7 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (string.IsNullOrEmpty(clientId))
                 {
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Kakao OAuth client ID not configured", "CONFIG_ERROR");
                 }
 
@@ -284,13 +284,13 @@ namespace AuthHive.Auth.Providers.OAuth
                 {
                     _logger.LogError("Kakao token refresh failed: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Failed to refresh token", "TOKEN_REFRESH_ERROR");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<JsonElement>(responseContent);
 
-                var tokenResponse = new OAuthTokenResponse
+                var tokenResponse = new OAuthTokenResult
                 {
                     AccessToken = tokenData.GetProperty("access_token").GetString() ?? string.Empty,
                     // Kakao는 refresh_token을 갱신할 수도, 안 할 수도 있음
@@ -303,12 +303,12 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 _logger.LogInformation("Successfully refreshed Kakao OAuth token");
 
-                return ServiceResult<OAuthTokenResponse>.Success(tokenResponse);
+                return ServiceResult<OAuthTokenResult>.Success(tokenResponse);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to refresh Kakao OAuth token");
-                return ServiceResult<OAuthTokenResponse>.Failure(
+                return ServiceResult<OAuthTokenResult>.Failure(
                     "Failed to refresh token", "TOKEN_REFRESH_ERROR");
             }
         }

@@ -134,7 +134,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 // 사용자에게 적용될 잠금 정책을 가져옵니다. (이 예제에서는 시스템 기본 정책을 사용)
                 var policyResult = await GetPasswordPolicyAsync(null, cancellationToken);
-                var policy = policyResult.Data ?? GetDefaultPasswordPolicyDto();
+                var policy = policyResult.Data ?? GetDefaultPasswordPolicyResponse();
 
                 // 실패 횟수가 정책의 최대 허용치를 초과했는지 확인합니다.
                 if (user.FailedLoginAttempts >= policy.MaxFailedAttempts)
@@ -367,7 +367,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 지정된 조직 또는 시스템의 패스워드 정책을 조회합니다. 조직 계층 구조를 따라 상속된 정책을 찾습니다.
         /// </summary>
-        public async Task<ServiceResult<PasswordPolicyDto>> GetPasswordPolicyAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<PasswordPolicyResponse>> GetPasswordPolicyAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -376,22 +376,22 @@ namespace AuthHive.Auth.Services.Authentication
                 var policyDto = await _cacheService.GetOrSetAsync(cacheKey, async () =>
                 {
                     var policyEntity = await LoadPasswordPolicyWithInheritanceAsync(organizationId, cancellationToken);
-                    return _mapper.Map<PasswordPolicyDto>(policyEntity);
+                    return _mapper.Map<PasswordPolicyResponse>(policyEntity);
                 }, TimeSpan.FromHours(1), cancellationToken);
 
-                return ServiceResult<PasswordPolicyDto>.Success(policyDto);
+                return ServiceResult<PasswordPolicyResponse>.Success(policyDto);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "조직({OrganizationId})의 패스워드 정책 조회 실패", organizationId);
-                return ServiceResult<PasswordPolicyDto>.Failure("패스워드 정책 조회 실패", "GET_POLICY_FAILED");
+                return ServiceResult<PasswordPolicyResponse>.Failure("패스워드 정책 조회 실패", "GET_POLICY_FAILED");
             }
         }
 
         /// <summary>
         /// 특정 조직의 커스텀 패스워드 정책을 설정합니다.
         /// </summary>
-        public async Task<ServiceResult> SetPasswordPolicyAsync(Guid organizationId, PasswordPolicyDto policyDto, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult> SetPasswordPolicyAsync(Guid organizationId, PasswordPolicyResponse policyDto, CancellationToken cancellationToken = default)
         {
             await _unitOfWork.BeginTransactionAsync(cancellationToken);
             try
@@ -490,15 +490,15 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 기본 패스워드 정책 엔티티를 DTO로 변환하여 반환합니다.
         /// </summary>
-        private PasswordPolicyDto GetDefaultPasswordPolicyDto()
+        private PasswordPolicyResponse GetDefaultPasswordPolicyResponse()
         {
-            return _mapper.Map<PasswordPolicyDto>(GetDefaultPasswordPolicy());
+            return _mapper.Map<PasswordPolicyResponse>(GetDefaultPasswordPolicy());
         }
 
         /// <summary>
         /// DTO 형태로 전달된 패스워드 정책의 유효성을 검사합니다.
         /// </summary>
-        private ServiceResult ValidatePasswordPolicy(PasswordPolicyDto policy)
+        private ServiceResult ValidatePasswordPolicy(PasswordPolicyResponse policy)
         {
             if (policy == null) return ServiceResult.Failure("패스워드 정책은 null일 수 없습니다.", "POLICY_REQUIRED");
             // 필요에 따라 최소/최대 길이 제약 등 더 많은 유효성 검사 로직 추가 가능
@@ -508,13 +508,13 @@ namespace AuthHive.Auth.Services.Authentication
         // 아래는 아직 구현되지 않은 메서드들입니다.
         public Task<ServiceResult<IEnumerable<SecurityEventDto>>> GetSecurityEventsAsync(Guid userId, DateTime? from = null, DateTime? to = null, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult> RegisterTrustedDeviceAsync(Guid userId, TrustedDeviceRequest request, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<IEnumerable<TrustedDeviceResponse>>> GetTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult<bool>> IsTrustedDeviceAsync(Guid userId, string deviceId, string deviceFingerprint, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult> RemoveTrustedDeviceAsync(Guid userId, string deviceId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult<int>> RemoveAllTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult> CheckAndNotifyNewDeviceAsync(Guid userId, string deviceId, string fingerprint, string? location, string ipAddress, string? userAgent, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task<ServiceResult<AccountSecuritySettingsDto>> GetSecuritySettingsAsync(Guid connectedId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task<ServiceResult> UpdateSecuritySettingsAsync(Guid connectedId, AccountSecuritySettingsDto settingsDto, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult<AccountSecuritySettingsResponse>> GetSecuritySettingsAsync(Guid connectedId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ServiceResult> UpdateSecuritySettingsAsync(Guid connectedId, AccountSecuritySettingsResponse settingsDto, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult<PasswordExpirationInfo>> CheckPasswordExpirationAsync(Guid userId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult<bool>> CheckPasswordHistoryAsync(Guid userId, string newPasswordHash, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<ServiceResult> ReportSuspiciousActivityAsync(Guid userId, SuspiciousActivityReport report, CancellationToken cancellationToken = default) => throw new NotImplementedException();

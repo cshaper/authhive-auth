@@ -101,7 +101,7 @@ namespace AuthHive.Auth.Services.Authentication
         #endregion
 
         #region 핵심 인증 로직
-        public async Task<ServiceResult<AuthenticationResponse>> RegisterAsync(
+        public async Task<ServiceResult<AuthenticationResult>> RegisterAsync(
             string email,
             string password,
             string displayName,
@@ -113,13 +113,13 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 if (await _context.Users.AnyAsync(u => u.Email == email, cancellationToken))
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("이미 존재하는 이메일입니다.");
+                    return ServiceResult<AuthenticationResult>.Failure("이미 존재하는 이메일입니다.");
                 }
 
                 var validationResult = await ValidatePasswordAsync(password, organizationId, cancellationToken);
                 if (!validationResult.IsSuccess)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure(validationResult.ErrorMessage ?? "유효하지 않은 패스워드입니다.");
+                    return ServiceResult<AuthenticationResult>.Failure(validationResult.ErrorMessage ?? "유효하지 않은 패스워드입니다.");
                 }
 
                 var user = new UserEntity
@@ -176,7 +176,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 await _unitOfWork.CommitTransactionAsync(cancellationToken);
 
-                return ServiceResult<AuthenticationResponse>.Success(new AuthenticationResponse
+                return ServiceResult<AuthenticationResult>.Success(new AuthenticationResult
                 {
                     Success = true,
                     UserId = user.Id,
@@ -194,11 +194,11 @@ namespace AuthHive.Auth.Services.Authentication
             {
                 _logger.LogError(ex, "사용자({Email}) 등록 실패", email);
                 await _unitOfWork.RollbackTransactionAsync(cancellationToken);
-                return ServiceResult<AuthenticationResponse>.Failure($"등록 실패: {ex.Message}");
+                return ServiceResult<AuthenticationResult>.Failure($"등록 실패: {ex.Message}");
             }
         }
 
-        public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithPasswordAsync(
+        public async Task<ServiceResult<AuthenticationResult>> AuthenticateWithPasswordAsync(
             string username,
             string password,
             Guid? organizationId = null,
@@ -214,12 +214,12 @@ namespace AuthHive.Auth.Services.Authentication
                     {
                         await _accountSecurityService.IncrementFailedAttemptsAsync(user.Id, cancellationToken);
                     }
-                    return ServiceResult<AuthenticationResponse>.Failure("잘못된 자격 증명입니다.");
+                    return ServiceResult<AuthenticationResult>.Failure("잘못된 자격 증명입니다.");
                 }
 
                 if (user.Status != UserStatus.Active)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure($"계정 상태: {user.Status}");
+                    return ServiceResult<AuthenticationResult>.Failure($"계정 상태: {user.Status}");
                 }
 
                 await _accountSecurityService.ResetFailedAttemptsAsync(user.Id, cancellationToken);
@@ -228,7 +228,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var connectedIdResult = await _connectedIdService.GetOrCreateAsync(user.Id, targetOrgId, cancellationToken);
                 if (!connectedIdResult.IsSuccess || connectedIdResult.Data == null)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("ConnectedId를 가져오거나 생성하는 데 실패했습니다.");
+                    return ServiceResult<AuthenticationResult>.Failure("ConnectedId를 가져오거나 생성하는 데 실패했습니다.");
                 }
                 var connectedId = connectedIdResult.Data;
 
@@ -237,14 +237,14 @@ namespace AuthHive.Auth.Services.Authentication
                 var sessionResult = await _sessionService.CreateSessionAsync(sessionRequest, cancellationToken);
                 if (!sessionResult.IsSuccess || sessionResult.Data?.SessionDto == null)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("세션 데이터가 불완전합니다.");
+                    return ServiceResult<AuthenticationResult>.Failure("세션 데이터가 불완전합니다.");
                 }
 
                 var sessionDto = sessionResult.Data.SessionDto;
                 var tokenResult = await _tokenService.IssueTokensAsync(sessionDto, cancellationToken);
                 if (!tokenResult.IsSuccess || tokenResult.Data == null)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("토큰 발급에 실패했습니다.");
+                    return ServiceResult<AuthenticationResult>.Failure("토큰 발급에 실패했습니다.");
                 }
 
                 await _auditService.LogActionAsync(
@@ -256,7 +256,7 @@ namespace AuthHive.Auth.Services.Authentication
                     metadata: new Dictionary<string, object> { { "Method", "Password" }, { "OrganizationId", targetOrgId } },
                     cancellationToken: cancellationToken);
 
-                return ServiceResult<AuthenticationResponse>.Success(new AuthenticationResponse
+                return ServiceResult<AuthenticationResult>.Success(new AuthenticationResult
                 {
                     Success = true,
                     UserId = user.Id,
@@ -272,7 +272,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "사용자({Username}) 인증 실패", username);
-                return ServiceResult<AuthenticationResponse>.Failure("인증 실패");
+                return ServiceResult<AuthenticationResult>.Failure("인증 실패");
             }
         }
         #endregion
@@ -476,7 +476,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<PasswordPolicyDto>> GetPasswordPolicyAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<PasswordPolicyResponse>> GetPasswordPolicyAsync(Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -488,7 +488,7 @@ namespace AuthHive.Auth.Services.Authentication
                     if (!result.IsSuccess || result.Data == null)
                     {
                         _logger.LogWarning("AccountSecurityService에서 패스워드 정책을 가져오지 못했습니다. 기본 정책을 반환합니다.");
-                        return new PasswordPolicyDto();
+                        return new PasswordPolicyResponse();
                     }
                     return result.Data;
                 },
@@ -496,14 +496,14 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (policy == null)
                 {
-                    return ServiceResult<PasswordPolicyDto>.Failure("패스워드 정책을 조회하거나 생성하는 데 실패했습니다.");
+                    return ServiceResult<PasswordPolicyResponse>.Failure("패스워드 정책을 조회하거나 생성하는 데 실패했습니다.");
                 }
-                return ServiceResult<PasswordPolicyDto>.Success(policy);
+                return ServiceResult<PasswordPolicyResponse>.Success(policy);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "조직({OrganizationId})의 패스워드 정책 조회 실패", organizationId);
-                return ServiceResult<PasswordPolicyDto>.Failure("패스워드 정책 조회 중 오류가 발생했습니다.");
+                return ServiceResult<PasswordPolicyResponse>.Failure("패스워드 정책 조회 중 오류가 발생했습니다.");
             }
         }
         #endregion

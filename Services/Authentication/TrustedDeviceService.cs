@@ -78,7 +78,7 @@ namespace AuthHive.Auth.Services
 
         #region 장치 등록 및 관리
 
-        public async Task<ServiceResult<TrustedDeviceDto>> RegisterTrustedDeviceAsync(
+        public async Task<ServiceResult<TrustedDeviceResponse>> RegisterTrustedDeviceAsync(
             Guid userId,
             TrustedDeviceRequest request,
             CancellationToken cancellationToken = default)
@@ -86,21 +86,21 @@ namespace AuthHive.Auth.Services
             // 입력 검증
             if (string.IsNullOrWhiteSpace(request.DeviceId))
             {
-                return ServiceResult<TrustedDeviceDto>.Failure(
+                return ServiceResult<TrustedDeviceResponse>.Failure(
                     "DeviceId is required",
                     AuthConstants.ErrorCodes.INVALID_REQUEST);
             }
 
             if (string.IsNullOrWhiteSpace(request.DeviceFingerprint))
             {
-                return ServiceResult<TrustedDeviceDto>.Failure(
+                return ServiceResult<TrustedDeviceResponse>.Failure(
                     "Device fingerprint is required",
                     AuthConstants.ErrorCodes.INVALID_REQUEST);
             }
 
             if (request.DeviceFingerprint.Length > AuthConstants.Security.DeviceFingerprintLength)
             {
-                return ServiceResult<TrustedDeviceDto>.Failure(
+                return ServiceResult<TrustedDeviceResponse>.Failure(
                     $"Device fingerprint exceeds maximum length ({AuthConstants.Security.DeviceFingerprintLength})",
                     AuthConstants.ErrorCodes.INVALID_REQUEST);
             }
@@ -110,14 +110,14 @@ namespace AuthHive.Auth.Services
                 var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
                 if (user == null)
                 {
-                    return ServiceResult<TrustedDeviceDto>.Failure(
+                    return ServiceResult<TrustedDeviceResponse>.Failure(
                         "User not found",
                         AuthConstants.ErrorCodes.USER_NOT_FOUND);
                 }
 
                 if (!user.OrganizationId.HasValue)
                 {
-                    return ServiceResult<TrustedDeviceDto>.Failure(
+                    return ServiceResult<TrustedDeviceResponse>.Failure(
                         "User is not associated with an organization.",
                         AuthConstants.ErrorCodes.InvalidCredentials);
                 }
@@ -125,7 +125,7 @@ namespace AuthHive.Auth.Services
                 var organization = await _organizationRepository.GetByIdAsync(user.OrganizationId.Value, cancellationToken);
                 if (organization == null)
                 {
-                    return ServiceResult<TrustedDeviceDto>.Failure(
+                    return ServiceResult<TrustedDeviceResponse>.Failure(
                         "Organization not found",
                         AuthConstants.ErrorCodes.InvalidCredentials);
                 }
@@ -150,7 +150,7 @@ namespace AuthHive.Auth.Services
                         },
                         cancellationToken: cancellationToken);
 
-                    return ServiceResult<TrustedDeviceDto>.Failure(
+                    return ServiceResult<TrustedDeviceResponse>.Failure(
                         "Too many registration attempts. Please try again later.",
                         AuthConstants.ErrorCodes.RateLimitExceeded);
                 }
@@ -168,7 +168,7 @@ namespace AuthHive.Auth.Services
                     );
                     // limitEvent.RecommendedPlan = await _planService.GetRequiredPlanForDeviceCountAsync(currentDeviceCount + 1, cancellationToken); // PlanService에 추가 필요 시
                     await _eventBus.PublishAsync(limitEvent, cancellationToken);
-                    return ServiceResult<TrustedDeviceDto>.Failure(errorMessage, "PLAN_LIMIT_EXCEEDED");
+                    return ServiceResult<TrustedDeviceResponse>.Failure(errorMessage, "PLAN_LIMIT_EXCEEDED");
                 }
 
                 // Corrected code
@@ -198,7 +198,7 @@ namespace AuthHive.Auth.Services
           cancellationToken
       );
 
-                    return ServiceResult<TrustedDeviceDto>.Failure(
+                    return ServiceResult<TrustedDeviceResponse>.Failure(
                         "Device with this ID already exists",
                         AuthConstants.ErrorCodes.InvalidCredentials);
                 }
@@ -308,7 +308,7 @@ namespace AuthHive.Auth.Services
                         "Trusted device registered successfully for user {UserId}: {DeviceId} (Plan: {PlanType}, Devices: {Current}/{Max})",
                         userId, trustedDevice.DeviceId, organization.PricingTier, currentDeviceCount + 1, maxDevicesPerUser);
 
-                    return ServiceResult<TrustedDeviceDto>.Success(MapToDto(trustedDevice));
+                    return ServiceResult<TrustedDeviceResponse>.Success(MapToDto(trustedDevice));
                 }
                 catch (Exception dbEx)
                 {
@@ -333,7 +333,7 @@ namespace AuthHive.Auth.Services
                     },
                     cancellationToken: cancellationToken);
 
-                return ServiceResult<TrustedDeviceDto>.Failure(
+                return ServiceResult<TrustedDeviceResponse>.Failure(
                     "Failed to register trusted device",
                     AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
@@ -447,18 +447,18 @@ namespace AuthHive.Auth.Services
 
         #region 장치 조회 및 검증 (CancellationToken 전달 위주 수정)
 
-        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<TrustedDeviceResponse>>> GetTrustedDevicesAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var devices = await _repository.GetByUserIdAsync(userId, includeInactive: false, cancellationToken);
                 var dtos = devices.Select(MapToDto);
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting trusted devices for user {UserId}", userId);
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure("Failed to get devices", AuthConstants.ErrorCodes.INTERNAL_ERROR);
+                return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Failure("Failed to get devices", AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -517,21 +517,21 @@ namespace AuthHive.Auth.Services
             }
         }
 
-        public async Task<ServiceResult<TrustedDeviceDto>> GetTrustedDeviceAsync(Guid id, Guid userId, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<TrustedDeviceResponse>> GetTrustedDeviceAsync(Guid id, Guid userId, CancellationToken cancellationToken = default)
         {
             try
             {
                 var device = await _repository.GetByIdAsync(id, cancellationToken);
                 if (device == null || device.UserId != userId)
                 {
-                    return ServiceResult<TrustedDeviceDto>.Failure("Device not found", AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
+                    return ServiceResult<TrustedDeviceResponse>.Failure("Device not found", AuthConstants.ErrorCodes.DEVICE_NOT_FOUND);
                 }
-                return ServiceResult<TrustedDeviceDto>.Success(MapToDto(device));
+                return ServiceResult<TrustedDeviceResponse>.Success(MapToDto(device));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting trusted device {Id} for user {UserId}", id, userId);
-                return ServiceResult<TrustedDeviceDto>.Failure("Failed to get device", AuthConstants.ErrorCodes.INTERNAL_ERROR);
+                return ServiceResult<TrustedDeviceResponse>.Failure("Failed to get device", AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -688,18 +688,18 @@ namespace AuthHive.Auth.Services
 
         #region 보안 및 관리자 기능 (CancellationToken 전달 위주 수정)
 
-        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetOrganizationDevicesAsync(Guid organizationId, bool includeInactive = false, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<TrustedDeviceResponse>>> GetOrganizationDevicesAsync(Guid organizationId, bool includeInactive = false, CancellationToken cancellationToken = default)
         {
             try
             {
                 var devices = await _repository.GetByOrganizationIdAsync(organizationId, includeInactive, cancellationToken);
                 var dtos = devices.Select(MapToDto);
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting organization devices for {OrganizationId}", organizationId);
-                return ServiceResult<IEnumerable<TrustedDeviceDto>>.Failure("Failed to get organization devices", AuthConstants.ErrorCodes.INTERNAL_ERROR);
+                return ServiceResult<IEnumerable<TrustedDeviceResponse>>.Failure("Failed to get organization devices", AuthConstants.ErrorCodes.INTERNAL_ERROR);
             }
         }
 
@@ -1089,7 +1089,7 @@ namespace AuthHive.Auth.Services
 
         #region Helper Methods (유지)
 
-        private TrustedDeviceDto MapToDto(TrustedDevice device) { /* ... 로직 유지 ... */ return new TrustedDeviceDto(); }
+        private TrustedDeviceResponse MapToDto(TrustedDevice device) { /* ... 로직 유지 ... */ return new TrustedDeviceResponse(); }
         private void ParseUserAgent(string userAgent, out string? browser, out string? os) { /* ... 로직 유지 ... */ browser = null; os = null; }
         private int GetAuthenticationStrength(AuthenticationMethod? method) { /* ... 로직 유지 ... */ return 0; }
 

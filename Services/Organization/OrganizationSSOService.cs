@@ -30,7 +30,7 @@ using UserEntity = AuthHive.Core.Entities.User.User;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using Microsoft.EntityFrameworkCore; // ToListAsync, EntityState 등 최소 사용
 using AuthHive.Core.Constants;
-using AuthHive.Core.Models.Audit; // AuditLogDto
+using AuthHive.Core.Models.Audit; // AuditLogResponse
 using AuthHive.Core.Entities.Auth;
 using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Core.Interfaces.Infra;
@@ -1354,7 +1354,7 @@ namespace AuthHive.Auth.Services.Organization
         // 민감 정보 마스킹
         private string MaskSensitiveMetadata(string? metadata) { /* ... 이전 구현 ... */ return metadata ?? "{}"; }
         /// <summary>
-        /// 감사 로그 DTO 생성 헬퍼 (엔티티 정보 포함) - AuditLogDto v15 호환
+        /// 감사 로그 DTO 생성 헬퍼 (엔티티 정보 포함) - AuditLogResponse v15 호환
         /// </summary>
         /// <param name="actionEvent">감사 이벤트 타입 (Enum)</param>
         /// <param name="entity">관련된 엔티티 (여기서는 SamlConfiguration)</param>
@@ -1362,8 +1362,8 @@ namespace AuthHive.Auth.Services.Organization
         /// <param name="details">상세 설명 (메타데이터에 포함될 수 있음)</param>
         /// <param name="oldValue">변경 전 값 (선택적, 메타데이터에 포함됨)</param>
         /// <param name="newValue">변경 후 값 (선택적, 메타데이터에 포함됨)</param>
-        /// <returns>생성된 AuditLogDto 객체</returns>
-        private AuditLogDto CreateAuditLog(
+        /// <returns>생성된 AuditLogResponse 객체</returns>
+        private AuditLogResponse CreateAuditLog(
                 AuditEvent actionEvent,         // 감사 이벤트 타입 (Enum)
                 SamlConfiguration entity, // 관련된 엔티티
                 Guid? performedBy,        // 작업 수행자 ConnectedId
@@ -1386,7 +1386,7 @@ namespace AuthHive.Auth.Services.Organization
                 metadataDict.Add("NewValue", newValue); // 예시: 객체 그대로 추가
             }
 
-            return new AuditLogDto
+            return new AuditLogResponse
             {
                 // Id = Guid.NewGuid(), // ID는 DB에서 생성될 수 있음
                 PerformedByConnectedId = performedBy,
@@ -1453,13 +1453,13 @@ namespace AuthHive.Auth.Services.Organization
             };
         }
         // 감사 로그 DTO 헬퍼 (엔티티 없이)
-        private AuditLogDto CreateAuditLog(AuditEvent action, Guid organizationId, UserEntity? user, Guid? connectedId, string details)
+        private AuditLogResponse CreateAuditLog(AuditEvent action, Guid organizationId, UserEntity? user, Guid? connectedId, string details)
         {
-            return new AuditLogDto { /* ... 이전 구현 ... */ };
+            return new AuditLogResponse { /* ... 이전 구현 ... */ };
         }
-        private AuditLogDto CreateAuditLog(AuditEvent action, Guid organizationId, Guid? userId, Guid? connectedId, string details)
+        private AuditLogResponse CreateAuditLog(AuditEvent action, Guid organizationId, Guid? userId, Guid? connectedId, string details)
         {
-            return new AuditLogDto { /* ... 이전 구현 ... */ };
+            return new AuditLogResponse { /* ... 이전 구현 ... */ };
         }
 
         // 권한 확인 헬퍼 (임시 - IAuthorizationService로 대체 필요)

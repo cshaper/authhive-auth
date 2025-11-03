@@ -104,7 +104,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// ISocialAuthenticationService.AuthenticateWithSocialAsync 구현
         /// </summary>
-        public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithSocialAsync(
+        public async Task<ServiceResult<AuthenticationResult>> AuthenticateWithSocialAsync(
     string provider,
     string token,
     Guid? organizationId = null)
@@ -121,7 +121,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (!validationResult.isValid || string.IsNullOrEmpty(validationResult.email))
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("Invalid social token.");
+                    return ServiceResult<AuthenticationResult>.Failure("Invalid social token.");
                 }
 
                 var user = await _context.Users
@@ -144,8 +144,8 @@ namespace AuthHive.Auth.Services.Authentication
                     isNewUser = true;
                 }
 
-                // AuthenticationResponse 생성
-                var response = new AuthenticationResponse
+                // AuthenticationResult 생성
+                var response = new AuthenticationResult
                 {
                     Success = true,
                     UserId = user.Id,
@@ -154,12 +154,12 @@ namespace AuthHive.Auth.Services.Authentication
                     OrganizationId = organizationId
                 };
 
-                return ServiceResult<AuthenticationResponse>.Success(response);
+                return ServiceResult<AuthenticationResult>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error during social authentication");
-                return ServiceResult<AuthenticationResponse>.Failure("Social authentication failed");
+                return ServiceResult<AuthenticationResult>.Failure("Social authentication failed");
             }
         }
 
@@ -236,7 +236,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// OAuth 인증 구현
         /// </summary>
-        public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithOAuthAsync(
+        public async Task<ServiceResult<AuthenticationResult>> AuthenticateWithOAuthAsync(
             string provider,
             string code,
             string redirectUri,
@@ -253,7 +253,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (!tokenResult.success)
                 {
-                    return ServiceResult<AuthenticationResponse>.Failure("Failed to exchange code for token");
+                    return ServiceResult<AuthenticationResult>.Failure("Failed to exchange code for token");
                 }
 
                 // 획득한 토큰으로 소셜 인증 진행
@@ -262,7 +262,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error during OAuth authentication");
-                return ServiceResult<AuthenticationResponse>.Failure("OAuth authentication failed");
+                return ServiceResult<AuthenticationResult>.Failure("OAuth authentication failed");
             }
         }
 

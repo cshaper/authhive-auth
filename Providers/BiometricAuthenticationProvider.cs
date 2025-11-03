@@ -157,7 +157,7 @@ namespace AuthHive.Auth.Providers.Authentication
                 return ServiceResult<AuthenticationOutcome>.Failure("Username or credential is required");
             }
 
-            var verificationResult = await _fidoService.VerifyAuthenticationResponseAsync(
+            var verificationResult = await _fidoService.VerifyAuthenticationResultAsync(
                 request.BiometricCredentialId,
                 request.BiometricResponse,
                 request.BiometricChallenge ?? "");

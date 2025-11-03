@@ -1615,10 +1615,10 @@ namespace AuthHive.Auth.Services.Session
             return await Task.FromResult(ServiceResult.Success());
         }
 
-        public async Task<ServiceResult<IEnumerable<TrustedDeviceDto>>> GetTrustedDevicesAsync(Guid connectedId)
+        public async Task<ServiceResult<IEnumerable<TrustedDeviceResponse>>> GetTrustedDevicesAsync(Guid connectedId)
         {
             // TODO: Implementation
-            return await Task.FromResult(ServiceResult<IEnumerable<TrustedDeviceDto>>.Success(new List<TrustedDeviceDto>()));
+            return await Task.FromResult(ServiceResult<IEnumerable<TrustedDeviceResponse>>.Success(new List<TrustedDeviceResponse>()));
         }
 
         public async Task<ServiceResult> RevokeTrustedDeviceAsync(Guid deviceId)

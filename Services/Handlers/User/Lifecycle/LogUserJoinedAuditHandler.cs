@@ -15,7 +15,7 @@ using AuthHive.Core.Interfaces.Base;               // For IDomainEventHandler
 using AuthHive.Core.Interfaces.User.Repository;    // For IUserRepository
 using AuthHive.Core.Interfaces.Organization.Repository; // For IOrganizationRepository
 using AuthHive.Core.Interfaces.System.Service; // For IAuditLogService
-using AuthHive.Core.Models; // For AuditLogDto (참조용)
+using AuthHive.Core.Models; // For AuditLogResponse (참조용)
 using AuthHive.Core.Models.Audit.Requests; // *** (추가) For CreateAuditLogRequest ***
 using AuthHive.Core.Models.Audit.Responses; // *** (추가) For AuditLogResponse ***
 using AuthHive.Core.Models.Common; // *** (추가) For ServiceResult ***
@@ -87,7 +87,7 @@ namespace AuthHive.Auth.Services.Handlers.User.Lifecycle
                     { "TargetConnectedId", @event.ConnectedId.ToString() }
                 };
 
-                // (가정) CreateAuditLogRequest의 속성이 AuditLogDto의 속성과 유사하다고 가정
+                // (가정) CreateAuditLogRequest의 속성이 AuditLogResponse의 속성과 유사하다고 가정
                 var auditRequest = new CreateAuditLogRequest
                 {
                     OrganizationId = @event.OrganizationId.Value,

@@ -271,7 +271,7 @@ namespace AuthHive.Auth.Validator
         }
 
         // ValidateAuditTrailAsync
-        public Task<ServiceResult> ValidateAuditTrailAsync(Guid sessionId, AuditLogDto auditEvent, CancellationToken cancellationToken = default)
+        public Task<ServiceResult> ValidateAuditTrailAsync(Guid sessionId, AuditLogResponse auditEvent, CancellationToken cancellationToken = default)
         {
             _logger.LogWarning("ValidateAuditTrailAsync is not fully implemented.");
             // TODO: IAuditService와 연계

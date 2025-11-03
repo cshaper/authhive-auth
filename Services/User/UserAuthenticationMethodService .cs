@@ -396,7 +396,7 @@ namespace AuthHive.Auth.Services.User
                         return ServiceResult.Failure("Failed to enable two-factor authentication");
                     }
 
-                    // MfaSetupResponse 활용
+                    // MfaSetupResult 활용
                     var setupData = mfaSetupResult.Data;
 
                     // 백업 코드 생성

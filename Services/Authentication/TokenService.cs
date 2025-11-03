@@ -119,14 +119,14 @@ namespace AuthHive.Auth.Services.Authentication
         /// 새로운 세션에 대해 액세스 토큰과 리프레시 토큰을 모두 발급합니다.
         /// 로그인 성공 시 최종적으로 호출되는 메서드입니다.
         /// </summary>
-        public async Task<ServiceResult<TokenIssueResponse>> IssueTokensAsync(SessionDto sessionDto)
+        public async Task<ServiceResult<TokenIssueResult>> IssueTokensAsync(SessionDto sessionDto)
         {
             try
             {
                 var client = await _providerRepository.GetByClientIdAsync(CommonDefaults.DefaultClientId);
                 if (client == null)
                 {
-                    return ServiceResult<TokenIssueResponse>.Failure("Default OAuth client not found");
+                    return ServiceResult<TokenIssueResult>.Failure("Default OAuth client not found");
                 }
 
                 var additionalClaims = new List<Claim>
@@ -142,7 +142,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (!accessTokenResult.IsSuccess || accessTokenResult.Data == null)
                 {
-                    return ServiceResult<TokenIssueResponse>.Failure("Failed to generate access token");
+                    return ServiceResult<TokenIssueResult>.Failure("Failed to generate access token");
                 }
 
                 var accessTokenValue = accessTokenResult.Data.AccessToken;
@@ -150,7 +150,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var refreshTokenResult = await _tokenProvider.GenerateRefreshTokenAsync(sessionDto.UserId);
                 if (!refreshTokenResult.IsSuccess || string.IsNullOrEmpty(refreshTokenResult.Data))
                 {
-                    return ServiceResult<TokenIssueResponse>.Failure("Failed to generate refresh token");
+                    return ServiceResult<TokenIssueResult>.Failure("Failed to generate refresh token");
                 }
 
                 var accessTokenEntity = new AccessToken
@@ -192,7 +192,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 await _refreshTokenRepository.AddAsync(refreshTokenEntity);
 
-                return ServiceResult<TokenIssueResponse>.Success(new TokenIssueResponse
+                return ServiceResult<TokenIssueResult>.Success(new TokenIssueResult
                 {
                     AccessToken = accessTokenValue,
                     RefreshToken = refreshTokenResult.Data,
@@ -202,14 +202,14 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to issue tokens");
-                return ServiceResult<TokenIssueResponse>.Failure($"Failed to issue tokens: {ex.Message}");
+                return ServiceResult<TokenIssueResult>.Failure($"Failed to issue tokens: {ex.Message}");
             }
         }
 
         /// <summary>
         /// 리프레시 토큰을 사용하여 만료된 액세스 토큰을 새로 발급받습니다.
         /// </summary>
-        public async Task<ServiceResult<TokenRefreshResponse>> RefreshTokenAsync(string refreshToken)
+        public async Task<ServiceResult<TokenRefreshResult>> RefreshTokenAsync(string refreshToken)
         {
             try
             {
@@ -217,19 +217,19 @@ namespace AuthHive.Auth.Services.Authentication
                 var storedToken = await _refreshTokenRepository.GetByTokenHashAsync(tokenHash);
 
                 if (storedToken == null)
-                    return ServiceResult<TokenRefreshResponse>.Failure("Invalid refresh token");
+                    return ServiceResult<TokenRefreshResult>.Failure("Invalid refresh token");
 
                 if (storedToken.IsRevoked)
-                    return ServiceResult<TokenRefreshResponse>.Failure("Token has been revoked");
+                    return ServiceResult<TokenRefreshResult>.Failure("Token has been revoked");
 
                 if (storedToken.ExpiresAt < DateTime.UtcNow)
-                    return ServiceResult<TokenRefreshResponse>.Failure("Token has expired");
+                    return ServiceResult<TokenRefreshResult>.Failure("Token has expired");
 
                 var sessionId = storedToken.SessionId ?? Guid.Empty;
                 var session = await _sessionRepository.GetByIdAsync(sessionId);
 
                 if (session == null || session.Status != SessionStatus.Active)
-                    return ServiceResult<TokenRefreshResponse>.Failure("Session is invalid");
+                    return ServiceResult<TokenRefreshResult>.Failure("Session is invalid");
 
                 var sessionDto = new SessionDto
                 {
@@ -250,9 +250,9 @@ namespace AuthHive.Auth.Services.Authentication
                 var newTokens = await IssueTokensAsync(sessionDto);
 
                 if (!newTokens.IsSuccess || newTokens.Data == null)
-                    return ServiceResult<TokenRefreshResponse>.Failure("Failed to issue new tokens");
+                    return ServiceResult<TokenRefreshResult>.Failure("Failed to issue new tokens");
 
-                return ServiceResult<TokenRefreshResponse>.Success(new TokenRefreshResponse
+                return ServiceResult<TokenRefreshResult>.Success(new TokenRefreshResult
                 {
                     AccessToken = newTokens.Data.AccessToken,
                     RefreshToken = newTokens.Data.RefreshToken,
@@ -263,7 +263,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to refresh token");
-                return ServiceResult<TokenRefreshResponse>.Failure($"Failed to refresh token: {ex.Message}");
+                return ServiceResult<TokenRefreshResult>.Failure($"Failed to refresh token: {ex.Message}");
             }
         }
 
@@ -377,7 +377,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// 새로운 세션 ID를 기반으로 액세스 토큰과 리프레시 토큰을 생성합니다.
         /// 인증 오케스트레이션 서비스에서 사용되는 핵심 메서드입니다.
         /// </summary>
-        public async Task<ServiceResult<TokenIssueResponse>> GenerateTokensAsync(Guid sessionId)
+        public async Task<ServiceResult<TokenIssueResult>> GenerateTokensAsync(Guid sessionId)
         {
             try
             {
@@ -385,23 +385,23 @@ namespace AuthHive.Auth.Services.Authentication
                 // FIX 1: Use the 'Status' enum to check if the session is active.
                 if (session == null || session.Status != SessionStatus.Active)
                 {
-                    return ServiceResult<TokenIssueResponse>.Failure("Session is not valid or has expired.", "INVALID_SESSION");
+                    return ServiceResult<TokenIssueResult>.Failure("Session is not valid or has expired.", "INVALID_SESSION");
                 }
 
                 // A session for a human user MUST have a UserId and ConnectedId.
                 if (session.UserId == Guid.Empty || !session.ConnectedId.HasValue)
                 {
-                    return ServiceResult<TokenIssueResponse>.Failure("Session is missing required user context.", "INVALID_CONTEXT");
+                    return ServiceResult<TokenIssueResult>.Failure("Session is missing required user context.", "INVALID_CONTEXT");
                 }
 
                 // FIX 2: Await the result from the provider and access its properties.
                 var accessTokenResult = await _tokenProvider.GenerateAccessTokenAsync(session.UserId, session.ConnectedId.Value);
                 if (!accessTokenResult.IsSuccess || accessTokenResult.Data == null)
-                    return ServiceResult<TokenIssueResponse>.Failure(accessTokenResult.ErrorMessage ?? "Access token generation failed.");
+                    return ServiceResult<TokenIssueResult>.Failure(accessTokenResult.ErrorMessage ?? "Access token generation failed.");
 
                 var refreshTokenResult = await _tokenProvider.GenerateRefreshTokenAsync(session.UserId);
                 if (!refreshTokenResult.IsSuccess || string.IsNullOrEmpty(refreshTokenResult.Data))
-                    return ServiceResult<TokenIssueResponse>.Failure(refreshTokenResult.ErrorMessage ?? "Refresh token generation failed.");
+                    return ServiceResult<TokenIssueResult>.Failure(refreshTokenResult.ErrorMessage ?? "Refresh token generation failed.");
 
                 var refreshTokenValue = refreshTokenResult.Data;
                 var refreshTokenEntity = new RefreshToken
@@ -419,19 +419,19 @@ namespace AuthHive.Auth.Services.Authentication
 
                 _logger.LogInformation("Successfully generated new tokens for SessionId: {SessionId}", sessionId);
 
-                var response = new TokenIssueResponse
+                var response = new TokenIssueResult
                 {
                     AccessToken = accessTokenResult.Data.AccessToken,
                     RefreshToken = refreshTokenEntity.TokenValue, // FIX 3: Use 'TokenValue' here as well.
                     ExpiresAt = accessTokenResult.Data.ExpiresAt
                 };
 
-                return ServiceResult<TokenIssueResponse>.Success(response);
+                return ServiceResult<TokenIssueResult>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to generate tokens for SessionId: {SessionId}", sessionId);
-                return ServiceResult<TokenIssueResponse>.Failure("An internal error occurred while issuing tokens.", "TOKEN_GENERATION_FAILED");
+                return ServiceResult<TokenIssueResult>.Failure("An internal error occurred while issuing tokens.", "TOKEN_GENERATION_FAILED");
             }
         }
 

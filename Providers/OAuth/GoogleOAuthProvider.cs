@@ -96,7 +96,7 @@ namespace AuthHive.Auth.Providers.OAuth
         }
 
         /// <inheritdoc />
-        public async Task<ServiceResult<OAuthTokenResponse>> ExchangeCodeForTokenAsync(
+        public async Task<ServiceResult<OAuthTokenResult>> ExchangeCodeForTokenAsync(
             string code,
             string redirectUri)
         {
@@ -107,7 +107,7 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
                 {
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Google OAuth client credentials not configured", "CONFIG_ERROR");
                 }
 
@@ -129,13 +129,13 @@ namespace AuthHive.Auth.Providers.OAuth
                 {
                     _logger.LogError("Google token exchange failed: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Failed to exchange authorization code", "TOKEN_EXCHANGE_ERROR");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<JsonElement>(responseContent);
 
-                var tokenResponse = new OAuthTokenResponse
+                var tokenResponse = new OAuthTokenResult
                 {
                     AccessToken = tokenData.GetProperty("access_token").GetString() ?? string.Empty,
                     RefreshToken = tokenData.TryGetProperty("refresh_token", out var refreshToken)
@@ -149,12 +149,12 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 _logger.LogInformation("Successfully exchanged Google OAuth code for tokens");
 
-                return ServiceResult<OAuthTokenResponse>.Success(tokenResponse);
+                return ServiceResult<OAuthTokenResult>.Success(tokenResponse);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to exchange Google OAuth code for token");
-                return ServiceResult<OAuthTokenResponse>.Failure(
+                return ServiceResult<OAuthTokenResult>.Failure(
                     "Failed to exchange authorization code", "TOKEN_EXCHANGE_ERROR");
             }
         }
@@ -212,7 +212,7 @@ namespace AuthHive.Auth.Providers.OAuth
         }
 
         /// <inheritdoc />
-        public async Task<ServiceResult<OAuthTokenResponse>> RefreshTokenAsync(string refreshToken)
+        public async Task<ServiceResult<OAuthTokenResult>> RefreshTokenAsync(string refreshToken)
         {
             try
             {
@@ -221,7 +221,7 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
                 {
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Google OAuth client credentials not configured", "CONFIG_ERROR");
                 }
 
@@ -242,13 +242,13 @@ namespace AuthHive.Auth.Providers.OAuth
                 {
                     _logger.LogError("Google token refresh failed: {StatusCode} - {Content}",
                         response.StatusCode, responseContent);
-                    return ServiceResult<OAuthTokenResponse>.Failure(
+                    return ServiceResult<OAuthTokenResult>.Failure(
                         "Failed to refresh token", "TOKEN_REFRESH_ERROR");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<JsonElement>(responseContent);
 
-                var tokenResponse = new OAuthTokenResponse
+                var tokenResponse = new OAuthTokenResult
                 {
                     AccessToken = tokenData.GetProperty("access_token").GetString() ?? string.Empty,
                     RefreshToken = refreshToken, // Google doesn't return new refresh token
@@ -261,12 +261,12 @@ namespace AuthHive.Auth.Providers.OAuth
 
                 _logger.LogInformation("Successfully refreshed Google OAuth token");
 
-                return ServiceResult<OAuthTokenResponse>.Success(tokenResponse);
+                return ServiceResult<OAuthTokenResult>.Success(tokenResponse);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to refresh Google OAuth token");
-                return ServiceResult<OAuthTokenResponse>.Failure(
+                return ServiceResult<OAuthTokenResult>.Failure(
                     "Failed to refresh token", "TOKEN_REFRESH_ERROR");
             }
         }

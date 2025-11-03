@@ -98,10 +98,10 @@ namespace AuthHive.Auth.Services.Authentication
 
 
         #region 인증 방식 조회 (오류 없음, 기존 로직 유지)
-        public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetAvailableMethodsAsync(Guid? organizationId = null, Guid? applicationId = null) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodDto>>()); }
-        public async Task<ServiceResult<AuthenticationMethodDto>> GetMethodAsync(AuthenticationMethod method, Guid? organizationId = null) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<AuthenticationMethodDto>()); }
-        public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetEnabledMethodsAsync(Guid organizationId) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodDto>>()); }
-        public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetAllMethodsAsync() { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodDto>>()); }
+        public async Task<ServiceResult<IEnumerable<AuthenticationMethodResponse>>> GetAvailableMethodsAsync(Guid? organizationId = null, Guid? applicationId = null) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodResponse>>()); }
+        public async Task<ServiceResult<AuthenticationMethodResponse>> GetMethodAsync(AuthenticationMethod method, Guid? organizationId = null) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<AuthenticationMethodResponse>()); }
+        public async Task<ServiceResult<IEnumerable<AuthenticationMethodResponse>>> GetEnabledMethodsAsync(Guid organizationId) { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodResponse>>()); }
+        public async Task<ServiceResult<IEnumerable<AuthenticationMethodResponse>>> GetAllMethodsAsync() { /* ... 기존 코드 ... */ return await Task.FromResult(new ServiceResult<IEnumerable<AuthenticationMethodResponse>>()); }
         #endregion
 
         #region 인증 방식 설정
@@ -292,7 +292,7 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<IEnumerable<AuthenticationMethodDto>>> GetUserAvailableMethodsAsync(Guid userId, Guid? organizationId = null, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<AuthenticationMethodResponse>>> GetUserAvailableMethodsAsync(Guid userId, Guid? organizationId = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -305,11 +305,11 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     var connectedIdResult = await _connectedIdService.GetActiveConnectedIdByUserIdAsync(userId, cancellationToken);
                     if (!connectedIdResult.IsSuccess)
-                        return ServiceResult<IEnumerable<AuthenticationMethodDto>>.Failure($"Active organization for user {userId} not found.");
+                        return ServiceResult<IEnumerable<AuthenticationMethodResponse>>.Failure($"Active organization for user {userId} not found.");
 
                     var connectedId = await _connectedIdRepository.GetByIdAsync(connectedIdResult.Data);
                     if (connectedId == null)
-                        return ServiceResult<IEnumerable<AuthenticationMethodDto>>.Failure($"ConnectedId for user {userId} not found.");
+                        return ServiceResult<IEnumerable<AuthenticationMethodResponse>>.Failure($"ConnectedId for user {userId} not found.");
 
                     targetOrgId = connectedId.OrganizationId;
                 }
@@ -319,7 +319,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get available methods for user {UserId}", userId);
-                return ServiceResult<IEnumerable<AuthenticationMethodDto>>.Failure($"Failed to retrieve user methods: {ex.Message}");
+                return ServiceResult<IEnumerable<AuthenticationMethodResponse>>.Failure($"Failed to retrieve user methods: {ex.Message}");
             }
         }
 

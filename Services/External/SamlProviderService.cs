@@ -230,7 +230,7 @@ namespace AuthHive.Auth.Services.External
             }
         }
 
-        public Task<ServiceResult<AuthenticationResponse>> ProcessSamlResponseAsync(string samlResponse, string? relayState = null, CancellationToken cancellationToken = default)
+        public Task<ServiceResult<AuthenticationResult>> ProcessSamlResponseAsync(string samlResponse, string? relayState = null, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -241,12 +241,12 @@ namespace AuthHive.Auth.Services.External
                 if (!IsSuccessStatus(xmlDoc))
                 {
                     _logger.LogWarning("SAML auth failed (Status not Success)");
-                    return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Authentication failed"));
+                    return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Authentication failed"));
                 }
 
                 var attributes = ExtractDynamicAttributes(xmlDoc);
 
-                var response = new AuthenticationResponse
+                var response = new AuthenticationResult
                 {
                     Success = true,
                     AuthenticationMethod = "SAML",
@@ -261,12 +261,12 @@ namespace AuthHive.Auth.Services.External
                     response.OrganizationId = organizationId;
                 }
 
-                return Task.FromResult(ServiceResult<AuthenticationResponse>.Success(response));
+                return Task.FromResult(ServiceResult<AuthenticationResult>.Success(response));
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "SAML response processing failed");
-                return Task.FromResult(ServiceResult<AuthenticationResponse>.Failure("Processing failed"));
+                return Task.FromResult(ServiceResult<AuthenticationResult>.Failure("Processing failed"));
             }
         }
 

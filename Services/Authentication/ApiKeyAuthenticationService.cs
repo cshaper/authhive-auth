@@ -57,7 +57,7 @@ namespace AuthHive.Auth.Services.Authentication
         #endregion
 
 
-        public async Task<ServiceResult<AuthenticationResponse>> AuthenticateWithApiKeyAsync(string apiKey, string? apiSecret = null)
+        public async Task<ServiceResult<AuthenticationResult>> AuthenticateWithApiKeyAsync(string apiKey, string? apiSecret = null)
         {
             try
             {
@@ -70,7 +70,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     var errorMessage = validationResult.ErrorMessage ?? "Invalid API Key or validation failed.";
                     await _auditService.LogActionAsync(AuditActionType.Authentication, "ApiKeyValidationFailed", Guid.Empty, false, errorMessage, "ApiKey", apiKey);
-                    return ServiceResult<AuthenticationResponse>.Failure(errorMessage);
+                    return ServiceResult<AuthenticationResult>.Failure(errorMessage);
                 }
 
                 var validationData = validationResult.Data;
@@ -80,7 +80,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     const string error = "API Key validation succeeded but is missing an ApplicationId.";
                     _logger.LogError(error);
-                    return ServiceResult<AuthenticationResponse>.Failure(error);
+                    return ServiceResult<AuthenticationResult>.Failure(error);
                 }
 
                 // FIX 1: Use .Value to pass the non-nullable Guid.
@@ -90,7 +90,7 @@ namespace AuthHive.Auth.Services.Authentication
                 {
                     var errorMessage = $"Failed to resolve service account for Application ID: {validationData.ApplicationId.Value}";
                     _logger.LogWarning(errorMessage);
-                    return ServiceResult<AuthenticationResponse>.Failure(errorMessage);
+                    return ServiceResult<AuthenticationResult>.Failure(errorMessage);
                 }
 
                 var serviceAccountConnectedId = serviceAccountResult.Data;
@@ -107,7 +107,7 @@ namespace AuthHive.Auth.Services.Authentication
                     _logger.LogWarning("High-privilege API key used for ApplicationId: {ApplicationId}", validationData.ApplicationId.Value);
                 }
 
-                var response = new AuthenticationResponse
+                var response = new AuthenticationResult
                 {
                     Success = true,
                     UserId = null,
@@ -118,12 +118,12 @@ namespace AuthHive.Auth.Services.Authentication
                     AuthenticationMethod = AuthenticationMethod.ApiKey.ToString()
                 };
 
-                return ServiceResult<AuthenticationResponse>.Success(response);
+                return ServiceResult<AuthenticationResult>.Success(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "An unexpected error occurred during API key authentication.");
-                return ServiceResult<AuthenticationResponse>.Failure("An internal server error occurred during authentication.");
+                return ServiceResult<AuthenticationResult>.Failure("An internal server error occurred during authentication.");
             }
         }
     }

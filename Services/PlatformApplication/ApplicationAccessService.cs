@@ -711,7 +711,7 @@ namespace AuthHive.Auth.Services.PlatformApplication
             }
         }
 
-        public async Task<PagedResult<AuditLogDto>> GetAccessAuditLogsAsync(
+        public async Task<PagedResult<AuditLogResponse>> GetAccessAuditLogsAsync(
             Guid applicationId,
             AccessAuditFilterRequest filter)
         {
@@ -728,9 +728,9 @@ namespace AuthHive.Auth.Services.PlatformApplication
                     filter.PageNumber,
                     filter.PageSize);
 
-                return new PagedResult<AuditLogDto>
+                return new PagedResult<AuditLogResponse>
                 {
-                    Items = logs.Items.Select(a => new AuditLogDto
+                    Items = logs.Items.Select(a => new AuditLogResponse
                     {
                         Id = a.Id,
                         PerformedByConnectedId = a.PerformedByConnectedId,
@@ -765,9 +765,9 @@ namespace AuthHive.Auth.Services.PlatformApplication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get audit logs");
-                return new PagedResult<AuditLogDto>
+                return new PagedResult<AuditLogResponse>
                 {
-                    Items = new List<AuditLogDto>(),
+                    Items = new List<AuditLogResponse>(),
                     TotalCount = 0,
                     PageNumber = filter.PageNumber,
                     PageSize = filter.PageSize
