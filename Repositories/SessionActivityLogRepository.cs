@@ -482,7 +482,7 @@ namespace AuthHive.Auth.Repositories
                 .ToListAsync(cancellationToken); // ✅ Token 전달
         }
 
-        public Task<Dictionary<SessionActivityType, int>> GetActivityTypeStatisticsAsync(
+        public Task<Dictionary<SessionActivityType, int>> GetActivityTypeStatisticsReadModelAsync(
              Guid organizationId, DateTime startDate, DateTime endDate,
              CancellationToken cancellationToken = default) // ✅ Token 추가
         {

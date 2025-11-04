@@ -236,11 +236,11 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 권한 검증 성능 메트릭 조회
         /// </summary>
-        public async Task<PermissionPerformanceMetrics> GetPerformanceMetricsAsync(
+        public async Task<PermissionPerformanceMetricsReadModel> GetPerformanceMetricsReadModelAsync(
             Guid organizationId,
             int days = 7)
         {
-            var metrics = new PermissionPerformanceMetrics
+            var metrics = new PermissionPerformanceMetricsReadModel
             {
                 OrganizationId = organizationId,
                 Period = TimeSpan.FromDays(days)

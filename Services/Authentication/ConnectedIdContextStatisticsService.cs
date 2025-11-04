@@ -77,16 +77,16 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region Interface Implementation
 
-        public Task<ServiceResult<ConnectedIdContextStatisticsDto>> GetOverallStatisticsAsync(string period = "Last24Hours")
+        public Task<ServiceResult<ConnectedIdContextStatisticsDto>> GetOverallStatisticsReadModelAsync(string period = "Last24Hours")
         {
-            _logger.LogWarning("Accessing GetOverallStatisticsAsync(string) without explicit ConnectedId. Using System ID.");
-            return GetOverallStatisticsAsync(Guid.Empty, period);
+            _logger.LogWarning("Accessing GetOverallStatisticsReadModelAsync(string) without explicit ConnectedId. Using System ID.");
+            return GetOverallStatisticsReadModelAsync(Guid.Empty, period);
         }
 
         /// <summary>
         /// 전반적인 통계 정보를 비동기로 가져옵니다. (시스템 관리자 역할로 제한되어야 함)
         /// </summary>
-        public async Task<ServiceResult<ConnectedIdContextStatisticsDto>> GetOverallStatisticsAsync(
+        public async Task<ServiceResult<ConnectedIdContextStatisticsDto>> GetOverallStatisticsReadModelAsync(
             Guid currentConnectedId,
             string period = "Last24Hours")
         {

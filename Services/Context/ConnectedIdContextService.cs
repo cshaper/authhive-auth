@@ -103,17 +103,17 @@ namespace AuthHive.Auth.Services.Context
         /// 1. ICacheService (DTO)에서 찾습니다.
         /// 2. 없으면 DB에서 새로 빌드하고, DTO는 캐시에, Entity는 DB에 저장합니다.
         /// </summary>
-        public async Task<ServiceResult<ConnectedIdContextDto>> GetContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<ConnectedIdContextDetail>> GetContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             if (connectedId == Guid.Empty)
-                return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId cannot be empty.");
+                return ServiceResult<ConnectedIdContextDetail>.Failure("ConnectedId cannot be empty.");
 
             var contextKey = GenerateCacheKeyForContext(connectedId, ConnectedIdContextType.Permissions);
 
             try
             {
                 // 1. Hot Cache (DTO)에서 먼저 조회
-                var cachedContext = await _cacheService.GetAsync<ConnectedIdContextDto>(contextKey, cancellationToken);
+                var cachedContext = await _cacheService.GetAsync<ConnectedIdContextDetail>(contextKey, cancellationToken);
                 if (cachedContext != null && !cachedContext.IsExpired)
                 {
                     _logger.LogDebug("Context cache hit for ConnectedId: {ConnectedId}", connectedId);
@@ -131,7 +131,7 @@ namespace AuthHive.Auth.Services.Context
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting context for ConnectedId: {ConnectedId}", connectedId);
-                return ServiceResult<ConnectedIdContextDto>.Failure("An error occurred while getting the context.");
+                return ServiceResult<ConnectedIdContextDetail>.Failure("An error occurred while getting the context.");
             }
         }
 
@@ -139,10 +139,10 @@ namespace AuthHive.Auth.Services.Context
         /// 캐시와 상관없이 DB에서 직접 컨텍스트를 강제로 다시 빌드하고 갱신합니다.
         /// (DTO 캐시 갱신 및 Entity DB 저장)
         /// </summary>
-        public async Task<ServiceResult<ConnectedIdContextDto>> RefreshContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<ConnectedIdContextDetail>> RefreshContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             if (connectedId == Guid.Empty)
-                return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId cannot be empty.");
+                return ServiceResult<ConnectedIdContextDetail>.Failure("ConnectedId cannot be empty.");
 
             _logger.LogInformation("Force refreshing context for ConnectedId: {ConnectedId}", connectedId);
 
@@ -154,7 +154,7 @@ namespace AuthHive.Auth.Services.Context
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error refreshing context for ConnectedId: {ConnectedId}", connectedId);
-                return ServiceResult<ConnectedIdContextDto>.Failure("An error occurred while refreshing the context.");
+                return ServiceResult<ConnectedIdContextDetail>.Failure("An error occurred while refreshing the context.");
             }
         }
 
@@ -323,12 +323,12 @@ namespace AuthHive.Auth.Services.Context
         /// 2. DTO를 생성하여 Hot Cache(ICacheService)에 저장합니다. (For Performance)
         /// 3. Entity를 생성하여 DB(IConnectedIdContextRepository)에 저장합니다. (For Auditing & Persistence)
         /// </summary>
-        private async Task<ServiceResult<ConnectedIdContextDto>> BuildCacheAndPersistContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
+        private async Task<ServiceResult<ConnectedIdContextDetail>> BuildCacheAndPersistContextAsync(Guid connectedId, CancellationToken cancellationToken = default)
         {
             // 1. 데이터 빌드 (3개의 리포지토리에서 원천 데이터 조회)
             var connection = await _connectedIdRepository.GetWithDetailsAsync(connectedId, cancellationToken);
             if (connection?.User == null || connection.Organization == null)
-                return ServiceResult<ConnectedIdContextDto>.Failure("ConnectedId details (User, Organization) not found.");
+                return ServiceResult<ConnectedIdContextDetail>.Failure("ConnectedId details (User, Organization) not found.");
 
             var roles = await _roleRepository.GetByConnectedIdAsync(connectedId, cancellationToken: cancellationToken);
             var permissions = await _permissionRepository.GetPermissionsForConnectedIdAsync(connectedId, cancellationToken: cancellationToken);
@@ -344,7 +344,7 @@ namespace AuthHive.Auth.Services.Context
             var contextKey = GenerateCacheKeyForContext(connectedId, ConnectedIdContextType.Permissions);
 
             // 2. Hot Cache용 DTO 생성 및 캐시 저장 (For Performance)
-            var contextDto = new ConnectedIdContextDto
+            var contextDto = new ConnectedIdContextDetail
             {
                 Id = Guid.NewGuid(),
                 ConnectedId = connection.Id,
@@ -437,7 +437,7 @@ namespace AuthHive.Auth.Services.Context
                 _logger.LogError(ex, "Failed to persist context entity for ConnectedId: {ConnectedId}. Hot cache (DTO) was set, but persistence failed.", connectedId);
             }
 
-            return ServiceResult<ConnectedIdContextDto>.Success(contextDto);
+            return ServiceResult<ConnectedIdContextDetail>.Success(contextDto);
         }
         /// <summary>
         /// 컨텍스트 캐시 키를 생성하는 헬퍼 메서드입니다. 일관된 키 형식을 보장합니다.
