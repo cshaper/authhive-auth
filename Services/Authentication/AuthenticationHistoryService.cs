@@ -380,7 +380,7 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region 통계 및 분석
 
-        public async Task<ServiceResult<AuthenticationStatistics>> GetStatisticsAsync(
+        public async Task<ServiceResult<AuthenticationStatisticsReadModel>> GetStatisticsAsync(
             Guid? organizationId = null,
             DateTime? from = null,
             DateTime? to = null)
@@ -393,7 +393,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var stats = await _attemptRepository.GetStatisticsAsync(
                     startDate, endDate, organizationId);
 
-                var result = new AuthenticationStatistics
+                var result = new AuthenticationStatisticsReadModel
                 {
                     PeriodStart = startDate,
                     PeriodEnd = endDate,
@@ -407,12 +407,12 @@ namespace AuthHive.Auth.Services.Authentication
                     PeakHour = stats.PeakHour
                 };
 
-                return ServiceResult<AuthenticationStatistics>.Success(result);
+                return ServiceResult<AuthenticationStatisticsReadModel>.Success(result);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting authentication statistics");
-                return ServiceResult<AuthenticationStatistics>.Failure(
+                return ServiceResult<AuthenticationStatisticsReadModel>.Failure(
                     "Failed to get authentication statistics");
             }
         }

@@ -7,7 +7,9 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using AuthHive.Core.Models.Auth.Authentication.Events;
+using AuthHive.Core.Models.Auth.Authentication.ReadModels;
 using AuthHive.Core.Models.Auth.Security;
+using AuthHive.Core.Models.Auth.Security.Dtos;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System;
@@ -413,7 +415,7 @@ namespace AuthHive.Auth.Repositories
         /// 브루트포스 공격 패턴(동일 IP/사용자명으로 단기간 내 여러 번 실패)을 감지합니다. (캐시 활용)
         /// 사용: 실시간 보안 모니터링 시스템에서 무차별 대입 공격을 탐지하고 해당 IP를 차단하는 등의 조치를 취할 때 사용됩니다.
         /// </summary>
-        public async Task<IEnumerable<BruteForcePattern>> DetectBruteForceAttacksAsync(
+        public async Task<IEnumerable<BruteForcePatternDto>> DetectBruteForceAttacksAsync(
             DateTime since,
             int threshold = 5,
             CancellationToken cancellationToken = default)
@@ -421,7 +423,7 @@ namespace AuthHive.Auth.Repositories
             string cacheKey = $"BruteForce_{since.Ticks}_{threshold}";
             if (_cacheService != null)
             {
-                var cached = await _cacheService.GetAsync<List<BruteForcePattern>>(cacheKey, cancellationToken);
+                var cached = await _cacheService.GetAsync<List<BruteForcePatternDto>>(cacheKey, cancellationToken);
                 if (cached != null) return cached;
             }
 
@@ -429,7 +431,7 @@ namespace AuthHive.Auth.Repositories
                 .Where(x => x.AttemptedAt >= since && !x.IsSuccess)
                 .GroupBy(x => new { x.IpAddress, x.Username })
                 .Where(g => g.Count() >= threshold)
-                .Select(g => new BruteForcePattern
+                .Select(g => new BruteForcePatternDto
                 {
                     IpAddress = g.Key.IpAddress ?? string.Empty,
                     Username = g.Key.Username,
@@ -507,7 +509,7 @@ namespace AuthHive.Auth.Repositories
         /// 지정된 기간 및 조직에 대한 인증 통계를 집계합니다.
         /// 사용: 관리자 대시보드에서 전반적인 로그인 성공률, 방법별 시도 횟수 등을 시각화하는 데 사용됩니다.
         /// </summary>
-        public async Task<AuthenticationStatistics> GetStatisticsAsync(
+        public async Task<AuthenticationStatisticsReadModel> GetStatisticsAsync(
             DateTime from,
             DateTime to,
             Guid? organizationId = null,
@@ -517,14 +519,14 @@ namespace AuthHive.Auth.Repositories
             query = query.Where(x => x.AttemptedAt >= from && x.AttemptedAt <= to);
 
             var attempts = await query.AsNoTracking().ToListAsync(cancellationToken);
-            if (!attempts.Any()) return new AuthenticationStatistics();
+            if (!attempts.Any()) return new AuthenticationStatisticsReadModel();
 
             var methodStats = attempts.GroupBy(x => x.Method).ToDictionary(g => g.Key, g => g.Count());
             var failureReasons = attempts.Where(x => !x.IsSuccess && x.FailureReason.HasValue)
                 .GroupBy(x => x.FailureReason!.Value)
                 .ToDictionary(g => g.Key, g => g.Count());
 
-            return new AuthenticationStatistics
+            return new AuthenticationStatisticsReadModel
             {
                 TotalAttempts = attempts.Count,
                 SuccessfulAttempts = attempts.Count(x => x.IsSuccess),

@@ -540,7 +540,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 추천 인증 방식 계산
         /// </summary>
-        private List<AuthenticationMethod> GetRecommendedMethods(AuthenticationStatistics data)
+        private List<AuthenticationMethod> GetRecommendedMethods(AuthenticationStatisticsReadModel data)
         {
             // 보안 점수와 사용률을 기반으로 추천
             var recommendations = new List<AuthenticationMethod>();
@@ -562,7 +562,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 보안 점수 향상도 계산
         /// </summary>
-        private double CalculateSecurityImprovement(AuthenticationStatistics data)
+        private double CalculateSecurityImprovement(AuthenticationStatisticsReadModel data)
         {
             // 사용된 인증 방식의 가중 평균 보안 점수 계산
             double totalScore = 0;

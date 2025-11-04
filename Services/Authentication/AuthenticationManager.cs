@@ -562,7 +562,7 @@ namespace AuthHive.Auth.Services
                 return ServiceResult<int>.Failure("Failed to revoke sessions");
             }
         }
-        public async Task<ServiceResult<AuthenticationStatistics>> GetStatisticsAsync(
+        public async Task<ServiceResult<AuthenticationStatisticsReadModel>> GetStatisticsAsync(
             Guid? organizationId = null,
             DateTime? from = null,
             DateTime? to = null)
@@ -589,7 +589,7 @@ namespace AuthHive.Auth.Services
                 if (statistics == null)
                 {
                     // 데이터가 없는 경우 빈 통계 반환
-                    statistics = new AuthenticationStatistics
+                    statistics = new AuthenticationStatisticsReadModel
                     {
                         PeriodStart = startDate,
                         PeriodEnd = endDate,
@@ -876,7 +876,7 @@ namespace AuthHive.Auth.Services
                     statistics.FailedAttempts,
                     statistics.SuccessRate);
 
-                return ServiceResult<AuthenticationStatistics>.Success(statistics);
+                return ServiceResult<AuthenticationStatisticsReadModel>.Success(statistics);
             }
             catch (Exception ex)
             {
@@ -885,7 +885,7 @@ namespace AuthHive.Auth.Services
                     organizationId);
 
                 // 에러 발생 시에도 빈 통계를 반환 (서비스 중단 방지)
-                var emptyStats = new AuthenticationStatistics
+                var emptyStats = new AuthenticationStatisticsReadModel
                 {
                     PeriodStart = from ?? DateTime.UtcNow.AddDays(-30),
                     PeriodEnd = to ?? DateTime.UtcNow,
@@ -898,7 +898,7 @@ namespace AuthHive.Auth.Services
                     FailureReasons = new Dictionary<AuthenticationResult, int>()
                 };
 
-                return ServiceResult<AuthenticationStatistics>.Success(emptyStats);
+                return ServiceResult<AuthenticationStatisticsReadModel>.Success(emptyStats);
             }
         }
 
