@@ -79,13 +79,13 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] 캐시 히트율 95% 목표, 미스 시 DB 조회 후 캐싱
         /// [왜] ID 기반 조회는 역할 관리 시 빈번하게 발생
         /// </summary>
-        public async Task<ServiceResult<PermissionDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
+        public async Task<ServiceResult<PermissionInfoResponse>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
                 if (id == Guid.Empty)
                 {
-                    return ServiceResult<PermissionDto>.Failure(
+                    return ServiceResult<PermissionInfoResponse>.Failure(
                         "Invalid permission ID",
                         PermissionConstants.ErrorCodes.InvalidParameter
                     );
@@ -97,7 +97,7 @@ namespace AuthHive.Auth.Services.Permissions
                 var cacheKey = $"{PermissionConstants.Cache.PermissionCacheKeyPrefix}id:{id}";
 
                 // GetOrSetAsync에 CancellationToken을 전달합니다.
-                var permission = await _cacheService.GetOrSetAsync<PermissionDto>(
+                var permission = await _cacheService.GetOrSetAsync<PermissionInfoResponse>(
                     cacheKey,
                     async () =>
                     {
@@ -114,19 +114,19 @@ namespace AuthHive.Auth.Services.Permissions
                 if (permission == null)
                 {
                     _logger.LogWarning("Permission not found: {PermissionId}", id);
-                    return ServiceResult<PermissionDto>.NotFound($"Permission with ID {id} not found");
+                    return ServiceResult<PermissionInfoResponse>.NotFound($"Permission with ID {id} not found");
                 }
 
-                return ServiceResult<PermissionDto>.Success(permission);
+                return ServiceResult<PermissionInfoResponse>.Success(permission);
             }
             catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
             {
                 _logger.LogWarning("GetByIdAsync operation was cancelled for ID: {PermissionId}", id);
-                return ServiceResult<PermissionDto>.Failure("Operation was cancelled.", "CANCELLED");
+                return ServiceResult<PermissionInfoResponse>.Failure("Operation was cancelled.", "CANCELLED");
             }
             catch (InvalidOperationException)
             {
-                return ServiceResult<PermissionDto>.NotFound($"Permission with ID {id} not found");
+                return ServiceResult<PermissionInfoResponse>.NotFound($"Permission with ID {id} not found");
             }
             catch (Exception ex)
             {
@@ -142,13 +142,13 @@ namespace AuthHive.Auth.Services.Permissions
         /// [어떻게] Scope 정규화 → 캐시 조회 → 미스 시 DB 조회
         /// [왜] "organization:read" 같은 Scope는 모든 조직 관련 API에서 검증
         /// </summary>
-        public async Task<ServiceResult<PermissionDto>> GetByScopeAsync(string scope, CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
+        public async Task<ServiceResult<PermissionInfoResponse>> GetByScopeAsync(string scope, CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
             try
             {
                 if (string.IsNullOrWhiteSpace(scope))
                 {
-                    return ServiceResult<PermissionDto>.Failure(
+                    return ServiceResult<PermissionInfoResponse>.Failure(
                         "Invalid scope",
                         PermissionConstants.ErrorCodes.InvalidScope
                     );
@@ -161,7 +161,7 @@ namespace AuthHive.Auth.Services.Permissions
                 var cacheKey = $"{PermissionConstants.Cache.PermissionCacheKeyPrefix}scope:{normalizedScope}";
 
                 // GetOrSetAsync에 CancellationToken 전달
-                var permission = await _cacheService.GetOrSetAsync<PermissionDto>(
+                var permission = await _cacheService.GetOrSetAsync<PermissionInfoResponse>(
                     cacheKey,
                     async () =>
                     {
@@ -178,24 +178,24 @@ namespace AuthHive.Auth.Services.Permissions
                 if (permission == null)
                 {
                     _logger.LogWarning("Permission not found for scope: {Scope}", scope);
-                    return ServiceResult<PermissionDto>.NotFound($"Permission with scope '{scope}' not found");
+                    return ServiceResult<PermissionInfoResponse>.NotFound($"Permission with scope '{scope}' not found");
                 }
 
-                return ServiceResult<PermissionDto>.Success(permission);
+                return ServiceResult<PermissionInfoResponse>.Success(permission);
             }
             catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
             {
                 _logger.LogWarning("GetByScopeAsync operation was cancelled for scope: {Scope}", scope);
-                return ServiceResult<PermissionDto>.Failure("Operation was cancelled.", "CANCELLED");
+                return ServiceResult<PermissionInfoResponse>.Failure("Operation was cancelled.", "CANCELLED");
             }
             catch (InvalidOperationException)
             {
-                return ServiceResult<PermissionDto>.NotFound($"Permission with scope '{scope}' not found");
+                return ServiceResult<PermissionInfoResponse>.NotFound($"Permission with scope '{scope}' not found");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving permission by scope: {Scope}", scope);
-                return ServiceResult<PermissionDto>.Failure(
+                return ServiceResult<PermissionInfoResponse>.Failure(
                     "Failed to retrieve permission",
                     PermissionConstants.ErrorCodes.SystemError
                 );
@@ -360,7 +360,7 @@ namespace AuthHive.Auth.Services.Permissions
         #endregion
 
         #region Private Helper Methods
-        private async Task<PermissionDto?> LoadPermissionFromDatabaseAsync(
+        private async Task<PermissionInfoResponse?> LoadPermissionFromDatabaseAsync(
             Guid id,
             CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
@@ -374,7 +374,7 @@ namespace AuthHive.Auth.Services.Permissions
 
             return permission != null ? MapToDto(permission) : null;
         }
-        private async Task<PermissionDto?> LoadPermissionByScopeFromDatabaseAsync(
+        private async Task<PermissionInfoResponse?> LoadPermissionByScopeFromDatabaseAsync(
             string normalizedScope,
             CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
@@ -425,7 +425,7 @@ namespace AuthHive.Auth.Services.Permissions
             return scope.Trim().ToLowerInvariant();
         }
 
-        private async Task<ServiceResult<PermissionDto>> FallbackToDatabase(
+        private async Task<ServiceResult<PermissionInfoResponse>> FallbackToDatabase(
      Guid id,
      CancellationToken cancellationToken = default) // ◀◀ CancellationToken 파라미터 추가
         {
@@ -438,21 +438,21 @@ namespace AuthHive.Auth.Services.Permissions
 
                 if (permission == null)
                 {
-                    return ServiceResult<PermissionDto>.NotFound($"Permission with ID {id} not found");
+                    return ServiceResult<PermissionInfoResponse>.NotFound($"Permission with ID {id} not found");
                 }
 
                 var dto = MapToDto(permission);
-                return ServiceResult<PermissionDto>.Success(dto);
+                return ServiceResult<PermissionInfoResponse>.Success(dto);
             }
             catch (OperationCanceledException) // ◀◀ 작업 취소 예외 처리 블록 추가
             {
                 _logger.LogWarning("FallbackToDatabase operation was cancelled for ID: {PermissionId}", id);
-                return ServiceResult<PermissionDto>.Failure("Operation was cancelled.", "CANCELLED");
+                return ServiceResult<PermissionInfoResponse>.Failure("Operation was cancelled.", "CANCELLED");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Fallback to database failed for permission: {PermissionId}", id);
-                return ServiceResult<PermissionDto>.Failure(
+                return ServiceResult<PermissionInfoResponse>.Failure(
                     "Failed to retrieve permission",
                     PermissionConstants.ErrorCodes.DatabaseError
                 );
@@ -520,9 +520,9 @@ namespace AuthHive.Auth.Services.Permissions
         }
 
 
-        private PermissionDto MapToDto(PermissionEntity entity)
+        private PermissionInfoResponse MapToDto(PermissionEntity entity)
         {
-            var dto = new PermissionDto
+            var dto = new PermissionInfoResponse
             {
                 // 기본 필드
                 Id = entity.Id,

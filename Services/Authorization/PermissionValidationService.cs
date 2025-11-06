@@ -566,17 +566,17 @@ namespace AuthHive.Auth.Services.Authorization
             return planRestrictions.Any(restriction => ScopeMatches(scope, restriction));
         }
 
-        private async Task<ServiceResult<IEnumerable<PermissionDto>>> GetRolePermissionsWithCacheAsync(
+        private async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetRolePermissionsWithCacheAsync(
             Guid roleId,
             Guid organizationId,
             bool includeInherited)
         {
             var cacheKey = $"role_perms:{organizationId}:{roleId}:{includeInherited}";
-            var cached = await _cacheService.GetAsync<IEnumerable<PermissionDto>>(cacheKey);
+            var cached = await _cacheService.GetAsync<IEnumerable<PermissionInfoResponse>>(cacheKey);
 
             if (cached != null)
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(cached);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(cached);
             }
 
             var result = await _roleService.GetPermissionsAsync(roleId, includeInherited);

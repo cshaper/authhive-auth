@@ -888,19 +888,19 @@ namespace AuthHive.Auth.Services.Authentication
                 return ServiceResult<RolePermissionReplaceResult>.Failure("An error occurred while replacing permissions.", RoleConstants.ErrorCodes.SystemError);
             }
         }
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetPermissionsAsync(Guid roleId, bool includeInherited = false, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetPermissionsAsync(Guid roleId, bool includeInherited = false, CancellationToken cancellationToken = default)
         {
             try
             {
                 var rolePermissions = await _rolePermissionRepository.GetByRoleAsync(roleId, activeOnly: true, includeInherited: includeInherited, cancellationToken: cancellationToken);
-                var permissionDtos = new List<PermissionDto>();
+                var PermissionInfoResponses = new List<PermissionInfoResponse>();
 
                 foreach (var rp in rolePermissions)
                 {
                     var permission = await _permissionRepository.GetByIdAsync(rp.PermissionId, cancellationToken);
                     if (permission != null)
                     {
-                        permissionDtos.Add(new PermissionDto
+                        PermissionInfoResponses.Add(new PermissionInfoResponse
                         {
                             Id = permission.Id,
                             Scope = permission.Scope,
@@ -910,13 +910,13 @@ namespace AuthHive.Auth.Services.Authentication
                         });
                     }
                 }
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(permissionDtos);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(PermissionInfoResponses);
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Error getting permissions for role {roleId}");
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("An error occurred while retrieving permissions.", RoleConstants.ErrorCodes.SystemError);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("An error occurred while retrieving permissions.", RoleConstants.ErrorCodes.SystemError);
             }
         }
         #endregion

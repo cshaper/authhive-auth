@@ -62,18 +62,18 @@ namespace AuthHive.Auth.Services.Permission
         }
         #region 시스템 권한 관리
 
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetSystemPermissionsAsync()
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetSystemPermissionsAsync()
         {
             try
             {
                 var permissions = await _permissionRepository.Query().Where(p => p.IsSystemPermission).ToListAsync();
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(permissions);
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(permissions);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get system permissions.");
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("An error occurred while fetching system permissions.");
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("An error occurred while fetching system permissions.");
             }
         }
 
@@ -163,7 +163,7 @@ namespace AuthHive.Auth.Services.Permission
             {
                 var totalCount = await _permissionRepository.CountAsync();
                 var allPermissions = await _permissionRepository.Query().ToListAsync();
-                var exportDtos = _mapper.Map<IEnumerable<PermissionDto>>(allPermissions);
+                var exportDtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(allPermissions);
                 var jsonContent = JsonSerializer.Serialize(exportDtos, new JsonSerializerOptions { WriteIndented = true });
                 var dataBytes = System.Text.Encoding.UTF8.GetBytes(jsonContent);
 
@@ -189,7 +189,7 @@ namespace AuthHive.Auth.Services.Permission
             var result = new PermissionImportResult { StartedAt = DateTime.UtcNow };
             try
             {
-                var importDtos = JsonSerializer.Deserialize<List<PermissionDto>>(importData.Content);
+                var importDtos = JsonSerializer.Deserialize<List<PermissionInfoResponse>>(importData.Content);
                 if (importDtos == null)
                 {
                     result.Errors++;

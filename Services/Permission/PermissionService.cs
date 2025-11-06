@@ -106,17 +106,17 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region Standard CRUD (from IService<T>)
 
-        public async Task<ServiceResult<PermissionDto>> CreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<PermissionInfoResponse>> CreateAsync(CreatePermissionRequest request, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
             {
-                return ServiceResult<PermissionDto>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<PermissionInfoResponse>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
             return await CreateAsync(request, null, null, null);
         }
 
-        public async Task<ServiceResult<PermissionDto>> CreateAsync(
+        public async Task<ServiceResult<PermissionInfoResponse>> CreateAsync(
            CreatePermissionRequest request,
            Guid? connectedId = null,
            Guid? organizationId = null,
@@ -124,7 +124,7 @@ namespace AuthHive.Auth.Services.Authentication
         {
             if (request == null)
             {
-                return ServiceResult<PermissionDto>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<PermissionInfoResponse>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -136,7 +136,7 @@ namespace AuthHive.Auth.Services.Authentication
                 if (!validationResult.IsSuccess)
                 {
                     // 수정됨: '??' 연산자를 사용해 validationResult.ErrorMessage가 null일 경우를 대비합니다.
-                    return ServiceResult<PermissionDto>.Failure(
+                    return ServiceResult<PermissionInfoResponse>.Failure(
                         validationResult.ErrorMessage ?? "Scope depth validation failed.",
                         PermissionConstants.ErrorCodes.InvalidScope);
                 }
@@ -144,7 +144,7 @@ namespace AuthHive.Auth.Services.Authentication
                 var existing = await _permissionRepository.FirstOrDefaultAsync(p => p.Scope == request.Scope);
                 if (existing != null)
                 {
-                    return ServiceResult<PermissionDto>.Failure(
+                    return ServiceResult<PermissionInfoResponse>.Failure(
                         $"Permission with scope '{request.Scope}' already exists.",
                         PermissionConstants.ErrorCodes.DuplicateScope);
                 }
@@ -184,8 +184,8 @@ namespace AuthHive.Auth.Services.Authentication
 
                     await _cacheService.RefreshAllAsync();
 
-                    var permissionDto = _mapper.Map<PermissionDto>(createdPermission);
-                    return ServiceResult<PermissionDto>.Success(permissionDto);
+                    var PermissionInfoResponse = _mapper.Map<PermissionInfoResponse>(createdPermission);
+                    return ServiceResult<PermissionInfoResponse>.Success(PermissionInfoResponse);
                 }
                 catch
                 {
@@ -196,7 +196,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error creating permission: {Scope}", request.Scope);
-                return ServiceResult<PermissionDto>.Failure(
+                return ServiceResult<PermissionInfoResponse>.Failure(
                     "An error occurred while creating permission.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
@@ -215,11 +215,11 @@ namespace AuthHive.Auth.Services.Authentication
         }
 
 
-        public async Task<ServiceResult<PermissionDto>> GetByScopeAsync(string scope)
+        public async Task<ServiceResult<PermissionInfoResponse>> GetByScopeAsync(string scope)
         {
             if (string.IsNullOrWhiteSpace(scope))
             {
-                return ServiceResult<PermissionDto>.Failure("Scope cannot be empty.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<PermissionInfoResponse>.Failure("Scope cannot be empty.", PermissionConstants.ErrorCodes.InvalidInput);
             }
             // 캐시 서비스가 모든 것을 처리합니다.
             return await _cacheService.GetByScopeAsync(scope);
@@ -238,12 +238,12 @@ namespace AuthHive.Auth.Services.Authentication
             return await _cacheService.GetTreeAsync();
         }
 
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetChildrenAsync(Guid parentPermissionId, bool includeInactive = false)
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetChildrenAsync(Guid parentPermissionId, bool includeInactive = false)
         {
             // 1. 입력 값 유효성 검사
             if (parentPermissionId == Guid.Empty)
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("ParentPermissionId cannot be an empty GUID.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("ParentPermissionId cannot be an empty GUID.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -261,14 +261,14 @@ namespace AuthHive.Auth.Services.Authentication
                 var permissions = await query.ToListAsync();
 
                 // 3. Entity 목록을 DTO 목록으로 매핑
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(permissions);
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(permissions);
 
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving child permissions for parent ID: {ParentId}", parentPermissionId);
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     "An error occurred while retrieving child permissions.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
@@ -305,12 +305,12 @@ namespace AuthHive.Auth.Services.Authentication
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetByResourceTypeAsync(string resourceType)
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetByResourceTypeAsync(string resourceType)
         {
             // 1. Input validation
             if (string.IsNullOrWhiteSpace(resourceType))
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("ResourceType cannot be empty.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("ResourceType cannot be empty.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -319,24 +319,24 @@ namespace AuthHive.Auth.Services.Authentication
                 var permissions = await _permissionRepository.FindAsync(p => p.ResourceType == resourceType);
 
                 // 3. Map the list of entities to a list of DTOs
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(permissions);
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(permissions);
 
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving permissions by resource type: {ResourceType}", resourceType);
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     "An error occurred while retrieving permissions by resource type.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetByCategoryAsync(string category, bool includeInactive = false)
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetByCategoryAsync(string category, bool includeInactive = false)
         {
             // 1. 입력 값 유효성 검사
             if (string.IsNullOrWhiteSpace(category))
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("Category cannot be empty.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("Category cannot be empty.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -344,7 +344,7 @@ namespace AuthHive.Auth.Services.Authentication
                 // 2. 입력된 카테고리 문자열이 유효한 Enum 값인지 확인
                 if (!Enum.TryParse<PermissionCategory>(category, true, out var categoryEnum))
                 {
-                    return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                    return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                         $"Invalid category: '{category}'. Valid categories are: {string.Join(", ", Enum.GetNames(typeof(PermissionCategory)))}",
                         PermissionConstants.ErrorCodes.InvalidParameter);
                 }
@@ -360,24 +360,24 @@ namespace AuthHive.Auth.Services.Authentication
                 }
 
                 var permissions = await query.ToListAsync();
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(permissions);
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(permissions);
 
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving permissions by category: {Category}", category);
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     "An error occurred while retrieving permissions by category.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<PermissionDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<PermissionInfoResponse>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
         {
             // 캐시 서비스가 캐시 확인, DB 조회를 모두 알아서 처리해줍니다.
             return await _cacheService.GetByIdAsync(id);
         }
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> GetAllAsync(CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> GetAllAsync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -387,30 +387,30 @@ namespace AuthHive.Auth.Services.Authentication
                 var permissions = await _permissionRepository.GetAllAsync();
 
                 // 조회된 엔티티 목록을 DTO 목록으로 변환합니다.
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(permissions);
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(permissions);
 
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving all permissions");
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     "An error occurred while retrieving all permissions.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
 
-        public async Task<ServiceResult<PermissionDto>> UpdateAsync(Guid id, UpdatePermissionRequest request, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<PermissionInfoResponse>> UpdateAsync(Guid id, UpdatePermissionRequest request, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
             {
-                return ServiceResult<PermissionDto>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<PermissionInfoResponse>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
             return await UpdateAsync(id, request, null, null);
         }
 
-        public async Task<ServiceResult<PermissionDto>> UpdateAsync(
+        public async Task<ServiceResult<PermissionInfoResponse>> UpdateAsync(
             Guid id,
             UpdatePermissionRequest request,
             Guid? connectedId = null,
@@ -419,7 +419,7 @@ namespace AuthHive.Auth.Services.Authentication
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
             {
-                return ServiceResult<PermissionDto>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<PermissionInfoResponse>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -427,12 +427,12 @@ namespace AuthHive.Auth.Services.Authentication
                 var permission = await _permissionRepository.GetByIdAsync(id);
                 if (permission == null)
                 {
-                    return ServiceResult<PermissionDto>.NotFound("Permission not found");
+                    return ServiceResult<PermissionInfoResponse>.NotFound("Permission not found");
                 }
 
                 if (permission.IsSystemPermission)
                 {
-                    return ServiceResult<PermissionDto>.Failure(
+                    return ServiceResult<PermissionInfoResponse>.Failure(
                         "Cannot modify system permission",
                         PermissionConstants.ErrorCodes.CannotModifySystemPermission);
                 }
@@ -471,8 +471,8 @@ namespace AuthHive.Auth.Services.Authentication
                     // 수정됨: 역할에 맞는 캐시 무효화 메서드 이름으로 변경
                     await _cacheService.RefreshAllAsync();
 
-                    var permissionDto = _mapper.Map<PermissionDto>(permission);
-                    return ServiceResult<PermissionDto>.Success(permissionDto);
+                    var PermissionInfoResponse = _mapper.Map<PermissionInfoResponse>(permission);
+                    return ServiceResult<PermissionInfoResponse>.Success(PermissionInfoResponse);
                 }
                 catch
                 {
@@ -483,7 +483,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error updating permission: {Id}", id);
-                return ServiceResult<PermissionDto>.Failure(
+                return ServiceResult<PermissionInfoResponse>.Failure(
                     "An error occurred while updating permission.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
@@ -568,12 +568,12 @@ namespace AuthHive.Auth.Services.Authentication
             }
         }
 
-        public async Task<ServiceResult<PagedResult<PermissionDto>>> GetPagedAsync(PaginationRequest request, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<PagedResult<PermissionInfoResponse>>> GetPagedAsync(PaginationRequest request, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (request == null)
             {
-                return ServiceResult<PagedResult<PermissionDto>>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<PagedResult<PermissionInfoResponse>>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -581,16 +581,16 @@ namespace AuthHive.Auth.Services.Authentication
                 var (items, totalCount) = await _permissionRepository.GetPagedAsync(
                     request.PageNumber, request.PageSize, null, p => p.Scope);
 
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(items);
-                var pagedResult = new PagedResult<PermissionDto>(
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(items);
+                var pagedResult = new PagedResult<PermissionInfoResponse>(
                     dtos, totalCount, request.PageNumber, request.PageSize);
 
-                return ServiceResult<PagedResult<PermissionDto>>.Success(pagedResult);
+                return ServiceResult<PagedResult<PermissionInfoResponse>>.Success(pagedResult);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error retrieving paged permissions");
-                return ServiceResult<PagedResult<PermissionDto>>.Failure(
+                return ServiceResult<PagedResult<PermissionInfoResponse>>.Failure(
                     "An error occurred while retrieving paged permissions.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
@@ -600,17 +600,17 @@ namespace AuthHive.Auth.Services.Authentication
 
         #region Bulk Operations
 
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> CreateBulkAsync(IEnumerable<CreatePermissionRequest> requests, CancellationToken cancellationToken = default)
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> CreateBulkAsync(IEnumerable<CreatePermissionRequest> requests, CancellationToken cancellationToken = default)
         {
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (requests == null)
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
             return await CreateBulkAsync(requests, null, null);
         }
 
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> CreateBulkAsync(
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> CreateBulkAsync(
             IEnumerable<CreatePermissionRequest> requests,
             Guid? connectedId = null,
             Guid? organizationId = null)
@@ -618,7 +618,7 @@ namespace AuthHive.Auth.Services.Authentication
             // 최종 수정: Null 안정성 강화를 위해 request null 체크 추가
             if (requests == null)
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("Request cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             try
@@ -627,7 +627,7 @@ namespace AuthHive.Auth.Services.Authentication
 
                 if (requestList.Count > PermissionConstants.Limits.MaxBulkOperationSize)
                 {
-                    return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                    return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                         $"Bulk operation size ({requestList.Count}) exceeds limit of {PermissionConstants.Limits.MaxBulkOperationSize}. " +
                         $"Please split the operation into smaller batches.",
                         PermissionConstants.ErrorCodes.InvalidParameter);
@@ -672,8 +672,8 @@ namespace AuthHive.Auth.Services.Authentication
                     // 수정됨: 역할에 맞는 캐시 무효화 메서드 이름으로 변경
                     await _cacheService.RefreshAllAsync();
 
-                    var dtos = _mapper.Map<IEnumerable<PermissionDto>>(createdPermissions);
-                    return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                    var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(createdPermissions);
+                    return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
                 }
                 catch
                 {
@@ -684,7 +684,7 @@ namespace AuthHive.Auth.Services.Authentication
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in bulk create permissions");
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     "An error occurred while bulk creating permissions.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
@@ -816,7 +816,7 @@ namespace AuthHive.Auth.Services.Authentication
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
         }
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> UpdateBulkAsync(
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> UpdateBulkAsync(
     IEnumerable<(Guid Id, UpdatePermissionRequest Request)> updates, CancellationToken cancellationToken = default)
         {
             // 인터페이스 멤버를 구현하는 기본 메서드입니다.
@@ -827,7 +827,7 @@ namespace AuthHive.Auth.Services.Authentication
         /// <summary>
         /// 여러 권한을 한 번에 업데이트하는 핵심 로직입니다.
         /// </summary>
-        public async Task<ServiceResult<IEnumerable<PermissionDto>>> UpdateBulkAsync(
+        public async Task<ServiceResult<IEnumerable<PermissionInfoResponse>>> UpdateBulkAsync(
             IEnumerable<(Guid Id, UpdatePermissionRequest Request)> updates,
             Guid? connectedId = null,
             Guid? organizationId = null)
@@ -835,19 +835,19 @@ namespace AuthHive.Auth.Services.Authentication
             // 1. 입력 값 유효성 검사
             if (updates == null)
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure("Updates collection cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure("Updates collection cannot be null.", PermissionConstants.ErrorCodes.InvalidInput);
             }
 
             var updateList = updates.ToList();
             if (!updateList.Any())
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(new List<PermissionDto>(), "No items to update.");
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(new List<PermissionInfoResponse>(), "No items to update.");
             }
 
             // 2. 한 번에 처리할 수 있는 최대 개수 제한 검사
             if (updateList.Count > PermissionConstants.Limits.MaxBulkOperationSize)
             {
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     $"Bulk operation size ({updateList.Count}) exceeds limit of {PermissionConstants.Limits.MaxBulkOperationSize}",
                     PermissionConstants.ErrorCodes.InvalidParameter);
             }
@@ -912,13 +912,13 @@ namespace AuthHive.Auth.Services.Authentication
                     await _cacheService.RefreshAllAsync();
                 }
 
-                var dtos = _mapper.Map<IEnumerable<PermissionDto>>(updatedPermissions);
-                return ServiceResult<IEnumerable<PermissionDto>>.Success(dtos);
+                var dtos = _mapper.Map<IEnumerable<PermissionInfoResponse>>(updatedPermissions);
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Success(dtos);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in bulk update permissions");
-                return ServiceResult<IEnumerable<PermissionDto>>.Failure(
+                return ServiceResult<IEnumerable<PermissionInfoResponse>>.Failure(
                     "An error occurred while bulk updating permissions.",
                     PermissionConstants.ErrorCodes.DatabaseError);
             }
