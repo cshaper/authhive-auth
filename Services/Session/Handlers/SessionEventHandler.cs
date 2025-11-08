@@ -11,6 +11,7 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Auth.Events;
+using AuthHive.Core.Models.Auth.Session.Events;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 

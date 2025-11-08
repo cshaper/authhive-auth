@@ -214,21 +214,21 @@ namespace AuthHive.Auth.Validator
         }
 
         // DetectSessionHijackingAsync
-        public Task<ServiceResult<ThreatDetection>> DetectSessionHijackingAsync(Guid sessionId, SessionContext context, CancellationToken cancellationToken = default)
+        public Task<ServiceResult<ThreatDetectionReadModel>> DetectSessionHijackingAsync(Guid sessionId, SessionContext context, CancellationToken cancellationToken = default)
         {
             _logger.LogWarning("DetectSessionHijackingAsync is not fully implemented.");
             // TODO: ISessionSecurityService 위임
-            var detection = new ThreatDetection { ThreatDetected = false, Type = ThreatType.None };
-            return Task.FromResult(ServiceResult<ThreatDetection>.Success(detection));
+            var detection = new ThreatDetectionReadModel { ThreatDetected = false, Type = ThreatType.None };
+            return Task.FromResult(ServiceResult<ThreatDetectionReadModel>.Success(detection));
         }
 
         // DetectAutomationAsync
-        public Task<ServiceResult<BotDetection>> DetectAutomationAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        public Task<ServiceResult<BotDetectionReadModel>> DetectAutomationAsync(Guid sessionId, CancellationToken cancellationToken = default)
         {
             _logger.LogWarning("DetectAutomationAsync is not fully implemented.");
             // TODO: ISecurityService 또는 IRiskAssessmentService 위임
-            var detection = new BotDetection { IsBot = false };
-            return Task.FromResult(ServiceResult<BotDetection>.Success(detection));
+            var detection = new BotDetectionReadModel { IsBot = false };
+            return Task.FromResult(ServiceResult<BotDetectionReadModel>.Success(detection));
         }
 
         // DetectPrivilegeEscalationAsync

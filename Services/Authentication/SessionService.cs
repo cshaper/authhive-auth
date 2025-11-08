@@ -1673,10 +1673,10 @@ namespace AuthHive.Auth.Services.Session
             return await Task.FromResult(ServiceResult.Success());
         }
 
-        public async Task<ServiceResult<SessionCacheStatistics>> GetCacheStatisticsAsync(Guid? sessionId = null)
+        public async Task<ServiceResult<SessionCacheStatisticsReadModel>> GetCacheStatisticsAsync(Guid? sessionId = null)
         {
             // TODO: Implementation
-            return await Task.FromResult(ServiceResult<SessionCacheStatistics>.Success(new SessionCacheStatistics()));
+            return await Task.FromResult(ServiceResult<SessionCacheStatisticsReadModel>.Success(new SessionCacheStatisticsReadModel()));
         }
 
         public async Task<ServiceResult> WarmupCacheAsync(Guid sessionId, List<string> preloadKeys)

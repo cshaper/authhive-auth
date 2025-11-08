@@ -417,7 +417,7 @@
 //         /// 브루트포스 공격 패턴(동일 IP/사용자명으로 단기간 내 여러 번 실패)을 감지합니다. (캐시 활용)
 //         /// 사용: 실시간 보안 모니터링 시스템에서 무차별 대입 공격을 탐지하고 해당 IP를 차단하는 등의 조치를 취할 때 사용됩니다.
 //         /// </summary>
-//         public async Task<IEnumerable<BruteForcePatternDto>> DetectBruteForceAttacksAsync(
+//         public async Task<IEnumerable<BruteForcePatternReadModel>> DetectBruteForceAttacksAsync(
 //             DateTime since,
 //             int threshold = 5,
 //             CancellationToken cancellationToken = default)
@@ -425,7 +425,7 @@
 //             string cacheKey = $"BruteForce_{since.Ticks}_{threshold}";
 //             if (_cacheService != null)
 //             {
-//                 var cached = await _cacheService.GetAsync<List<BruteForcePatternDto>>(cacheKey, cancellationToken);
+//                 var cached = await _cacheService.GetAsync<List<BruteForcePatternReadModel>>(cacheKey, cancellationToken);
 //                 if (cached != null) return cached;
 //             }
 
@@ -433,7 +433,7 @@
 //                 .Where(x => x.AttemptedAt >= since && !x.IsSuccess)
 //                 .GroupBy(x => new { x.IpAddress, x.Username })
 //                 .Where(g => g.Count() >= threshold)
-//                 .Select(g => new BruteForcePatternDto
+//                 .Select(g => new BruteForcePatternReadModel
 //                 {
 //                     IpAddress = g.Key.IpAddress ?? string.Empty,
 //                     Username = g.Key.Username,
@@ -478,7 +478,7 @@
 //         /// 다수의 로그인 실패를 유발한 IP 주소 목록을 조회합니다.
 //         /// 사용: 방화벽이나 웹 방화벽(WAF)에 차단 목록으로 등록할 악성 IP를 식별하는 데 사용됩니다.
 //         /// </summary>
-//         public async Task<IEnumerable<RiskyIpAddress>> GetRiskyIpAddressesAsync(
+//         public async Task<IEnumerable<RiskyIpAddressReadModel>> GetRiskyIpAddressesAsync(
 //             int failureThreshold = 10,
 //             DateTime? since = null,
 //             CancellationToken cancellationToken = default)
@@ -489,7 +489,7 @@
 //             return await query
 //                 .GroupBy(x => x.IpAddress)
 //                 .Where(g => g.Count() >= failureThreshold)
-//                 .Select(g => new RiskyIpAddress
+//                 .Select(g => new RiskyIpAddressReadModel
 //                 {
 //                     IpAddress = g.Key!,
 //                     FailureCount = g.Count(),
