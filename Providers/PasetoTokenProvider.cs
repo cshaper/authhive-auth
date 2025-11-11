@@ -1,5 +1,5 @@
 using AuthHive.Core.Interfaces.Auth.Provider;
-using AuthHive.Core.Models.Auth.Authentication;
+// using AuthHive.Core.Models.Auth.Authentication; // [v17 수정] TokenInfo 네임스페이스 변경
 using AuthHive.Core.Models.Common;
 using Microsoft.Extensions.Configuration;
 using System.Text;
@@ -12,13 +12,15 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Core.Constants.Auth; // AuthConstants 사용을 위해 추가
+using AuthHive.Core.Constants.Auth;
+// [v17 수정] CS0246 오류 해결: v17 불변 DTO의 네임스페이스를 'using'
+using AuthHive.Core.Models.Auth.Authentication.Common; 
 
 namespace AuthHive.Auth.Providers
 {
     /// <summary>
-    /// ITokenProvider의 PASETO v4.local 구현체입니다. - v16 Refactored
-    /// appsettings.json에서 설정을 읽고, AuthConstants.ClaimTypes를 준수하여 토큰을 생성/검증합니다.
+    /// [v17 수정] ITokenProvider의 PASETO v4.local 구현체입니다.
+    /// v17의 불변 DTO(TokenInfo)를 사용하도록 수정되었습니다.
     /// </summary>
     public class PasetoTokenProvider : ITokenProvider
     {
@@ -61,21 +63,19 @@ namespace AuthHive.Auth.Providers
                     .Expiration(expiresAt)
                     .IssuedAt(now)
                     .Subject(userId.ToString()) // 'sub' 클레임은 UserId를 사용
-                    .AddClaim(AuthConstants.ClaimTypes.ConnectedId, connectedId.ToString()); // 수정: "cid" 상수 사용
+                    .AddClaim(AuthConstants.ClaimTypes.ConnectedId, connectedId.ToString());
 
                 if (additionalClaims != null)
                 {
-                    // 중복될 수 있는 표준 클레임 목록
                     var standardClaims = new HashSet<string>
                     {
                         AuthConstants.ClaimTypes.Subject,
                         AuthConstants.ClaimTypes.ConnectedId,
-                        System.Security.Claims.ClaimTypes.NameIdentifier // "sub"와 동일하게 취급될 수 있음
+                        System.Security.Claims.ClaimTypes.NameIdentifier
                     };
 
                     foreach (var claim in additionalClaims)
                     {
-                        // 표준 클레임과 중복되지 않는 경우에만 추가
                         if (!standardClaims.Contains(claim.Type))
                         {
                             builder.AddClaim(claim.Type, claim.Value);
@@ -85,13 +85,18 @@ namespace AuthHive.Auth.Providers
 
                 var token = builder.Encode();
 
-                var tokenInfo = new TokenInfo
-                {
-                    AccessToken = token,
-                    ExpiresAt = expiresAt,
-                    IssuedAt = now,
-                    ExpiresIn = (int)_accessTokenLifetime.TotalSeconds
-                };
+                // [v17 수정] CS7036/CS0200 오류 해결:
+                // v16의 기본 생성자 및 속성 할당 방식 대신,
+                // v17 불변 DTO의 '생성자'를 사용하여 객체 생성
+                var tokenInfo = new TokenInfo(
+                    accessToken: token,
+                    refreshToken: "", // [v17 정합성] 이 메서드는 AccessToken만 생성 (Refresh 토큰은 별도)
+                    expiresIn: (int)_accessTokenLifetime.TotalSeconds,
+                    issuedAt: now,
+                    expiresAt: expiresAt
+                    // TokenType은 TokenInfo 생성자에서 기본값("Bearer")으로 처리됨
+                );
+                
                 return Task.FromResult(ServiceResult<TokenInfo>.Success(tokenInfo));
             }
             catch (OperationCanceledException)
@@ -100,7 +105,6 @@ namespace AuthHive.Auth.Providers
             }
             catch (Exception ex)
             {
-                // TODO: 프로덕션 환경에서는 민감한 예외 메시지를 로그에만 기록하고, 사용자에게는 일반적인 에러 메시지를 반환해야 합니다.
                 return Task.FromResult(ServiceResult<TokenInfo>.Failure($"Token generation failed: {ex.Message}"));
             }
         }
@@ -123,7 +127,6 @@ namespace AuthHive.Auth.Providers
                     .Select(p => new Claim(p.Key, p.Value?.ToString() ?? string.Empty))
                     .ToList();
                 
-                // 'sub' 클레임이 있는데 NameIdentifier 클레임이 없다면, 표준 호환성을 위해 추가해줍니다.
                 var subjectClaim = pasetoClaims.FirstOrDefault(c => c.Type == AuthConstants.ClaimTypes.Subject);
                 if (subjectClaim != null && !pasetoClaims.Any(c => c.Type == System.Security.Claims.ClaimTypes.NameIdentifier))
                 {

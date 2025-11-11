@@ -91,20 +91,48 @@ namespace AuthHive.Auth.Validator
             return ServiceResult.Success("User creation data is valid.");
         }
 
+
         /// <summary>
-        /// [v17 수정] UpdateUserCommand를 검증합니다. (SOP 1-Write-B에서 구현)
+        /// [v17 수정] UpdateUserCommand를 검증합니다. v16 로직을 이관합니다.
+        /// [v17.2 수정] SRP 원칙에 따라 Status 관련 로직 제거
         /// </summary>
         public async Task<ServiceResult> ValidateUpdateAsync(UpdateUserCommand command)
         {
-            // TODO: SOP 1-Write-B에서 이 로직을 구현합니다.
-            // 1. 사용자 존재 여부 확인
-            // 2. 사용자명 변경 시 중복 검사
-            // 3. 상태 변경 시 ValidateStatusTransitionAsync 호출
-            await Task.CompletedTask; // 임시
-            _logger.LogWarning("ValidateUpdateAsync(UpdateUserCommand) is not yet implemented.");
-            return ServiceResult.Success(); // 우선 통과
-        }
+            var userId = command.UserId; // AggregateId
 
+            // 1. User 존재 여부 검사 (v16 UserValidator.ValidateUpdateAsync 로직)
+            var user = await _userRepository.GetByIdAsync(userId, CancellationToken.None);
+            if (user == null)
+            {
+                return ServiceResult.NotFound($"User not found: {userId}");
+            }
+
+            // 2. 사용자명 변경 시 중복 검사 (v16 UserValidator.ValidateUpdateAsync 로직)
+            if (!string.IsNullOrWhiteSpace(command.Username) && command.Username != user.Username)
+            {
+                // 2a. 형식 검사
+                var usernameValidation = await ValidateUsernameAsync(command.Username);
+                if (!usernameValidation.IsSuccess) return usernameValidation;
+
+                // 2b. 중복 검사 (CheckUsernameExistsAsync 사용)
+                var usernameDuplication = await ValidateUsernameDuplicationAsync(command.Username, userId);
+                if (!usernameDuplication.IsSuccess) return usernameDuplication;
+            }
+
+            // 3. [v17 수정] Status 변경 유효성 검사 로직 "제거"
+            // (이 로직은 'SuspendUserCommandHandler'의 Validator가 담당)
+            /*
+            if (command.Status.HasValue && command.Status.Value != user.Status)
+            {
+                var changedBy = command.TriggeredBy ?? command.UserId; 
+                var statusTransition = await ValidateStatusTransitionAsync(userId, user.Status, command.Status.Value, changedBy);
+                if (!statusTransition.IsSuccess) return statusTransition;
+            }
+            */
+
+            _logger.LogWarning("ValidateUpdateAsync(UpdateUserCommand) logic migrated (General Info only).");
+            return ServiceResult.Success();
+        }
         public async Task<ServiceResult> ValidateDeleteAsync(Guid userId, Guid deletedByConnectedId)
         {
             var user = await _userRepository.GetByIdAsync(userId);
@@ -123,11 +151,11 @@ namespace AuthHive.Auth.Validator
             return ServiceResult.Success("User can be deleted.");
         }
 
-// [v17 수정] CreateUserProfileCommand를 검증합니다.
+        // [v17 수정] CreateUserProfileCommand를 검증합니다.
         public async Task<ServiceResult> ValidateProfileCreationAsync(CreateUserProfileCommand command)
         {
 
-            var userId = command.UserId; 
+            var userId = command.UserId;
             if (!await _userRepository.ExistsAsync(userId, CancellationToken.None))
             {
                 return ServiceResult.NotFound($"User not found: {userId}");
@@ -141,7 +169,7 @@ namespace AuthHive.Auth.Validator
                 var phoneExists = await _userProfileRepository.GetByPhoneNumberAsync(command.PhoneNumber, CancellationToken.None);
                 if (phoneExists != null)
                 {
-                     return ServiceResult.Failure("Phone number already in use", "PHONE_NUMBER_DUPLICATE");
+                    return ServiceResult.Failure("Phone number already in use", "PHONE_NUMBER_DUPLICATE");
                 }
             }
             _logger.LogWarning("ValidateProfileCreationAsync logic from UserProfileService migrated.");
@@ -172,6 +200,55 @@ namespace AuthHive.Auth.Validator
 
             // [v16 UserValidator.ValidateProfileUpdateAsync 로직 유지]
             _logger.LogWarning("ValidateProfileUpdateAsync logic (partial) migrated.");
+            return ServiceResult.Success();
+        }
+
+        /// <summary>
+        /// [v17] SuspendUserCommand를 검증합니다.
+        /// </summary>
+        public async Task<ServiceResult> ValidateSuspendAsync(SuspendUserCommand command)
+        {
+            var userId = command.UserId;
+
+            // 1. User 존재 여부 검사
+            var user = await _userRepository.GetByIdAsync(userId, CancellationToken.None);
+            if (user == null)
+            {
+                return ServiceResult.NotFound($"User not found: {userId}");
+            }
+
+            // 2. 상태 변경 유효성 검사 (v16 로직 재활용)
+            var changedBy = command.TriggeredBy ?? command.UserId;
+            var statusTransition = await ValidateStatusTransitionAsync(
+                userId,
+                user.Status,
+                UserStatus.Suspended, // 목표 상태
+                changedBy
+            );
+            if (!statusTransition.IsSuccess) return statusTransition;
+
+            _logger.LogWarning("ValidateSuspendAsync(SuspendUserCommand) logic migrated.");
+            return ServiceResult.Success();
+        }
+
+        /// <summary>
+        /// [v17] ChangeTwoFactorCommand를 검증합니다.
+        /// </summary>
+        public async Task<ServiceResult> ValidateTwoFactorChangeAsync(ChangeTwoFactorCommand command)
+        {
+            var userId = command.UserId;
+
+            // 1. User 존재 여부 검사
+            var user = await _userRepository.GetByIdAsync(userId, CancellationToken.None);
+            if (user == null)
+            {
+                return ServiceResult.NotFound($"User not found: {userId}");
+            }
+
+            // TODO: v16의 ValidateTwoFactorSetupAsync 로직 (현재는 비어있음 )
+            // (예: "SMS 타입인데 UserProfile에 전화번호가 등록되어 있는가?")
+            _logger.LogWarning("ValidateTwoFactorChangeAsync (ValidateTwoFactorSetupAsync) is not fully implemented.");
+
             return ServiceResult.Success();
         }
 

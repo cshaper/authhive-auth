@@ -1,6 +1,6 @@
 // [AuthHive.Auth] UpdateUserCommandHandler.cs
-// v17 CQRS "본보기": 'User' 엔티티의 핵심 속성을 수정하는 'UpdateUserCommand'를 처리합니다.
-// v17 철학에 따라 '쓰기' 핸들러는 데이터를 반환하지 않습니다 (IRequest<Unit>).
+// v17 CQRS "본보기": 'User' 엔티티의 '일반 정보'를 수정하는 'UpdateUserCommand'를 처리합니다.
+// [v17.2 수정] SRP 원칙에 따라 Status, 2FA 로직 제거
 
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
@@ -8,7 +8,7 @@ using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Core.Interfaces.User.Validator;
 using AuthHive.Core.Models.User.Commands;
 using AuthHive.Core.Models.User.Events.Lifecycle; // UserUpdatedEvent
-using MediatR; // [v17 수정] Unit 사용
+using MediatR;
 using Microsoft.Extensions.Logging;
 using System.ComponentModel.DataAnnotations; // ValidationException
 using System;
@@ -20,10 +20,10 @@ using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
 namespace AuthHive.Auth.Handlers.User
 {
     /// <summary>
-    /// [v17] "사용자 핵심 정보 수정" 유스케이스 핸들러 (SOP 1-Write-C)
+    /// [v17] "사용자 일반 정보 수정" 유스케이스 핸들러 (SOP 1-Write-C)
     /// v17 CQRS 철학에 따라 데이터를 반환하지 않습니다 (Unit).
     /// </summary>
-    public class UpdateUserCommandHandler : IRequestHandler<UpdateUserCommand, Unit> // [v17 수정]
+    public class UpdateUserCommandHandler : IRequestHandler<UpdateUserCommand, Unit>
     {
         private readonly IUserRepository _userRepository;
         // [v17 수정] 불필요한 UserProfileRepository 의존성 제거
@@ -51,6 +51,7 @@ namespace AuthHive.Auth.Handlers.User
             _logger.LogInformation("Handling UpdateUserCommand for User {UserId}", command.UserId);
 
             // 1. 유효성 검사 (Validator로 책임 이관)
+            // (v16 UserValidator.ValidateUpdateAsync 로직 이관 완료)
             var validationResult = await _userValidator.ValidateUpdateAsync(command);
             if (!validationResult.IsSuccess)
             {
@@ -79,17 +80,23 @@ namespace AuthHive.Auth.Handlers.User
                 updatedFields.Add(nameof(UserEntity.Username));
             }
 
+            // [v17 수정] Status 변경 로직 "제거"
+            /*
             if (command.Status.HasValue && user.Status != command.Status.Value)
             {
                 user.Status = command.Status.Value;
                 updatedFields.Add(nameof(UserEntity.Status));
             }
+            */
 
+            // [v17 수정] 2FA 변경 로직 "제거"
+            /*
             if (command.IsTwoFactorEnabled.HasValue && user.IsTwoFactorEnabled != command.IsTwoFactorEnabled.Value)
             {
                 user.IsTwoFactorEnabled = command.IsTwoFactorEnabled.Value;
                 updatedFields.Add(nameof(UserEntity.IsTwoFactorEnabled));
             }
+            */
 
             // 4. 데이터베이스 저장
             if (updatedFields.Any())
@@ -97,9 +104,9 @@ namespace AuthHive.Auth.Handlers.User
                 await _userRepository.UpdateAsync(user, cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-                _logger.LogInformation("User updated successfully for {UserId}. Fields: {Fields}", user.Id, string.Join(", ", updatedFields));
+                _logger.LogInformation("User (General Info) updated successfully for {UserId}. Fields: {Fields}", user.Id, string.Join(", ", updatedFields));
 
-                // 5. 이벤트 발행
+                // 5. 이벤트 발행 (Notify) - 일반 업데이트 이벤트
                 var userUpdatedEvent = new UserUpdatedEvent(
                     userId: user.Id,
                     updatedFields: updatedFields.ToArray(),
@@ -112,11 +119,10 @@ namespace AuthHive.Auth.Handlers.User
             }
             else
             {
-                _logger.LogInformation("No user changes detected for {UserId}", command.UserId);
+                _logger.LogInformation("No user (General Info) changes detected for {UserId}", command.UserId);
             }
 
             // 6. 응답 DTO 반환 (데이터 반환 안 함)
-            // [v17 수정] UserProfile 조회 로직 제거, Unit.Value 반환
             return Unit.Value;
         }
 

@@ -21,6 +21,7 @@ using ConnectedIdEntity = AuthHive.Core.Entities.Auth.ConnectedId;
 using AuthHive.Auth.Providers;
 using AuthHive.Core.Helpers.Security;
 using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Models.Auth.Authentication.Common;
 
 namespace AuthHive.Auth.Services.Authentication
 {

@@ -30,7 +30,7 @@ using static AuthHive.Core.Constants.Auth.AuthConstants;
 using AuthHive.Core.Models.Organization.Common;
 using AuthHive.Core.Models.Auth.ConnectedId.Responses;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
-using AuthHive.Core.Models.Auth.Session.Requests;
+
 
 namespace AuthHive.Auth.Providers
 {
