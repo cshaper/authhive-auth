@@ -25,8 +25,6 @@ using AuthHive.Core.Models.Common;
 using AuthHive.Core.Models.User;
 using AuthHive.Core.Models.User.Common;
 using AuthHive.Core.Models.User.Events;
-using AuthHive.Core.Models.User.Requests;
-using AuthHive.Core.Models.User.Views;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -268,209 +266,209 @@ namespace AuthHive.Auth.Services.User
             }
         }
 
-        public async Task<ServiceResult<UserProfileDto>> CreateAsync(Guid userId, CreateUserProfileRequest request, Guid createdByConnectedId)
-        {
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                await _unitOfWork.BeginTransactionAsync();
+        // public async Task<ServiceResult<UserProfileDto>> CreateAsync(Guid userId, CreateUserProfileRequest request, Guid createdByConnectedId)
+        // {
+        //     var stopwatch = Stopwatch.StartNew();
+        //     try
+        //     {
+        //         await _unitOfWork.BeginTransactionAsync();
 
-                var validationResult = await _validator.ValidateProfileCreationAsync(userId, request);
-                if (!validationResult.IsSuccess)
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<UserProfileDto>.Failure(string.Join(", ", validationResult.ErrorCode), "VALIDATION_ERROR");
-                }
+        //         var validationResult = await _validator.ValidateProfileCreationAsync(userId, request);
+        //         if (!validationResult.IsSuccess)
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             return ServiceResult<UserProfileDto>.Failure(string.Join(", ", validationResult.ErrorCode), "VALIDATION_ERROR");
+        //         }
 
-                if (!await _userRepository.ExistsAsync(userId))
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<UserProfileDto>.NotFound($"User not found: {userId}");
-                }
+        //         if (!await _userRepository.ExistsAsync(userId))
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             return ServiceResult<UserProfileDto>.NotFound($"User not found: {userId}");
+        //         }
 
-                if (await _profileRepository.ExistsAsync(userId))
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<UserProfileDto>.Failure($"Profile already exists for user: {userId}", "PROFILE_ALREADY_EXISTS");
-                }
+        //         if (await _profileRepository.ExistsAsync(userId))
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             return ServiceResult<UserProfileDto>.Failure($"Profile already exists for user: {userId}", "PROFILE_ALREADY_EXISTS");
+        //         }
 
-                if (!string.IsNullOrWhiteSpace(request.PhoneNumber) && await _profileRepository.GetByPhoneNumberAsync(request.PhoneNumber) != null)
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<UserProfileDto>.Failure("Phone number already in use", "PHONE_NUMBER_DUPLICATE");
-                }
+        //         if (!string.IsNullOrWhiteSpace(request.PhoneNumber) && await _profileRepository.GetByPhoneNumberAsync(request.PhoneNumber) != null)
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             return ServiceResult<UserProfileDto>.Failure("Phone number already in use", "PHONE_NUMBER_DUPLICATE");
+        //         }
 
-                var currentTime = _dateTimeProvider.UtcNow;
-                var profile = new UserProfile
-                {
-                    UserId = userId,
-                    Id = Guid.NewGuid(),
-                    PhoneNumber = request.PhoneNumber,
-                    TimeZone = request.TimeZone ?? "UTC",
-                    PreferredLanguage = "en",
-                    PreferredCurrency = request.PreferredCurrency ?? "USD",
-                    ProfileImageUrl = request.ProfileImageUrl,
-                    Bio = request.Bio,
-                    WebsiteUrl = request.WebsiteUrl,
-                    Location = request.Location,
-                    DateOfBirth = request.DateOfBirth,
-                    Gender = request.Gender,
-                    ProfileMetadata = request.Metadata,
-                    IsPublic = request.IsPublic ?? false,
-                    EmailNotificationsEnabled = request.EmailNotificationsEnabled ?? true,
-                    SmsNotificationsEnabled = request.SmsNotificationsEnabled ?? false,
-                    CreatedByConnectedId = createdByConnectedId,
-                    CreatedAt = currentTime,
-                    LastProfileUpdateAt = currentTime
-                };
-                profile.CompletionPercentage = profile.CalculateCompletionPercentage();
+        //         var currentTime = _dateTimeProvider.UtcNow;
+        //         var profile = new UserProfile
+        //         {
+        //             UserId = userId,
+        //             Id = Guid.NewGuid(),
+        //             PhoneNumber = request.PhoneNumber,
+        //             TimeZone = request.TimeZone ?? "UTC",
+        //             PreferredLanguage = "en",
+        //             PreferredCurrency = request.PreferredCurrency ?? "USD",
+        //             ProfileImageUrl = request.ProfileImageUrl,
+        //             Bio = request.Bio,
+        //             WebsiteUrl = request.WebsiteUrl,
+        //             Location = request.Location,
+        //             DateOfBirth = request.DateOfBirth,
+        //             Gender = request.Gender,
+        //             ProfileMetadata = request.Metadata,
+        //             IsPublic = request.IsPublic ?? false,
+        //             EmailNotificationsEnabled = request.EmailNotificationsEnabled ?? true,
+        //             SmsNotificationsEnabled = request.SmsNotificationsEnabled ?? false,
+        //             CreatedByConnectedId = createdByConnectedId,
+        //             CreatedAt = currentTime,
+        //             LastProfileUpdateAt = currentTime
+        //         };
+        //         profile.CompletionPercentage = profile.CalculateCompletionPercentage();
 
-                await _profileRepository.AddAsync(profile);
-                await _unitOfWork.SaveChangesAsync();
+        //         await _profileRepository.AddAsync(profile);
+        //         await _unitOfWork.SaveChangesAsync();
 
-                await _eventHandler.HandleProfileCreatedAsync(new UserProfileCreatedEvent
-                {
-                    UserId = userId,
-                    ProfileId = profile.Id,
-                    CreatedByConnectedId = createdByConnectedId,
-                    CreatedAt = currentTime,
-                    CompletionPercentage = profile.CompletionPercentage
-                });
+        //         await _eventHandler.HandleProfileCreatedAsync(new UserProfileCreatedEvent
+        //         {
+        //             UserId = userId,
+        //             ProfileId = profile.Id,
+        //             CreatedByConnectedId = createdByConnectedId,
+        //             CreatedAt = currentTime,
+        //             CompletionPercentage = profile.CompletionPercentage
+        //         });
 
-                await _auditService.LogAsync(new AuditLog
-                {
-                    PerformedByConnectedId = createdByConnectedId,
-                    TargetOrganizationId = await GetUserOrganizationIdAsync(userId),
-                    Timestamp = currentTime,
-                    ActionType = AuditActionType.Create,
-                    Action = "user_profile.create",
-                    ResourceType = "UserProfile",
-                    ResourceId = profile.Id.ToString(),
-                    Success = true,
-                    DurationMs = (int)stopwatch.ElapsedMilliseconds,
-                    Severity = AuditEventSeverity.Success
-                });
+        //         await _auditService.LogAsync(new AuditLog
+        //         {
+        //             PerformedByConnectedId = createdByConnectedId,
+        //             TargetOrganizationId = await GetUserOrganizationIdAsync(userId),
+        //             Timestamp = currentTime,
+        //             ActionType = AuditActionType.Create,
+        //             Action = "user_profile.create",
+        //             ResourceType = "UserProfile",
+        //             ResourceId = profile.Id.ToString(),
+        //             Success = true,
+        //             DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        //             Severity = AuditEventSeverity.Success
+        //         });
 
-                if (request.EmailNotificationsEnabled ?? true)
-                {
-                    await SendWelcomeEmailAsync(userId, profile);
-                }
+        //         if (request.EmailNotificationsEnabled ?? true)
+        //         {
+        //             await SendWelcomeEmailAsync(userId, profile);
+        //         }
 
-                await _unitOfWork.CommitTransactionAsync();
-                await InvalidateAllRelatedCachesAsync(userId);
+        //         await _unitOfWork.CommitTransactionAsync();
+        //         await InvalidateAllRelatedCachesAsync(userId);
 
-                var user = await _userRepository.GetByIdAsync(userId);
-                var dto = MapToDto(profile, user);
+        //         var user = await _userRepository.GetByIdAsync(userId);
+        //         var dto = MapToDto(profile, user);
 
-                _logger.LogInformation("Profile created for user {UserId} by ConnectedId {CreatedBy}", userId, createdByConnectedId);
-                return ServiceResult<UserProfileDto>.Success(dto, "Profile created successfully");
-            }
-            catch (Exception ex)
-            {
-                await _unitOfWork.RollbackTransactionAsync();
-                await _eventHandler.HandleProfileErrorAsync(new ProfileErrorEvent
-                {
-                    UserId = userId,
-                    ErrorType = "CREATE_FAILED",
-                    ErrorMessage = ex.Message,
-                });
-                _logger.LogError(ex, "Error creating profile for user {UserId}", userId);
-                return ServiceResult<UserProfileDto>.Failure($"Failed to create profile: {ex.Message}", "PROFILE_CREATE_ERROR");
-            }
-        }
+        //         _logger.LogInformation("Profile created for user {UserId} by ConnectedId {CreatedBy}", userId, createdByConnectedId);
+        //         return ServiceResult<UserProfileDto>.Success(dto, "Profile created successfully");
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         await _unitOfWork.RollbackTransactionAsync();
+        //         await _eventHandler.HandleProfileErrorAsync(new ProfileErrorEvent
+        //         {
+        //             UserId = userId,
+        //             ErrorType = "CREATE_FAILED",
+        //             ErrorMessage = ex.Message,
+        //         });
+        //         _logger.LogError(ex, "Error creating profile for user {UserId}", userId);
+        //         return ServiceResult<UserProfileDto>.Failure($"Failed to create profile: {ex.Message}", "PROFILE_CREATE_ERROR");
+        //     }
+        // }
 
-        public async Task<ServiceResult<UserProfileDto>> UpdateAsync(Guid userId, UpdateUserProfileRequest request, Guid updatedByConnectedId)
-        {
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                await _unitOfWork.BeginTransactionAsync();
+        // public async Task<ServiceResult<UserProfileDto>> UpdateAsync(Guid userId, UpdateUserProfileRequest request, Guid updatedByConnectedId)
+        // {
+        //     var stopwatch = Stopwatch.StartNew();
+        //     try
+        //     {
+        //         await _unitOfWork.BeginTransactionAsync();
 
-                var profile = await _profileRepository.GetByIdAsync(userId);
-                if (profile == null)
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<UserProfileDto>.NotFound($"Profile not found for user: {userId}");
-                }
+        //         var profile = await _profileRepository.GetByIdAsync(userId);
+        //         if (profile == null)
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             return ServiceResult<UserProfileDto>.NotFound($"Profile not found for user: {userId}");
+        //         }
 
-                var validationResult = await _validator.ValidateProfileUpdateAsync(userId, request);
-                if (!validationResult.IsSuccess)
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    return ServiceResult<UserProfileDto>.Failure(string.Join(", ", validationResult.ErrorCode), "VALIDATION_ERROR");
-                }
+        //         var validationResult = await _validator.ValidateProfileUpdateAsync(userId, request);
+        //         if (!validationResult.IsSuccess)
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             return ServiceResult<UserProfileDto>.Failure(string.Join(", ", validationResult.ErrorCode), "VALIDATION_ERROR");
+        //         }
 
-                var changes = new Dictionary<string, object>();
-                var oldCompletionPercentage = profile.CompletionPercentage;
-                bool hasChanges = ApplyProfileChanges(request, profile, changes);
+        //         var changes = new Dictionary<string, object>();
+        //         var oldCompletionPercentage = profile.CompletionPercentage;
+        //         bool hasChanges = ApplyProfileChanges(request, profile, changes);
 
-                if (!hasChanges)
-                {
-                    await _unitOfWork.RollbackTransactionAsync();
-                    var user = await _userRepository.GetByIdAsync(userId);
-                    return ServiceResult<UserProfileDto>.Success(MapToDto(profile, user), "No changes detected");
-                }
+        //         if (!hasChanges)
+        //         {
+        //             await _unitOfWork.RollbackTransactionAsync();
+        //             var user = await _userRepository.GetByIdAsync(userId);
+        //             return ServiceResult<UserProfileDto>.Success(MapToDto(profile, user), "No changes detected");
+        //         }
 
-                var currentTime = _dateTimeProvider.UtcNow;
-                profile.UpdatedAt = currentTime;
-                profile.UpdatedByConnectedId = updatedByConnectedId;
-                profile.UpdateProfile();
+        //         var currentTime = _dateTimeProvider.UtcNow;
+        //         profile.UpdatedAt = currentTime;
+        //         profile.UpdatedByConnectedId = updatedByConnectedId;
+        //         profile.UpdateProfile();
 
-                await _profileRepository.UpdateAsync(profile);
-                await _unitOfWork.SaveChangesAsync();
+        //         await _profileRepository.UpdateAsync(profile);
+        //         await _unitOfWork.SaveChangesAsync();
 
-                await _eventHandler.HandleProfileUpdatedAsync(new ProfileUpdatedEvent
-                {
-                    UserId = userId,
-                    ProfileId = profile.Id,
-                    UpdatedByConnectedId = updatedByConnectedId,
-                    UpdatedAt = currentTime,
-                    Changes = changes,
-                    NewCompletionPercentage = profile.CompletionPercentage
-                });
+        //         await _eventHandler.HandleProfileUpdatedAsync(new ProfileUpdatedEvent
+        //         {
+        //             UserId = userId,
+        //             ProfileId = profile.Id,
+        //             UpdatedByConnectedId = updatedByConnectedId,
+        //             UpdatedAt = currentTime,
+        //             Changes = changes,
+        //             NewCompletionPercentage = profile.CompletionPercentage
+        //         });
 
-                await _auditService.LogAsync(new AuditLog
-                {
-                    PerformedByConnectedId = updatedByConnectedId,
-                    TargetOrganizationId = await GetUserOrganizationIdAsync(userId),
-                    Timestamp = currentTime,
-                    ActionType = AuditActionType.Update,
-                    Action = "user_profile.update",
-                    ResourceType = "UserProfile",
-                    ResourceId = profile.Id.ToString(),
-                    Success = true,
-                    DurationMs = (int)stopwatch.ElapsedMilliseconds,
-                    Severity = AuditEventSeverity.Info,
-                    Metadata = JsonSerializer.Serialize(new { Changes = changes })
-                });
+        //         await _auditService.LogAsync(new AuditLog
+        //         {
+        //             PerformedByConnectedId = updatedByConnectedId,
+        //             TargetOrganizationId = await GetUserOrganizationIdAsync(userId),
+        //             Timestamp = currentTime,
+        //             ActionType = AuditActionType.Update,
+        //             Action = "user_profile.update",
+        //             ResourceType = "UserProfile",
+        //             ResourceId = profile.Id.ToString(),
+        //             Success = true,
+        //             DurationMs = (int)stopwatch.ElapsedMilliseconds,
+        //             Severity = AuditEventSeverity.Info,
+        //             Metadata = JsonSerializer.Serialize(new { Changes = changes })
+        //         });
 
-                if (profile.CompletionPercentage == 100 && oldCompletionPercentage < 100)
-                {
-                    await SendProfileCompletionEmailAsync(userId, profile);
-                }
+        //         if (profile.CompletionPercentage == 100 && oldCompletionPercentage < 100)
+        //         {
+        //             await SendProfileCompletionEmailAsync(userId, profile);
+        //         }
 
-                await _unitOfWork.CommitTransactionAsync();
-                await InvalidateAllRelatedCachesAsync(userId);
+        //         await _unitOfWork.CommitTransactionAsync();
+        //         await InvalidateAllRelatedCachesAsync(userId);
 
-                var resultUser = await _userRepository.GetByIdAsync(userId);
-                var resultDto = MapToDto(profile, resultUser);
+        //         var resultUser = await _userRepository.GetByIdAsync(userId);
+        //         var resultDto = MapToDto(profile, resultUser);
 
-                _logger.LogInformation("Profile updated for user {UserId} by ConnectedId {UpdatedBy}", userId, updatedByConnectedId);
-                return ServiceResult<UserProfileDto>.Success(resultDto, "Profile updated successfully");
-            }
-            catch (Exception ex)
-            {
-                await _unitOfWork.RollbackTransactionAsync();
-                await _eventHandler.HandleProfileErrorAsync(new ProfileErrorEvent
-                {
-                    UserId = userId,
-                    ErrorType = "UPDATE_FAILED",
-                    ErrorMessage = ex.Message,
-                });
-                _logger.LogError(ex, "Error updating profile for user {UserId}", userId);
-                return ServiceResult<UserProfileDto>.Failure($"Failed to update profile: {ex.Message}", "PROFILE_UPDATE_ERROR");
-            }
-        }
+        //         _logger.LogInformation("Profile updated for user {UserId} by ConnectedId {UpdatedBy}", userId, updatedByConnectedId);
+        //         return ServiceResult<UserProfileDto>.Success(resultDto, "Profile updated successfully");
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         await _unitOfWork.RollbackTransactionAsync();
+        //         await _eventHandler.HandleProfileErrorAsync(new ProfileErrorEvent
+        //         {
+        //             UserId = userId,
+        //             ErrorType = "UPDATE_FAILED",
+        //             ErrorMessage = ex.Message,
+        //         });
+        //         _logger.LogError(ex, "Error updating profile for user {UserId}", userId);
+        //         return ServiceResult<UserProfileDto>.Failure($"Failed to update profile: {ex.Message}", "PROFILE_UPDATE_ERROR");
+        //     }
+        // }
 
         public async Task<ServiceResult> DeleteAsync(Guid userId, Guid deletedByConnectedId)
         {

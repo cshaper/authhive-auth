@@ -11,11 +11,9 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.User.Repository;
 using AuthHive.Core.Interfaces.User.Service;
 using AuthHive.Core.Models.Common;
-using AuthHive.Core.Models.Common.Requests;
 using AuthHive.Core.Models.Business.Events;
 using AuthHive.Core.Models.User;
 using AuthHive.Core.Models.User.Events;
-using AuthHive.Core.Models.User.Requests;
 using static AuthHive.Core.Enums.Core.UserEnums;
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Interfaces.Auth.Provider;
@@ -69,28 +67,28 @@ namespace AuthHive.Auth.Services
 
         #region IService<T> and IUserService Implementation
 
-        public async Task<ServiceResult<UserDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
-        {
-            var requestingOrgId = _principalAccessor.OrganizationId;
-            if (requestingOrgId == Guid.Empty)
-            {
-                throw new AuthHiveForbiddenException("Organization context is required to access user data.");
-            }
+        // public async Task<ServiceResult<UserDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+        // {
+        //     var requestingOrgId = _principalAccessor.OrganizationId;
+        //     if (requestingOrgId == Guid.Empty)
+        //     {
+        //         throw new AuthHiveForbiddenException("Organization context is required to access user data.");
+        //     }
 
-            var user = await _userRepository.GetByIdAsync(id, cancellationToken);
-            if (user == null)
-            {
-                return ServiceResult<UserDto>.Failure("User not found.");
-            }
+        //     var user = await _userRepository.GetByIdAsync(id, cancellationToken);
+        //     if (user == null)
+        //     {
+        //         return ServiceResult<UserDto>.Failure("User not found.");
+        //     }
 
-            if (!await _userRepository.IsUserInOrganizationAsync(user.Id, requestingOrgId, cancellationToken))
-            {
-                _logger.LogWarning("Forbidden access attempt: Org {requestingOrgId} tried to access user {userId} from another organization.", requestingOrgId, id);
-                return ServiceResult<UserDto>.Failure("User not found.");
-            }
+        //     if (!await _userRepository.IsUserInOrganizationAsync(user.Id, requestingOrgId, cancellationToken))
+        //     {
+        //         _logger.LogWarning("Forbidden access attempt: Org {requestingOrgId} tried to access user {userId} from another organization.", requestingOrgId, id);
+        //         return ServiceResult<UserDto>.Failure("User not found.");
+        //     }
 
-            return ServiceResult<UserDto>.Success(MapToDto(user)!);
-        }
+        //     return ServiceResult<UserDto>.Success(MapToDto(user)!);
+        // }
 
         public async Task<ServiceResult<IEnumerable<UserDto>>> GetAllAsync(CancellationToken cancellationToken = default)
         {
@@ -120,50 +118,52 @@ namespace AuthHive.Auth.Services
             return ServiceResult<PagedResult<UserDto>>.Success(result);
         }
 
-               public async Task<ServiceResult<UserDto>> CreateAsync(CreateUserRequest request, CancellationToken cancellationToken = default)
-        {
-            var requestingOrgId = _principalAccessor.OrganizationId;
-            var planKey = PricingConstants.DefaultPlanKey; // TODO: IPlanRestrictionService에서 실제 플랜 키 조회
+        //        public async Task<ServiceResult<UserDto>> CreateAsync(CreateUserRequest request, CancellationToken cancellationToken = default)
+        // {
+        //     var requestingOrgId = _principalAccessor.OrganizationId;
+        //     var planKey = PricingConstants.DefaultPlanKey; // TODO: IPlanRestrictionService에서 실제 플랜 키 조회
             
-            var currentMemberCount = await _userRepository.CountByOrganizationAsync(requestingOrgId, cancellationToken);
-            var memberLimit = PricingConstants.GetStrictLimit(PricingConstants.SubscriptionPlans.MemberLimits, planKey, PricingConstants.DefaultMemberLimit);
+        //     var currentMemberCount = await _userRepository.CountByOrganizationAsync(requestingOrgId, cancellationToken);
+        //     var memberLimit = PricingConstants.GetStrictLimit(PricingConstants.SubscriptionPlans.MemberLimits, planKey, PricingConstants.DefaultMemberLimit);
 
-            if (currentMemberCount >= memberLimit)
-            {
-                await _eventBus.PublishAsync(new PlanLimitReachedEvent(requestingOrgId, planKey, PlanLimitType.MemberCount, currentMemberCount, memberLimit, _principalAccessor.ConnectedId), cancellationToken);
-                return ServiceResult<UserDto>.Failure($"Organization member limit ({memberLimit}) has been reached. Please upgrade your plan.");
-            }
+        //     if (currentMemberCount >= memberLimit)
+        //     {
+        //         await _eventBus.PublishAsync(new PlanLimitReachedEvent(requestingOrgId, planKey, PlanLimitType.MemberCount, currentMemberCount, memberLimit, _principalAccessor.ConnectedId), cancellationToken);
+        //         return ServiceResult<UserDto>.Failure($"Organization member limit ({memberLimit}) has been reached. Please upgrade your plan.");
+        //     }
 
-            var validation = await ValidateCreateAsync(request, cancellationToken);
-            if (!validation.IsSuccess)
-            {
-                return ServiceResult<UserDto>.Failure(validation.ErrorMessage ?? "Validation failed.");
-            }
+        //     var validation = await ValidateCreateAsync(request, cancellationToken);
+        //     if (!validation.IsSuccess)
+        //     {
+        //         return ServiceResult<UserDto>.Failure(validation.ErrorMessage ?? "Validation failed.");
+        //     }
 
-            var newUser = new UserEntity
-            {
-                Email = request.Email,
-                Username = request.Username,
-                DisplayName = request.DisplayName,
-                Status = UserStatus.PendingVerification,
-                ExternalSystemType = request.ExternalSystemType,
-                ExternalUserId = request.ExternalUserId,
-                // [수정] _passwordProvider의 비동기 메서드인 HashPasswordAsync를 'await' 키워드와 함께 호출합니다.
-                PasswordHash = await _passwordProvider.HashPasswordAsync(request.Password) 
-            };
+        //     var newUser = new UserEntity
+        //     {
+        //         Email = request.Email,
+        //         Username = request.Username,
+        //         DisplayName = request.DisplayName,
+        //         Status = UserStatus.PendingVerification,
+        //         ExternalSystemType = request.ExternalSystemType,
+        //         ExternalUserId = request.ExternalUserId,
+        //         // [수정] _passwordProvider의 비동기 메서드인 HashPasswordAsync를 'await' 키워드와 함께 호출합니다.
+        //         PasswordHash = await _passwordProvider.HashPasswordAsync(request.Password) 
+        //     };
 
-            await _userRepository.AddAsync(newUser, cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        //     await _userRepository.AddAsync(newUser, cancellationToken);
+        //     await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            await _eventBus.PublishAsync(new UserCreatedEvent
-            {
-                UserId = newUser.Id,
-                Email = newUser.Email,
-                CreatedByConnectedId = _principalAccessor.ConnectedId
-            }, cancellationToken);
+        //     await _eventBus.PublishAsync(new UserCreatedEvent
+        //     {
+        //         UserId = newUser.Id,
+        //         Email = newUser.Email,
+        //         CreatedByConnectedId = _principalAccessor.ConnectedId
+        //     }, cancellationToken);
 
-            return ServiceResult<UserDto>.Success(MapToDto(newUser)!);
-        }
+        //     return ServiceResult<UserDto>.Success(MapToDto(newUser)!);
+        // }
+
+
         public async Task<ServiceResult<UserDto>> UpdateAsync(Guid id, UpdateUserRequest request, CancellationToken cancellationToken = default)
         {
             var requestingOrgId = _principalAccessor.OrganizationId;
