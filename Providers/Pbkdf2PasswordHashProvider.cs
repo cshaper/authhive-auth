@@ -2,12 +2,13 @@ using System;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using AuthHive.Core.Interfaces.Security;
+using AuthHive.Core.Constants.Auth; 
 
-namespace AuthHive.Core.Providers.Security
+namespace AuthHive.Core.Providers.Security // (네임스페이스가 Core.Providers.Security로 되어있으나, auth.auth/Providers로 가정)
 {
     /// <summary>
-    /// Implements IPasswordHashProvider using the industry-standard PBKDF2 algorithm.
-    /// This version correctly implements the async interface methods.
+    /// [v17 수정] IPasswordHashProvider의 PBKDF2 구현체입니다.
+    /// v17 인터페이스(AlgorithmName)를 구현하도록 수정되었습니다.
     /// </summary>
     public class Pbkdf2PasswordHashProvider : IPasswordHashProvider
     {
@@ -18,8 +19,12 @@ namespace AuthHive.Core.Providers.Security
         private const char Delimiter = ';';
 
         /// <summary>
+        /// [v17 수정] CS0535 오류 해결: IPasswordHashProvider.AlgorithmName 구현
+        /// </summary>
+        public string AlgorithmName => AuthConstants.PasswordHashingAlgorithms.Pbkdf2;
+
+        /// <summary>
         /// Hashes a password using PBKDF2 (RFC 2898).
-        /// ✨ 수정된 부분: Task<string>을 반환합니다.
         /// </summary>
         public Task<string> HashPasswordAsync(string password)
         {
@@ -28,13 +33,11 @@ namespace AuthHive.Core.Providers.Security
 
             var result = string.Join(Delimiter, Convert.ToBase64String(salt), Convert.ToBase64String(hash));
             
-            // PBKDF2는 CPU-bound 작업이므로 Task.FromResult로 래핑하여 비동기 시그니처를 맞춥니다.
             return Task.FromResult(result);
         }
 
         /// <summary>
         /// Verifies a password against a stored PBKDF2 hash.
-        /// ✨ 수정된 부분: Task<bool>을 반환하며 인터페이스를 올바르게 구현합니다.
         /// </summary>
         public Task<bool> VerifyPasswordAsync(string password, string storedHash)
         {
@@ -46,7 +49,6 @@ namespace AuthHive.Core.Providers.Security
             var parts = storedHash.Split(Delimiter);
             if (parts.Length != 2)
             {
-                // 잘못된 형식의 해시 문자열
                 return Task.FromResult(false);
             }
 
@@ -62,10 +64,8 @@ namespace AuthHive.Core.Providers.Security
             }
             catch (FormatException)
             {
-                // Base64 디코딩 실패 시
                 return Task.FromResult(false);
             }
         }
     }
 }
-

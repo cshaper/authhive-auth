@@ -113,7 +113,7 @@ namespace AuthHive.Auth.Services.Organization
         /// WHY: 조직 정보 표시 및 권한 검증 기반 데이터
         /// HOW: 캐시 확인 → Repository 조회 → DTO 매핑 → 캐싱
         /// </summary>
-        public async Task<ServiceResult<OrganizationDto>> GetByIdAsync(
+        public async Task<ServiceResult<OrganizationResponse>> GetByIdAsync(
                  Guid organizationId,
                  Guid currentUserConnectedId,
                  bool includeInactive = false,
@@ -131,14 +131,14 @@ namespace AuthHive.Auth.Services.Organization
             {
                 // 캐시 확인
                 var cacheKey = $"{CACHE_KEY_PREFIX}{organizationId}";
-                var cachedOrg = await _cacheService.GetAsync<OrganizationDto>(cacheKey, cancellationToken);
+                var cachedOrg = await _cacheService.GetAsync<OrganizationResponse>(cacheKey, cancellationToken);
                 if (cachedOrg != null)
                 {
                     if (!includeInactive && cachedOrg.Status.ToString() != OrganizationStatus.Active.ToString())
                     {
-                        return ServiceResult<OrganizationDto>.Failure("Organization is not active");
+                        return ServiceResult<OrganizationResponse>.Failure("Organization is not active");
                     }
-                    return ServiceResult<OrganizationDto>.Success(cachedOrg);
+                    return ServiceResult<OrganizationResponse>.Success(cachedOrg);
                 }
 
                 // 2. Repository를 통해 조회 (Repository 패턴 준수)
@@ -153,10 +153,10 @@ namespace AuthHive.Auth.Services.Organization
                 // 3. 상태 확인
                 if (!includeInactive && organization.Status != OrganizationStatus.Active)
                 {
-                    return ServiceResult<OrganizationDto>.Failure("Organization is not active");
+                    return ServiceResult<OrganizationResponse>.Failure("Organization is not active");
                 }
 
-                var dto = _mapper.Map<OrganizationDto>(organization);
+                var dto = _mapper.Map<OrganizationResponse>(organization);
 
                 if (organization.Capabilities != null)
                 {
@@ -192,7 +192,7 @@ namespace AuthHive.Auth.Services.Organization
                     TimeSpan.FromMinutes(CACHE_DURATION_MINUTES),
                     cancellationToken);
 
-                return ServiceResult<OrganizationDto>.Success(dto);
+                return ServiceResult<OrganizationResponse>.Success(dto);
 
             }
             catch (AuthHiveException)
@@ -216,7 +216,7 @@ namespace AuthHive.Auth.Services.Organization
         /// WHO: 외부 API 클라이언트, SSO 프로세스
         /// HOW: 캐시 확인(ICacheService) → Repository 조회 → DTO 매핑(목록 포함) → 캐싱
         /// </summary>
-        public async Task<ServiceResult<OrganizationDto>> GetByKeyAsync(
+        public async Task<ServiceResult<OrganizationResponse>> GetByKeyAsync(
             string organizationKey,
             CancellationToken cancellationToken = default)
         {
@@ -224,28 +224,28 @@ namespace AuthHive.Auth.Services.Organization
             {
                 if (string.IsNullOrWhiteSpace(organizationKey))
                 {
-                    return ServiceResult<OrganizationDto>.Failure("Organization key is required");
+                    return ServiceResult<OrganizationResponse>.Failure("Organization key is required");
                 }
 
                 // 1. 캐시 확인 (ICacheService 사용)
                 var cacheKey = $"{CACHE_KEY_BY_KEY}{organizationKey}";
                 // [수정] _cache.TryGetValue 대신 await _cacheService.GetAsync 사용
-                var cachedOrg = await _cacheService.GetAsync<OrganizationDto>(cacheKey, cancellationToken);
+                var cachedOrg = await _cacheService.GetAsync<OrganizationResponse>(cacheKey, cancellationToken);
 
                 if (cachedOrg != null)
                 {
-                    return ServiceResult<OrganizationDto>.Success(cachedOrg);
+                    return ServiceResult<OrganizationResponse>.Success(cachedOrg);
                 }
 
                 // 2. Repository를 통해 조회
                 var organization = await _repository.GetByOrganizationKeyAsync(organizationKey, cancellationToken); // ✅ Token 전달
                 if (organization == null)
                 {
-                    return ServiceResult<OrganizationDto>.Failure($"Organization not found: {organizationKey}");
+                    return ServiceResult<OrganizationResponse>.Failure($"Organization not found: {organizationKey}");
                 }
 
                 // 3. DTO 매핑 및 통계 계산 (GetByIdAsync와 동일 로직)
-                var dto = _mapper.Map<OrganizationDto>(organization);
+                var dto = _mapper.Map<OrganizationResponse>(organization);
 
                 // 3-1. 활성 Capability 목록 설정 (Active Capabilities)
                 if (organization.Capabilities != null)
@@ -277,12 +277,12 @@ namespace AuthHive.Auth.Services.Organization
                     TimeSpan.FromMinutes(CACHE_DURATION_MINUTES),
                     cancellationToken);
 
-                return ServiceResult<OrganizationDto>.Success(dto);
+                return ServiceResult<OrganizationResponse>.Success(dto);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to get organization by key: {OrganizationKey}", organizationKey);
-                return ServiceResult<OrganizationDto>.Failure("Failed to retrieve organization");
+                return ServiceResult<OrganizationResponse>.Failure("Failed to retrieve organization");
             }
         }
 
@@ -407,95 +407,95 @@ namespace AuthHive.Auth.Services.Organization
         /// WHY: 멀티테넌시 환경의 새로운 테넌트 생성
         /// HOW: 검증 → 엔티티 생성 → Capability 할당 → 저장 → 캐시 무효화
         /// </summary>
-        public async Task<ServiceResult<CreateOrganizationResponse>> CreateAsync(
-           CreateOrganizationRequest request,
-           Guid createdByConnectedId, CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                // 유효성 검사
-                var validationResult = await ValidateCreateRequestAsync(request);
-                if (!validationResult.IsSuccess)
-                {
-                    return ServiceResult<CreateOrganizationResponse>.Failure(validationResult.ErrorMessage!);
-                }
+        // public async Task<ServiceResult<CreateOrganizationResponse>> CreateAsync(
+        //    CreateOrganizationRequest request,
+        //    Guid createdByConnectedId, CancellationToken cancellationToken = default)
+        // {
+        //     try
+        //     {
+        //         // 유효성 검사
+        //         var validationResult = await ValidateCreateRequestAsync(request);
+        //         if (!validationResult.IsSuccess)
+        //         {
+        //             return ServiceResult<CreateOrganizationResponse>.Failure(validationResult.ErrorMessage!);
+        //         }
 
-                // 엔티티 생성
-                var organization = new Core.Entities.Organization.Organization
-                {
-                    OrganizationKey = request.OrganizationKey,
-                    Name = request.Name,
-                    Description = request.Description,
-                    Type = request.Type,
-                    Status = OrganizationStatus.Active,
-                    ParentId = request.ParentId,
-                    Region = request.Region ?? "US",
-                    LogoUrl = request.LogoUrl,
-                    BrandColor = request.BrandColor,
-                    Website = request.Website,
-                    Industry = request.Industry,
-                    EmployeeRange = request.EmployeeRange,
-                    EstablishedDate = request.EstablishedDate,
-                    Metadata = request.Metadata,
-                    PolicyInheritanceMode = request.PolicyInheritanceMode ?? PolicyInheritanceMode.Inherit,
-                    ActivatedAt = DateTime.UtcNow,
-                    CreatedByConnectedId = createdByConnectedId
-                };
+        //         // 엔티티 생성
+        //         var organization = new Core.Entities.Organization.Organization
+        //         {
+        //             OrganizationKey = request.OrganizationKey,
+        //             Name = request.Name,
+        //             Description = request.Description,
+        //             Type = request.Type,
+        //             Status = OrganizationStatus.Active,
+        //             ParentId = request.ParentId,
+        //             Region = request.Region ?? "US",
+        //             LogoUrl = request.LogoUrl,
+        //             BrandColor = request.BrandColor,
+        //             Website = request.Website,
+        //             Industry = request.Industry,
+        //             EmployeeRange = request.EmployeeRange,
+        //             EstablishedDate = request.EstablishedDate,
+        //             Metadata = request.Metadata,
+        //             PolicyInheritanceMode = request.PolicyInheritanceMode ?? PolicyInheritanceMode.Inherit,
+        //             ActivatedAt = DateTime.UtcNow,
+        //             CreatedByConnectedId = createdByConnectedId
+        //         };
 
-                // PrimaryCapability 설정 - enum을 기반으로 Capability 엔티티 조회
-                if (request.PrimaryCapability.HasValue)
-                {
-                    var capabilityCode = request.PrimaryCapability.Value.ToString().ToUpper();
-                    var capability = await _capabilityRepository.GetByCodeAsync(capabilityCode);
+        //         // PrimaryCapability 설정 - enum을 기반으로 Capability 엔티티 조회
+        //         if (request.PrimaryCapability.HasValue)
+        //         {
+        //             var capabilityCode = request.PrimaryCapability.Value.ToString().ToUpper();
+        //             var capability = await _capabilityRepository.GetByCodeAsync(capabilityCode);
 
-                    if (capability != null)
-                    {
-                        organization.Capabilities = new List<OrganizationCapabilityAssignment>
-                       {
-                           new OrganizationCapabilityAssignment
-                           {
-                               OrganizationId = organization.Id,
-                               CapabilityId = capability.Id,
-                               IsPrimary = true,
-                               IsActive = true,
-                               EnabledAt = DateTime.UtcNow,
-                               AssignedAt = DateTime.UtcNow,
-                               AssignedByConnectedId = createdByConnectedId
-                           }
-                       };
-                    }
-                }
+        //             if (capability != null)
+        //             {
+        //                 organization.Capabilities = new List<OrganizationCapabilityAssignment>
+        //                {
+        //                    new OrganizationCapabilityAssignment
+        //                    {
+        //                        OrganizationId = organization.Id,
+        //                        CapabilityId = capability.Id,
+        //                        IsPrimary = true,
+        //                        IsActive = true,
+        //                        EnabledAt = DateTime.UtcNow,
+        //                        AssignedAt = DateTime.UtcNow,
+        //                        AssignedByConnectedId = createdByConnectedId
+        //                    }
+        //                };
+        //             }
+        //         }
 
-                // Repository를 통해 저장
-                var created = await _repository.AddAsync(organization);
+        //         // Repository를 통해 저장
+        //         var created = await _repository.AddAsync(organization);
 
-                var response = new CreateOrganizationResponse
-                {
-                    Id = created.Id,
-                    Name = created.Name,
-                    OrganizationId = created.OrganizationKey,
-                    IsSuccess = true,
-                    Message = "Organization created successfully",
-                    CreatedAt = created.CreatedAt,
-                    CreatedByConnectedId = createdByConnectedId
-                };
+        //         var response = new CreateOrganizationResponse
+        //         {
+        //             Id = created.Id,
+        //             Name = created.Name,
+        //             OrganizationId = created.OrganizationKey,
+        //             IsSuccess = true,
+        //             Message = "Organization created successfully",
+        //             CreatedAt = created.CreatedAt,
+        //             CreatedByConnectedId = createdByConnectedId
+        //         };
 
-                // 캐시 무효화
-                await InvalidateOrgSelfCacheAsync(created.Id, created.OrganizationKey);
+        //         // 캐시 무효화
+        //         await InvalidateOrgSelfCacheAsync(created.Id, created.OrganizationKey);
 
-                _logger.LogInformation(
-                    "Organization created successfully: {OrganizationKey} by ConnectedId: {ConnectedId}",
-                    created.OrganizationKey,
-                    createdByConnectedId);
+        //         _logger.LogInformation(
+        //             "Organization created successfully: {OrganizationKey} by ConnectedId: {ConnectedId}",
+        //             created.OrganizationKey,
+        //             createdByConnectedId);
 
-                return ServiceResult<CreateOrganizationResponse>.Success(response);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to create organization: {OrganizationKey}", request.OrganizationKey);
-                return ServiceResult<CreateOrganizationResponse>.Failure("Failed to create organization");
-            }
-        }
+        //         return ServiceResult<CreateOrganizationResponse>.Success(response);
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         _logger.LogError(ex, "Failed to create organization: {OrganizationKey}", request.OrganizationKey);
+        //         return ServiceResult<CreateOrganizationResponse>.Failure("Failed to create organization");
+        //     }
+        // }
 
         /// <summary>
         /// 조직 정보 수정

@@ -11,8 +11,6 @@ using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Models.Auth.Authentication;
-using AuthHive.Core.Models.Auth.Authentication.Requests;
-using AuthHive.Core.Models.Auth.Session.Requests;
 using AuthHive.Core.Models.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;

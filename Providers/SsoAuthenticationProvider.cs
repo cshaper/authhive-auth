@@ -17,14 +17,13 @@ using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService
 using AuthHive.Core.Interfaces.User.Repository; // IUserRepository
 using AuthHive.Core.Interfaces.Business.Platform; // IPlanRestrictionService
 using AuthHive.Core.Models.Auth.Authentication;
-using AuthHive.Core.Models.Auth.Authentication.Requests;
-using AuthHive.Core.Models.Auth.Session.Requests;
 using AuthHive.Core.Models.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
 using static AuthHive.Core.Enums.Auth.SessionEnums;
 using AuthHive.Core.Interfaces.Audit;
+using AuthHive.Core.Models.Auth.Authentication.Common;
 
 
 namespace AuthHive.Auth.Providers
