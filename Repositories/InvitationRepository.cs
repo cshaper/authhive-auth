@@ -14,6 +14,8 @@ using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.Auth.Authentication.Common;
 using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
+using AuthHive.Core.Entities.Auth.Invitation;
+using AuthHive.Core.Models.Auth.Invitation.ReadModels;
 
 namespace AuthHive.Auth.Repositories
 {
@@ -330,53 +332,90 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 특정 조직의 초대 관련 통계를 집계하여 조회합니다.
         /// </summary>
-        public async Task<InvitationStatistics> GetStatisticsAsync(
-            Guid organizationId, DateTime? startDate = null, DateTime? endDate = null, CancellationToken cancellationToken = default)
+        public async Task<InvitationStatisticsReadModel> GetStatisticsAsync(
+        Guid organizationId, DateTime? startDate = null, DateTime? endDate = null, CancellationToken cancellationToken = default)
         {
-            var baseQuery = Query().Where(i => i.OrganizationId == organizationId);
-            if (startDate.HasValue) baseQuery = baseQuery.Where(i => i.CreatedAt >= startDate.Value);
-            if (endDate.HasValue) baseQuery = baseQuery.Where(i => i.CreatedAt <= endDate.Value);
+            // 💡 DTO의 StartDate/EndDate는 non-nullable이므로, 쿼리에 사용할 실제 날짜 범위를 정의합니다.
+            // (이 코드는 _dateTimeProvider가 주입되어 있다고 가정합니다.)
+            DateTime actualEndDate = endDate ?? _dateTimeProvider.UtcNow;
+            DateTime actualStartDate = startDate ?? actualEndDate.AddDays(-30); // 기본값: 30일 전
 
-            // DB에서 필요한 데이터만 그룹화하여 효율적으로 가져옵니다.
-            var statusCounts = await baseQuery
-                .GroupBy(i => i.Status)
-                .Select(g => new { Status = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Status, x => x.Count, cancellationToken);
+            var baseQuery = Query().Where(i => i.OrganizationId == organizationId);
 
-            var typeCounts = await baseQuery
-                .GroupBy(i => i.Type)
-                .Select(g => new { Type = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Type, x => x.Count, cancellationToken);
+            // 💡 수정: non-nullable 날짜로 쿼리
+            baseQuery = baseQuery.Where(i => i.CreatedAt >= actualStartDate);
+            baseQuery = baseQuery.Where(i => i.CreatedAt <= actualEndDate);
+
+            // 1. 상태별 통계 (변경 없음)
+            var statusCounts = await baseQuery
+        .GroupBy(i => i.Status)
+        .Select(g => new { Status = g.Key, Count = g.Count() })
+        .ToDictionaryAsync(x => x.Status, x => x.Count, cancellationToken);
+
+            // 2. 💡 [CS0266 수정] 1단계: 먼저 'int' 타입의 기본 데이터를 가져옵니다.
+            var simpleTypeCounts = await baseQuery
+        .GroupBy(i => i.Type)
+        .Select(g => new { Type = g.Key, Count = g.Count() })
+        .ToDictionaryAsync(x => x.Type, x => x.Count, cancellationToken);
+
+            // 3. 💡 [CS0266 수정] 2단계: 'int' 딕셔너리를 'TypeStatisticsReadModel' 딕셔너리로 변환합니다.
+            // (TypeStatisticsReadModel에 TotalSent 속성이 있다고 가정합니다)
+            var typeCounts = simpleTypeCounts.ToDictionary(
+                kvp => kvp.Key, // 키는 동일 (InvitationType)
+                kvp => new TypeStatisticsReadModel { TotalSent = kvp.Value } // 값을 'int'에서 'TypeStatisticsReadModel' 객체로 변환
+                );
 
             var acceptedInvitationDates = await baseQuery
-                .Where(i => i.Status == InvitationStatus.Accepted && i.AcceptedAt.HasValue)
-                // [FIX CS8629] 삼항 연산자를 사용하여 컴파일러가 null이 아님을 확신하도록 수정
-                // .Where() 절에서 이미 null이 아님을 보장했으므로 DateTime.MinValue는 실제 사용되지 않습니다.
-                .Select(i => new { i.CreatedAt, AcceptedAt = i.AcceptedAt.HasValue ? i.AcceptedAt.Value : DateTime.MinValue })
-                .ToListAsync(cancellationToken);
+              .Where(i => i.Status == InvitationStatus.Accepted && i.AcceptedAt.HasValue)
+              .Select(i => new { i.CreatedAt, AcceptedAt = i.AcceptedAt.HasValue ? i.AcceptedAt.Value : DateTime.MinValue })
+              .ToListAsync(cancellationToken);
 
-            var stats = new InvitationStatistics
+            // --- 💡 v17 DTO 구조에 맞게 데이터 재조립 ---
+
+            int totalAccepted = statusCounts.GetValueOrDefault(InvitationStatus.Accepted);
+            int totalSent = statusCounts.Values.Sum();
+            int currentlyPending = await baseQuery.CountAsync(i => i.Status == InvitationStatus.Sent && i.ExpiresAt > _dateTimeProvider.UtcNow, cancellationToken);
+
+            // (v16 'AcceptanceRate' -> v17 'ConversionRate')
+            double conversionRate = totalSent > 0 ? (double)totalAccepted / totalSent * 100 : 0;
+
+            // (v16 'AverageTimeToAccept' -> v17 'MedianTimeToAction')
+            TimeSpan timeToAction = TimeSpan.Zero;
+            if (acceptedInvitationDates.Any())
             {
-                TotalAccepted = statusCounts.GetValueOrDefault(InvitationStatus.Accepted),
+                double averageTicks = acceptedInvitationDates.Average(t => (t.AcceptedAt - t.CreatedAt).Ticks);
+                timeToAction = TimeSpan.FromTicks((long)averageTicks);
+            }
+
+            var overallStats = new OverallStatisticsReadModel
+            {
+                TotalSent = totalSent,
+                TotalAccepted = totalAccepted,
                 TotalDeclined = statusCounts.GetValueOrDefault(InvitationStatus.Declined),
                 TotalExpired = statusCounts.GetValueOrDefault(InvitationStatus.Expired),
                 TotalCancelled = statusCounts.GetValueOrDefault(InvitationStatus.Cancelled),
                 TotalBounced = statusCounts.GetValueOrDefault(InvitationStatus.Bounced),
-                TotalSent = statusCounts.Values.Sum(),
-                CurrentlyPending = await baseQuery.CountAsync(i => i.Status == InvitationStatus.Sent && i.ExpiresAt > _dateTimeProvider.UtcNow, cancellationToken),
-                ByType = typeCounts
+                CurrentlyPending = currentlyPending
             };
 
-            stats.AcceptanceRate = stats.TotalSent > 0 ? (double)stats.TotalAccepted / stats.TotalSent * 100 : 0;
-
-            // [수정] 수락된 초대가 있는 경우에만 평균 수락 시간 계산
-            if (acceptedInvitationDates.Any())
+            var performanceStats = new PerformanceMetricsReadModel
             {
-                // .Where() 필터링을 거쳤으므로 .Value를 안전하게 사용할 수 있습니다.
-                // 이 방식은 nullability 경고(CS8629)와 빈 시퀀스에 대한 Average() 예외를 모두 방지합니다.
-                double averageTicks = acceptedInvitationDates.Average(t => (t.AcceptedAt - t.CreatedAt).Ticks);
-                stats.AverageTimeToAccept = TimeSpan.FromTicks((long)averageTicks);
-            }
+                ConversionRate = conversionRate,
+                MedianTimeToAction = timeToAction,
+            };
+
+            var timeBasedStats = new TimeBasedStatisticsReadModel(); // 'required' 만족용
+
+            // 4. 💡 [CS0266 해결] 이제 'typeCounts' 변수는 DTO가 요구하는 타입과 일치합니다.
+                        var stats = new InvitationStatisticsReadModel
+                        {
+                            StartDate = actualStartDate,
+                            EndDate = actualEndDate,
+                            Overall = overallStats,
+                            ByType = typeCounts, // 이제 타입이 일치합니다.
+                            TimeBased = timeBasedStats,
+                            Performance = performanceStats
+                        };
 
             return stats;
         }

@@ -14,6 +14,7 @@ using System.Text;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.Organization.Service;
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Entities.Auth.Authentication;
 
 
 namespace AuthHive.Auth.Repositories

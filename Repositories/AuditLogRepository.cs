@@ -43,17 +43,17 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 감사 로그 검색 - BaseRepository의 기능을 활용하여 최적화
         /// </summary>
-        public async Task<PagedResult<AuditLog>> SearchAsync(
-            Guid? organizationId,
-            Guid? userId,
-            string? action,
-            Guid? connectedId,
-            Guid? applicationId,
-            DateTime? startDate,
-            DateTime? endDate,
-            int pageNumber = 1,
-            int pageSize = 50,
-            CancellationToken cancellationToken = default)
+        public async Task<(IEnumerable<AuditLog> Items, int TotalCount)> SearchAsync(
+                Guid? organizationId,
+                Guid? userId,
+                string? action,
+                Guid? connectedId,
+                Guid? applicationId,
+                DateTime? startDate,
+                DateTime? endDate,
+                int pageNumber,
+                int pageSize,
+                CancellationToken cancellationToken = default)
         {
             var predicate = BuildSearchPredicate(action, connectedId, applicationId, startDate, endDate);
 
@@ -66,7 +66,7 @@ namespace AuthHive.Auth.Repositories
                 isDescending: true); // CancellationToken을 지원하지 않으므로 제거
 
             // ✨ 2. 이제 올바른 타입의 변수들을 사용하여 PagedResult를 생성합니다.
-            return new PagedResult<AuditLog>(items, totalCount, pageNumber, pageSize);
+          return (items, totalCount);
         }
 
         #endregion

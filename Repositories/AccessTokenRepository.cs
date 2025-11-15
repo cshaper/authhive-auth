@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 // [수정] TokenRevokedEvent의 네임스페이스 변경을 반영
 using AuthHive.Core.Models.Auth.Authentication.Events;
+using AuthHive.Core.Entities.Auth.Authentication;
 
 namespace AuthHive.Auth.Repositories
 {
