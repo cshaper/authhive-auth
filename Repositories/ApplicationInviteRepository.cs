@@ -30,7 +30,7 @@ namespace AuthHive.Auth.Repositories.PlatformApplication
         /// ApplicationInvite는 특정 조직의 플랫폼 애플리케이션에 대한 초대이므로 
         /// true를 반환하여 멀티테넌시 필터링을 강제합니다. 
         /// </summary>
-        protected override bool IsOrganizationScopedEntity()
+        protected override bool IsOrganizationBaseEntity()
         {
             return true;
         }

@@ -26,7 +26,7 @@ namespace AuthHive.Auth.Repositories
     ///       User 엔티티와 1:1 관계이며, 조직 범위 엔티티가 아닙니다.
     ///       
     /// [v16.1 변경 사항]
-    /// 1. (아키텍처) IsOrganizationScopedEntity() => false 로 변경 및 관련 쿼리 로직 수정
+    /// 1. (아키텍처) IsOrganizationBaseEntity() => false 로 변경 및 관련 쿼리 로직 수정
     /// 2. (아키텍처) IOrganizationContext 의존성 제거
     /// 3. (캐싱) BaseRepository의 _cacheService 사용하도록 캐시 로직 통합 (생성자 버그 수정 포함)
     /// 4. (UoW) SaveChangesAsync() 호출 없음 확인
@@ -59,7 +59,7 @@ namespace AuthHive.Auth.Repositories
         /// UserProfile은 User(글로벌 엔티티)와 직접 연결되므로 조직 범위 엔티티가 아닙니다.
         /// 따라서 'false'를 반환합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         #region 기본 조회 (캐시 및 AsNoTracking 적용)
 

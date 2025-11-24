@@ -43,7 +43,7 @@ namespace AuthHive.Auth.Repositories.Organization
         /// 조직 범위에 속하는지(조직 ID로 필터링되어야 하는지) 여부를 결정합니다.
         /// Organization은 그 자체로 조직 범위의 루트이므로 true입니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         /// <summary>
         /// 조직 키(samsung-semiconduct)로 조직 정보를 조회합니다.

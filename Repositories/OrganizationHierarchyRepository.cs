@@ -44,7 +44,7 @@ namespace AuthHive.Auth.Repositories.Organization
         /// 이 리포지토리가 다루는 엔티티(Organization)가 조직 범위에 속하는지 여부를 결정합니다.
         /// Organization 엔티티 자체는 최상위 스코프이므로 false를 반환하여 불필요한 필터링을 방지합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         /// <summary>
         /// 특정 조직의 직접 자식 또는 모든 하위 조직을 조회합니다.

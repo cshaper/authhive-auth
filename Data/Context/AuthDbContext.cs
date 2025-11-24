@@ -114,12 +114,12 @@ namespace AuthHive.Auth.Data.Context
         {
             // Auditable 엔티티 자동 처리
             var entries = ChangeTracker.Entries()
-                .Where(e => e.Entity is Core.Entities.Base.AuditableEntity ||
-                            e.Entity is Core.Entities.Base.SystemAuditableEntity);
+                .Where(e => e.Entity is Core.Entities.Base.GlobalBaseEntity ||
+                            e.Entity is Core.Entities.Base.SystemGlobalBaseEntity);
 
             foreach (var entry in entries)
             {
-                if (entry.Entity is Core.Entities.Base.AuditableEntity auditable)
+                if (entry.Entity is Core.Entities.Base.GlobalBaseEntity auditable)
                 {
                     if (entry.State == EntityState.Added)
                     {
@@ -133,7 +133,7 @@ namespace AuthHive.Auth.Data.Context
                         auditable.UpdatedByConnectedId = CurrentConnectedId;
                     }
                 }
-                else if (entry.Entity is Core.Entities.Base.SystemAuditableEntity systemAuditable)
+                else if (entry.Entity is Core.Entities.Base.SystemGlobalBaseEntity systemAuditable)
                 {
                     if (entry.State == EntityState.Added)
                     {
@@ -159,13 +159,13 @@ namespace AuthHive.Auth.Data.Context
                 entity.IsDeleted = true;
                 entity.DeletedAt = DateTime.UtcNow;
 
-                if (entity is Core.Entities.Base.AuditableEntity auditableEntity)
+                if (entity is Core.Entities.Base.GlobalBaseEntity GlobalBaseEntity)
                 {
-                    auditableEntity.DeletedByConnectedId = CurrentConnectedId;
+                    GlobalBaseEntity.DeletedByConnectedId = CurrentConnectedId;
                 }
-                else if (entity is Core.Entities.Base.SystemAuditableEntity systemAuditableEntity)
+                else if (entity is Core.Entities.Base.SystemGlobalBaseEntity systemGlobalBaseEntity)
                 {
-                    systemAuditableEntity.DeletedByConnectedId = CurrentConnectedId;
+                    systemGlobalBaseEntity.DeletedByConnectedId = CurrentConnectedId;
                 }
             }
 
@@ -181,9 +181,9 @@ namespace AuthHive.Auth.Data.Context
             // 수동으로 필터를 비활성화해야 할 수 있습니다. (예: .IgnoreQueryFilters())
             var currentOrganizationId = _principalAccessor.OrganizationId; // IPrincipalAccessor에서 가져온다고 가정
 
-            // 2. AuditableEntity를 상속하는 모든 엔티티를 찾습니다.
+            // 2. GlobalBaseEntity를 상속하는 모든 엔티티를 찾습니다.
             var organizationScopedEntities = modelBuilder.Model.GetEntityTypes()
-                .Where(e => typeof(AuditableEntity).IsAssignableFrom(e.ClrType));
+                .Where(e => typeof(GlobalBaseEntity).IsAssignableFrom(e.ClrType));
 
             foreach (var entityType in organizationScopedEntities)
             {
@@ -191,7 +191,7 @@ namespace AuthHive.Auth.Data.Context
                 var parameter = Expression.Parameter(entityType.ClrType, "e");
 
                 // 속성 접근 (예: e.OrganizationId)
-                var property = Expression.Property(parameter, nameof(AuditableEntity.OrganizationId));
+                var property = Expression.Property(parameter, nameof(GlobalBaseEntity.OrganizationId));
 
                 // 값 비교 (예: e.OrganizationId == currentOrganizationId)
                 var body = Expression.Equal(property, Expression.Constant(currentOrganizationId));
@@ -228,10 +228,10 @@ namespace AuthHive.Auth.Data.Context
             // RLS (Row Level Security) - 조직 격리
             foreach (var entityType in modelBuilder.Model.GetEntityTypes())
             {
-                if (typeof(Core.Entities.Base.OrganizationScopedEntity).IsAssignableFrom(entityType.ClrType))
+                if (typeof(Core.Entities.Base.OrganizationBaseEntity).IsAssignableFrom(entityType.ClrType))
                 {
                     var parameter = Expression.Parameter(entityType.ClrType, "e");
-                    var property = Expression.Property(parameter, nameof(Core.Entities.Base.OrganizationScopedEntity.OrganizationId));
+                    var property = Expression.Property(parameter, nameof(Core.Entities.Base.OrganizationBaseEntity.OrganizationId));
                     var filter = Expression.Lambda(
                         Expression.Equal(property, Expression.Property(Expression.Constant(this), nameof(CurrentOrganizationId))),
                         parameter);

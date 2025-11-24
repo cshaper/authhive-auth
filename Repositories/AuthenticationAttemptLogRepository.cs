@@ -32,14 +32,14 @@ namespace AuthHive.Auth.Repositories
         public AuthenticationAttemptLogRepository(
             AuthDbContext context,
             ILogger<AuthenticationAttemptLogRepository> logger,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             ICacheService? cacheService = null)
             : base(context, cacheService)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 조회 메서드 (Pure Query)
 

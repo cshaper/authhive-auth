@@ -44,7 +44,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// RolePermission 엔티티는 특정 조직에 속하므로, 멀티테넌시 필터링 및 조직별 캐싱을 위해 true를 반환합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity()
+        protected override bool IsOrganizationBaseEntity()
         {
             return true;
         }
@@ -148,15 +148,15 @@ namespace AuthHive.Auth.Repositories
         {
             IQueryable<RolePermission> query;
 
-            // organizationId가 제공되면 해당 조직으로 필터링, 아니면 전체 조직에서 검색 (IsOrganizationScopedEntity 활용)
-            if (organizationId.HasValue && IsOrganizationScopedEntity())
+            // organizationId가 제공되면 해당 조직으로 필터링, 아니면 전체 조직에서 검색 (IsOrganizationBaseEntity 활용)
+            if (organizationId.HasValue && IsOrganizationBaseEntity())
             {
                 query = QueryForOrganization(organizationId.Value) // BaseRepository의 헬퍼 메서드 사용
                         .Where(rp => rp.PermissionId == permissionId);
             }
             else
             {
-                // IsOrganizationScopedEntity()가 false이거나 organizationId가 null이면,
+                // IsOrganizationBaseEntity()가 false이거나 organizationId가 null이면,
                 // 기본 Query() (IsDeleted=false만 필터링) 사용
                 query = Query().Where(rp => rp.PermissionId == permissionId);
             }
@@ -253,7 +253,7 @@ namespace AuthHive.Auth.Repositories
                 throw new ArgumentException($"Role with ID '{roleId}' not found.", nameof(roleId));
             }
 
-            // RolePermission 엔티티가 OrganizationScopedEntity를 상속받으므로 OrganizationId는 필수
+            // RolePermission 엔티티가 OrganizationBaseEntity를 상속받으므로 OrganizationId는 필수
             if (role.OrganizationId == Guid.Empty)
             {
                 // Role에 OrganizationId가 없는 경우 (시스템 Role 등) 처리 방안 필요
@@ -276,10 +276,10 @@ namespace AuthHive.Auth.Repositories
                 Reason = reason,
                 IsActive = true,
                 OrganizationId = role.OrganizationId, // Role에서 가져옴 (Nullable 체크 후)
-                                                      // CreatedAt, CreatedBy 등은 AuditableEntity/SaveChangesAsync에서 처리될 수 있음
-                                                      // 여기서는 명시적으로 설정 (AuditableEntity 설정에 따라 달라질 수 있음)
+                                                      // CreatedAt, CreatedBy 등은 GlobalBaseEntity/SaveChangesAsync에서 처리될 수 있음
+                                                      // 여기서는 명시적으로 설정 (GlobalBaseEntity 설정에 따라 달라질 수 있음)
                 CreatedAt = DateTime.UtcNow, // IDateTimeProvider 사용 고려
-                                             // CreatedByConnectedId = grantedBy // AuditableEntity가 자동으로 처리한다면 생략 가능
+                                             // CreatedByConnectedId = grantedBy // GlobalBaseEntity가 자동으로 처리한다면 생략 가능
             };
 
             // 4. 엔티티 추가 (DB Context에 등록)
@@ -369,7 +369,7 @@ namespace AuthHive.Auth.Repositories
 
             // 상태 변경 및 UpdateAsync 호출 (캐시 무효화 포함)
             rolePermission.IsActive = isActive;
-            // UpdatedAt, UpdatedBy 등은 AuditableEntity/SaveChangesAsync에서 처리될 수 있음
+            // UpdatedAt, UpdatedBy 등은 GlobalBaseEntity/SaveChangesAsync에서 처리될 수 있음
             // 여기서는 명시적 설정
             rolePermission.UpdatedAt = DateTime.UtcNow; // IDateTimeProvider 사용 고려
                                                         // UpdatedByConnectedId 설정 필요 (현재 호출자 정보 필요 - 서비스 레이어에서 주입받아야 함)
@@ -501,7 +501,7 @@ namespace AuthHive.Auth.Repositories
                 IsActive = true,
                 OrganizationId = organizationId, // 💡 수정된 organizationId 변수 사용
                 CreatedAt = currentTime,
-                // CreatedByConnectedId = grantedBy // AuditableEntity 처리 여부 확인
+                // CreatedByConnectedId = grantedBy // GlobalBaseEntity 처리 여부 확인
             }).ToList();
 
             // 6. 일괄 추가 (DB Context에 등록)
@@ -777,7 +777,7 @@ namespace AuthHive.Auth.Repositories
             CancellationToken cancellationToken = default)
         {
             var utcNow = DateTime.UtcNow; // IDateTimeProvider 사용 고려
-            IQueryable<RolePermission> query = organizationId.HasValue && IsOrganizationScopedEntity()
+            IQueryable<RolePermission> query = organizationId.HasValue && IsOrganizationBaseEntity()
                 ? QueryForOrganization(organizationId.Value)
                 : Query();
 
@@ -802,7 +802,7 @@ namespace AuthHive.Auth.Repositories
             var utcNow = DateTime.UtcNow; // IDateTimeProvider 사용 고려
             var expiryThreshold = utcNow.AddDays(daysUntilExpiry);
 
-            IQueryable<RolePermission> query = organizationId.HasValue && IsOrganizationScopedEntity()
+            IQueryable<RolePermission> query = organizationId.HasValue && IsOrganizationBaseEntity()
                 ? QueryForOrganization(organizationId.Value)
                 : Query();
 
@@ -1168,7 +1168,7 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
-            if (!IsOrganizationScopedEntity()) // 방어 코드
+            if (!IsOrganizationBaseEntity()) // 방어 코드
             {
                 _logger.LogWarning("GetPermissionCountByRoleAsync called for a non-organization-scoped entity repository: {EntityType}", typeof(RolePermission).Name);
                 // 또는 organizationId 무시하고 전체 통계 반환? 여기서는 빈 Dictionary 반환
@@ -1197,7 +1197,7 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId,
             CancellationToken cancellationToken = default)
         {
-            if (!IsOrganizationScopedEntity())
+            if (!IsOrganizationBaseEntity())
             {
                 _logger.LogWarning("GetRoleCountByPermissionAsync called for a non-organization-scoped entity repository: {EntityType}", typeof(RolePermission).Name);
                 return new Dictionary<Guid, int>();
@@ -1225,7 +1225,7 @@ namespace AuthHive.Auth.Repositories
             int limit = 10,
             CancellationToken cancellationToken = default)
         {
-            if (!IsOrganizationScopedEntity())
+            if (!IsOrganizationBaseEntity())
             {
                 _logger.LogWarning("GetMostAssignedPermissionsAsync called for a non-organization-scoped entity repository: {EntityType}", typeof(RolePermission).Name);
                 return Enumerable.Empty<(Guid, int)>();
@@ -1252,7 +1252,7 @@ namespace AuthHive.Auth.Repositories
             int inactiveDays = 90, // 비활성 기준일
             CancellationToken cancellationToken = default)
         {
-            if (!IsOrganizationScopedEntity())
+            if (!IsOrganizationBaseEntity())
             {
                 _logger.LogWarning("FindUnusedPermissionsAsync called for a non-organization-scoped entity repository: {EntityType}", typeof(RolePermission).Name);
                 return Enumerable.Empty<RolePermission>();
@@ -1387,7 +1387,7 @@ namespace AuthHive.Auth.Repositories
             Guid organizationId, // 검색 범위 조직
             CancellationToken cancellationToken = default)
         {
-            if (!IsOrganizationScopedEntity())
+            if (!IsOrganizationBaseEntity())
             {
                 _logger.LogWarning("SearchByScopePatternAsync called for a non-organization-scoped entity repository: {EntityType}", typeof(RolePermission).Name);
                 return Enumerable.Empty<RolePermission>();

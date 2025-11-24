@@ -30,7 +30,7 @@ namespace AuthHive.Auth.Repositories
         {
         }
 
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region SearchAsync 구현
 

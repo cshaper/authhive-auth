@@ -36,7 +36,7 @@ namespace AuthHive.Auth.Repositories
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         #region 검색 및 필터
 

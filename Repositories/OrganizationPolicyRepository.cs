@@ -41,7 +41,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 이 리포지토리가 다루는 엔티티가 조직 범위에 속하는지 여부를 결정합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 정책 타입별 조회
 

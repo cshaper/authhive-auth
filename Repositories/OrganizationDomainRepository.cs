@@ -39,7 +39,7 @@ namespace AuthHive.Auth.Repositories
         /// 이 리포지토리가 다루는 엔티티가 조직 범위에 속하는지 여부를 결정합니다.
         /// 사용: BaseRepository의 QueryForOrganization 헬퍼 메서드에서 조직 ID 필터링 여부를 판단하는 데 사용됩니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 기본 도메인 조회
 
@@ -275,7 +275,7 @@ namespace AuthHive.Auth.Repositories
                 .Where(d => d.Id == domainId)
                 .ExecuteUpdateAsync(updates => updates
                     .SetProperty(d => d.IsActive, isActive)
-                    // UpdatedAt, UpdatedBy 등은 AuditableEntityInterceptor가 처리한다고 가정
+                    // UpdatedAt, UpdatedBy 등은 GlobalBaseEntityInterceptor가 처리한다고 가정
                     , cancellationToken) > 0;
         }
 
@@ -304,7 +304,7 @@ namespace AuthHive.Auth.Repositories
         public async Task<int> ArchiveInactiveDomainsAsync(int inactiveDays = 90, CancellationToken cancellationToken = default)
         {
             var cutoffDate = DateTime.UtcNow.AddDays(-inactiveDays);
-            // UpdatedAt이 AuditableEntity에 의해 자동 관리된다고 가정
+            // UpdatedAt이 GlobalBaseEntity에 의해 자동 관리된다고 가정
             return await _dbSet
                 .Where(d => d.IsActive && d.UpdatedAt < cutoffDate)
                 .ExecuteUpdateAsync(updates => updates

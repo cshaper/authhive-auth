@@ -45,7 +45,7 @@ namespace AuthHive.Auth.Repositories
         /// 조직 범위에 속하는지(조직 ID로 필터링되어야 하는지) 여부를 결정합니다.
         /// 가격 정책은 조직별로 관리되므로 true를 반환합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 기본 조회
 

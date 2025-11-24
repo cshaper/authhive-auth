@@ -34,7 +34,7 @@ namespace AuthHive.Auth.Repositories.Organization
         }
 
         // [추가] 조직 범위 엔티티임을 명시
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 조회 메서드
 

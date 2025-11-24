@@ -29,7 +29,7 @@ namespace AuthHive.Auth.Validator
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IRoleRepository _roleRepository;
         private readonly IPlanService _planService;
-        private readonly IEventBus _eventBus;
+        private readonly IDomainEvent _eventBus;
         private readonly ILogger<UserApplicationAccessValidator> _logger;
         private static readonly Regex PermissionScopeRegex = new Regex(@"^([\w\-]+|\*):([\w\-]+|\*)?$");
 
@@ -40,7 +40,7 @@ namespace AuthHive.Auth.Validator
             IConnectedIdRepository connectedIdRepository,
             IRoleRepository roleRepository,
             IPlanService planService,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             ILogger<UserApplicationAccessValidator> logger)
         {
             _accessRepository = accessRepository;

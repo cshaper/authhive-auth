@@ -40,7 +40,7 @@ namespace AuthHive.Auth.Repositories
         /// [FIXED] BaseRepository 추상 메서드 구현. RefreshToken은 사용자 범위 (ConnectedId)이며,
         /// 조직 범위 필터링은 필요 없음 (false).
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
 
         #region IRefreshTokenRepository 특정 메서드 (CancellationToken 추가)

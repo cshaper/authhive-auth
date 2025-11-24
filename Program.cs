@@ -48,7 +48,7 @@ try
         .WriteTo.Console());
 
     // Core Services
-    builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
+    builder.Services.AddSingleton<IDomainEvent, InMemoryEventBus>();
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
@@ -98,7 +98,7 @@ try
 
     // Contexts
     builder.Services.AddScoped<IOrganizationContext, OrganizationContext>();
-    builder.Services.AddScoped<IConnectedIdContext, ConnectedIdContext>();
+    builder.Services.AddScoped<IPrincipalAccessor, ConnectedIdContext>();
 
     // Services
     builder.Services.AddScoped<ISessionService, SessionService>();

@@ -35,7 +35,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 이 리포지토리가 다루는 OrganizationMemberProfile 엔티티는 조직 범위(Organization-scoped)임을 명시합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 캐시 무효화 오버라이드 (v16)
 

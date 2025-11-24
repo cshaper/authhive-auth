@@ -46,7 +46,7 @@ namespace AuthHive.Auth.Repositories
             _logger = logger;
         }
 
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         /// <summary>
         /// OAuth Provider 설정 저장 (신규 또는 업데이트)

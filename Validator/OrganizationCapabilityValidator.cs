@@ -31,7 +31,7 @@ namespace AuthHive.Auth.Services.Validators
         private readonly IOrganizationCapabilityAssignmentRepository _assignmentRepository;
         private readonly IPlanService _planService;
         private readonly ICacheService _cache;
-        private readonly IEventBus _eventBus;
+        private readonly IDomainEvent _eventBus;
         private readonly IAuditService _auditService;
         private readonly ILogger<OrganizationCapabilityValidator> _logger;
 
@@ -60,7 +60,7 @@ namespace AuthHive.Auth.Services.Validators
             IOrganizationCapabilityAssignmentRepository assignmentRepository,
             IPlanService planService,
             ICacheService cache,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             IAuditService auditService,
             ILogger<OrganizationCapabilityValidator> logger)
         {

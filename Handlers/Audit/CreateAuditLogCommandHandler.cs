@@ -83,11 +83,11 @@ namespace AuthHive.Auth.Handlers.Audit
                 // Entity-Managed Properties
                 Timestamp = utcNow, // 핸들러가 실제 DB 저장 시간을 설정
 
-                // SystemAuditableEntity Properties
+                // SystemGlobalBaseEntity Properties
                 CreatedAt = utcNow,
                 
                 // [v17 CS0117/CS0029 해결]
-                // SystemAuditableEntity "계약서"는 'CreatedByConnectedId' (Guid?)를 요구합니다.
+                // SystemGlobalBaseEntity "계약서"는 'CreatedByConnectedId' (Guid?)를 요구합니다.
                 // command.TriggeredBy (ConnectedId)는 Guid?이므로 타입이 일치합니다.
                 CreatedByConnectedId = command.TriggeredBy 
             };

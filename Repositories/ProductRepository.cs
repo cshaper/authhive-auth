@@ -38,7 +38,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// [FIXED] BaseRepository 추상 메서드 구현. Product 정의는 전역적이므로 조직 범위 아님 (false).
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         #region 기본 조회 (캐시 적용, CancellationToken 추가)
 

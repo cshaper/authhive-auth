@@ -33,7 +33,7 @@ namespace AuthHive.Auth.Repositories.Organization
         {
         }
 
-        protected override bool IsOrganizationScopedEntity() => true; // SSO 설정은 조직 범위
+        protected override bool IsOrganizationBaseEntity() => true; // SSO 설정은 조직 범위
 
         #region SSO 고유 조회
 

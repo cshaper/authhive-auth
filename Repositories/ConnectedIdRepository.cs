@@ -37,7 +37,7 @@ namespace AuthHive.Auth.Repositories
             _organizationContext = organizationContext;
         }
 
-        protected override bool IsOrganizationScopedEntity()
+        protected override bool IsOrganizationBaseEntity()
         {
             return true;
         }

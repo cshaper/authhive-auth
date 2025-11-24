@@ -43,7 +43,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// 이 리포지토리가 다루는 PlatformApplicationEntity가 조직 범위 엔티티임을 명시합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region IPlatformApplicationRepository 구현 (CancellationToken 추가)
 
@@ -87,12 +87,12 @@ namespace AuthHive.Auth.Repositories
             var entity = await GetByIdAsync(id, cancellationToken); 
             if (entity == null || entity.IsDeleted) return false;
 
-             if (entity is AuditableEntity auditableEntity)
+             if (entity is GlobalBaseEntity GlobalBaseEntity)
              {
-                 auditableEntity.DeletedByConnectedId = deletedByConnectedId;
+                 GlobalBaseEntity.DeletedByConnectedId = deletedByConnectedId;
              }
              else {
-                 _logger.LogWarning("Entity {EntityId} is not AuditableEntity, cannot set DeletedByConnectedId.", id);
+                 _logger.LogWarning("Entity {EntityId} is not GlobalBaseEntity, cannot set DeletedByConnectedId.", id);
              }
 
             await DeleteAsync(entity, cancellationToken);

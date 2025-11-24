@@ -53,7 +53,7 @@ namespace AuthHive.Services.Auth.Validators
         private readonly ILogger<PermissionValidator> _logger;
         private readonly ICacheService _cacheService;
         private readonly IAuditService _auditService;
-        private readonly IEventBus _eventBus;
+        private readonly IDomainEvent _eventBus;
         private readonly IUnitOfWork _unitOfWork;
         private readonly IPermissionRepository _permissionRepository;
         private readonly IRoleRepository _roleRepository;
@@ -74,7 +74,7 @@ namespace AuthHive.Services.Auth.Validators
             ILogger<PermissionValidator> logger,
             ICacheService cacheService,
             IAuditService auditService,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             IUnitOfWork unitOfWork,
             IPermissionRepository permissionRepository,
             IRolePermissionRepository rolePermissionRepository,

@@ -44,7 +44,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// [FIXED] BaseRepository 추상 메서드 구현. 템플릿은 조직 범위에 속함 (true).
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 기본 조회 (CancellationToken 추가)
 

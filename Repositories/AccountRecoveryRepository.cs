@@ -45,7 +45,7 @@ namespace AuthHive.Auth.Repositories
         /// AccountRecoveryRequest 엔티티는 특정 조직에 속하므로,
         /// 멀티테넌시 필터링을 적용하기 위해 true를 반환합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity()
+        protected override bool IsOrganizationBaseEntity()
         {
             return true;
         }

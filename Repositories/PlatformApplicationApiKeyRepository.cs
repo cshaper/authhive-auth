@@ -36,7 +36,7 @@ namespace AuthHive.Auth.Repositories
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
         
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region API Key 전용 조회 Operations (CancellationToken 추가)
 

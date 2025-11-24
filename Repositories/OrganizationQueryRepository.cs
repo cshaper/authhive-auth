@@ -31,7 +31,7 @@ namespace AuthHive.Auth.Repositories
         {
         }
 
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         #region IOrganizationQueryRepository 구현 (특화된 쿼리)
 

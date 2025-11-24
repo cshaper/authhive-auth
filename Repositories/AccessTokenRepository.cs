@@ -25,7 +25,7 @@ namespace AuthHive.Auth.Repositories
     public class AccessTokenRepository : BaseRepository<AccessToken>, IAccessTokenRepository
     {
         private readonly ILogger<AccessTokenRepository> _logger;
-        private readonly IEventBus _eventBus;
+        private readonly IDomainEvent _eventBus;
 
         /// <summary>
         /// AccessTokenRepository의 생성자. 최신 아키텍처에 따라 의존성을 주입받습니다.
@@ -33,7 +33,7 @@ namespace AuthHive.Auth.Repositories
         public AccessTokenRepository(
             AuthDbContext context,
             ILogger<AccessTokenRepository> logger,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             ICacheService? cacheService = null)
             : base(context, cacheService)
         {
@@ -43,9 +43,9 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>
         /// 이 리포지토리가 다루는 엔티티(AccessToken)가 조직 범위인지 여부를 결정합니다.
-        /// AccessToken은 OrganizationScopedEntity를 상속하므로 true를 반환하여 멀티테넌시 필터링을 강제합니다.
+        /// AccessToken은 OrganizationBaseEntity를 상속하므로 true를 반환하여 멀티테넌시 필터링을 강제합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region Access Token Operations
 

@@ -3,7 +3,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using AuthHive.Core.Constants.Business;
-using AuthHive.Core.Interfaces.Base; // IEventBus, IDomainEvent를 위해 추가
+using AuthHive.Core.Interfaces.Base; // IDomainEvent, IDomainEvent를 위해 추가
 using AuthHive.Core.Interfaces.Business.Platform.Service;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Interfaces.Infra.Security;
@@ -25,7 +25,7 @@ namespace AuthHive.Auth.Services.Validators
         private readonly ISslCertificateHelper _sslHelper;
         private readonly IPlanService _planService;
         private readonly ICacheService _cache;
-        private readonly IEventBus _eventBus; // [추가] 이벤트 버스 의존성
+        private readonly IDomainEvent _eventBus; // [추가] 이벤트 버스 의존성
         private readonly ILogger<OrganizationDomainValidator> _logger;
 
         private static readonly Regex DomainFormatRegex = new Regex(
@@ -41,7 +41,7 @@ namespace AuthHive.Auth.Services.Validators
             ISslCertificateHelper sslHelper,
             IPlanService planService,
             ICacheService cache,
-            IEventBus eventBus, // [추가] 생성자에 IEventBus 주입
+            IDomainEvent eventBus, // [추가] 생성자에 IDomainEvent 주입
             ILogger<OrganizationDomainValidator> logger)
         {
             _domainRepository = domainRepository;

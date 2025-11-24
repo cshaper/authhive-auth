@@ -22,7 +22,7 @@ namespace AuthHive.Auth.Repositories
     /// <summary>
     /// ConnectedId 컨텍스트 데이터 관리 Repository - v17 최종본
     /// </summary>
-    public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContextEntity>, IConnectedIdContextRepository
+    public class ConnectedIdContextRepository : BaseRepository<ConnectedIdContextEntity>, IPrincipalAccessorRepository
     {
         public ConnectedIdContextRepository(
             AuthDbContext context,
@@ -31,9 +31,9 @@ namespace AuthHive.Auth.Repositories
         {
         }
 
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
-        #region IConnectedIdContextRepository 기본 구현
+        #region IPrincipalAccessorRepository 기본 구현
 
         public Task<ConnectedIdContextEntity?> GetByContextKeyAsync(string contextKey, CancellationToken cancellationToken = default)
         {

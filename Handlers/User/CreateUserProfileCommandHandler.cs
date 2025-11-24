@@ -82,7 +82,7 @@ namespace AuthHive.Auth.Handlers.User
                 EmailNotificationsEnabled = command.EmailNotificationsEnabled ?? true, // v16 기본값
                 SmsNotificationsEnabled = command.SmsNotificationsEnabled ?? false, // v16 기본값
                 
-                // CreatedByConnectedId 등 감사 속성은 SystemAuditableEntity가 자동 처리 (가정)
+                // CreatedByConnectedId 등 감사 속성은 SystemGlobalBaseEntity가 자동 처리 (가정)
             };
             
             // 3. 엔티티 도메인 메서드 호출

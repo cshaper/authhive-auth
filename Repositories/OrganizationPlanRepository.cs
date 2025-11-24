@@ -48,7 +48,7 @@ namespace AuthHive.Auth.Repositories
         /// '정의' 데이터이므로 특정 조직에 종속되지 않습니다.
         /// BaseRepository의 추상 메서드를 구현합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
 
         /// <summary>

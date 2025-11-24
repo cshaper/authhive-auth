@@ -49,7 +49,7 @@ namespace AuthHive.Auth.Repositories // 네임스페이스는 프로젝트 구�
         /// UserPlatformApplicationAccess는 특정 조직의 애플리케이션 접근 권한을 나타내므로
         /// 'true'를 반환하여 BaseRepository의 조직 범위 필터링(RLS)을 활성화합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 특화 조회 (IUserPlatformApplicationAccessRepository 구현)
 

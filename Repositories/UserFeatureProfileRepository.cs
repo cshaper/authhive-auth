@@ -43,7 +43,7 @@ namespace AuthHive.Auth.Repositories
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         #region ConnectedId 기반 조회 (UserFeatureProfile 특화)
         // ... (이전 코드와 동일) ...

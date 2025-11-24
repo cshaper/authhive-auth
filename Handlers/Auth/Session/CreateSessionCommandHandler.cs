@@ -102,11 +102,11 @@ namespace AuthHive.Auth.Handlers.Auth.Session
                 ApiCalls = 0,
                 IsLocked = false,
                 
-                // [v17] SystemAuditableEntity 속성 설정
+                // [v17] SystemGlobalBaseEntity 속성 설정
                 CreatedAt = utcNow,
                 
                 // [v17 CS0117/CS0029 해결]
-                // SystemAuditableEntity "계약서"는 'CreatedByConnectedId' (Guid?)를 요구합니다.
+                // SystemGlobalBaseEntity "계약서"는 'CreatedByConnectedId' (Guid?)를 요구합니다.
                 // command.AggregateId (UserId)는 Guid이므로 타입이 일치합니다.
                 CreatedByConnectedId = command.AggregateId 
             };

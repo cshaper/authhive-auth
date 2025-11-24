@@ -53,7 +53,7 @@ namespace AuthHive.Auth.Repositories
         }
 
         // [추가] 시스템 설정은 조직에 종속되지 않으므로 false 반환
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
 
         #region 기본 조회 (캐시 최적화)
 

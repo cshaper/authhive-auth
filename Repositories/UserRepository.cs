@@ -25,7 +25,7 @@ namespace AuthHive.Auth.Repositories
     ///       User 엔티티는 특정 조직에 직접 속하지 않으며, 조직과의 관계는 ConnectedId를 통해 맺어집니다.
     ///       
     /// [v16.1 변경 사항]
-    /// 1. (아키텍처) IsOrganizationScopedEntity() => false 확인
+    /// 1. (아키텍처) IsOrganizationBaseEntity() => false 확인
     /// 2. (캐싱) 생성자에서 ICacheService를 BaseRepository로 전달하도록 버그 수정
     /// 3. (UoW) 서비스 책임인 BulkUpdateStatusAsync 제거, SaveChangesAsync 없음 확인
     /// 4. (최적화) 읽기 전용 쿼리에 AsNoTracking() 적용
@@ -56,7 +56,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// User 엔티티는 전역이므로 조직 범위가 아닙니다. 'false'를 반환합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => false;
+        protected override bool IsOrganizationBaseEntity() => false;
         #endregion
 
         #region IUserRepository Implementations (기본 조회)

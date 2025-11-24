@@ -32,7 +32,7 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             ICacheService cacheService,
             ILogger<SessionRepository> logger,
-            IConnectedIdContext connectedIdContext,
+            IPrincipalAccessor connectedIdContext,
             IDateTimeProvider dateTimeProvider) // ✅ ConnectedId 주입 유지 (감사용)
             : base(context, cacheService) // ✅ base 생성자 호출 변경
         {
@@ -45,11 +45,11 @@ namespace AuthHive.Auth.Repositories
         /// SessionEntity는 조직 범위일 수도 있고 아닐 수도 있습니다.
         /// 기본적으로 조직 범위로 처리하고, 전역 세션은 별도 메서드에서 _dbSet을 직접 사용합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region BaseRepository 오버라이드 (감사 필드 및 캐시)
 
-        // Query() 재정의 제거 - BaseRepository가 조직 필터링 처리 (IsOrganizationScopedEntity = true)
+        // Query() 재정의 제거 - BaseRepository가 조직 필터링 처리 (IsOrganizationBaseEntity = true)
 
         public override Task<SessionEntity> AddAsync(SessionEntity entity, CancellationToken cancellationToken = default)
         {

@@ -46,7 +46,7 @@ namespace AuthHive.Auth.Repositories
         /// 이 리포지토리가 다루는 엔티티(Invitation)가 조직 범위인지 여부를 결정합니다.
         /// Invitation은 조직에 종속되므로 true를 반환하여 멀티테넌시 필터링을 강제합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
 
         #region 기본 조회

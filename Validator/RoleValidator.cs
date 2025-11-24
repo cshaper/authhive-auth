@@ -54,7 +54,7 @@ namespace AuthHive.Auth.Validator
         private readonly IPlanSubscriptionRepository _planSubscriptionRepository;
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IAuditService _auditService;
-        private readonly IEventBus _eventBus;
+        private readonly IDomainEvent _eventBus;
         private readonly IUnitOfWork _unitOfWork;
         private readonly ICacheService _cacheService;
         private readonly IDateTimeProvider _dateTimeProvider;
@@ -96,7 +96,7 @@ namespace AuthHive.Auth.Validator
             IPlanSubscriptionRepository planSubscriptionRepository,
             IConnectedIdRepository connectedIdRepository,
             IAuditService auditService,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             IUnitOfWork unitOfWork,
             ICacheService cacheService,
             IDateTimeProvider dateTimeProvider,

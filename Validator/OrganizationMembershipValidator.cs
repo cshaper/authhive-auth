@@ -28,7 +28,7 @@ namespace AuthHive.Auth.Services.Validators
         private readonly IOrganizationMembershipRepository _membershipRepository;
         private readonly IConnectedIdRepository _connectedIdRepository;
         private readonly IPlanService _planService;
-        private readonly IEventBus _eventBus;
+        private readonly IDomainEvent _eventBus;
         private readonly ILogger<OrganizationMembershipValidator> _logger;
         
         public OrganizationMembershipValidator(
@@ -36,7 +36,7 @@ namespace AuthHive.Auth.Services.Validators
             IOrganizationMembershipRepository membershipRepository,
             IConnectedIdRepository connectedIdRepository,
             IPlanService planService,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             ILogger<OrganizationMembershipValidator> logger)
         {
             _organizationRepository = organizationRepository;

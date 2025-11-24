@@ -20,7 +20,7 @@ namespace AuthHive.Auth.Repositories.Base
     /// '명시적 지시' 원칙에 따라 어떤 암묵적인 컨텍스트(IOrganizationContext)에도 의존하지 않습니다.
     /// 모든 하위 리포지토리는 이 클래스를 상속받아 공통 기능을 재사용하고, 자신만의 고유한 쿼리만 추가하면 됩니다.
     /// </summary>
-    public abstract class BaseRepository<TEntity> : IRepository<TEntity> where TEntity : BaseEntity
+    public abstract class BaseRepository<TEntity> : IRepository<TEntity> where TEntity 
     {
         // 데이터베이스와 직접 통신하는 DbContext입니다. Unit of Work 패턴의 일부로 관리됩니다.
         protected readonly AuthDbContext _context;
@@ -85,7 +85,7 @@ namespace AuthHive.Auth.Repositories.Base
         protected virtual IQueryable<TEntity> QueryForOrganization(Guid organizationId)
         {
             var query = Query();
-            if (IsOrganizationScopedEntity())
+            if (IsOrganizationBaseEntity())
             {
                 // EF.Property를 사용하여 TEntity가 OrganizationId 속성을 직접 노출하지 않더라도
                 // 데이터베이스의 'OrganizationId' 컬럼을 기준으로 동적으로 쿼리합니다.
@@ -99,7 +99,7 @@ namespace AuthHive.Auth.Repositories.Base
         /// 자식 리포지토리는 이 메서드를 반드시 재정의(override)하여 자신의 엔티티 특성을 명시해야 합니다.
         /// 예: UserRepository -> false, ProductRepository -> true
         /// </summary>
-        protected abstract bool IsOrganizationScopedEntity();
+        protected abstract bool IsOrganizationBaseEntity();
         #endregion
 
         #region 조회 작업 (IRepository 구현)

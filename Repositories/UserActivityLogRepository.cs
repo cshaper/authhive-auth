@@ -24,7 +24,7 @@ namespace AuthHive.Auth.Repositories
     /// 
     /// [v16.2 변경 사항]
     /// 1. CS0534 오류 해결: BaseRepository의 abstract 메서드인
-    ///    IsOrganizationScopedEntity()를 'false'로 명시적 구현
+    ///    IsOrganizationBaseEntity()를 'false'로 명시적 구현
     /// 
     /// [v16.1 변경 사항]
     /// 1. IOrganizationScopedRepository 상속 제거에 따른 로직 수정
@@ -46,11 +46,11 @@ namespace AuthHive.Auth.Repositories
 
         /// <summary>
         /// [v16.2 수정] BaseRepository의 abstract 메서드를 구현합니다.
-        /// UserActivityLog 엔티티는 SystemAuditableEntity를 상속하며,
-        /// OrganizationId가 nullable이므로 조직 범위 엔티티(OrganizationScopedEntity)가 아닙니다.
+        /// UserActivityLog 엔티티는 SystemGlobalBaseEntity를 상속하며,
+        /// OrganizationId가 nullable이므로 조직 범위 엔티티(OrganizationBaseEntity)가 아닙니다.
         /// 따라서 'false'를 반환합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity()
+        protected override bool IsOrganizationBaseEntity()
         {
             return false;
         }

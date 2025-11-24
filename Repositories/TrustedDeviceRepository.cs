@@ -32,7 +32,7 @@ namespace AuthHive.Auth.Repositories
             _dateTimeProvider = dateTimeProvider;
         }
 
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 기본 조회 메서드
 

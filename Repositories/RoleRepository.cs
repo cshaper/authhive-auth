@@ -40,7 +40,7 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
     /// Role 엔티티는 조직 범위(Organization Scoped) 엔티티임을 명시적으로 알립니다.
     /// BaseRepository의 QueryForOrganization 메서드에 사용됩니다.
     /// </summary>
-    protected override bool IsOrganizationScopedEntity() => true;
+    protected override bool IsOrganizationBaseEntity() => true;
 
     // Override Query to add Organization filtering for Role
     public override IQueryable<Role> Query()
@@ -486,7 +486,7 @@ public class RoleRepository : BaseRepository<Role>, IRoleRepository
         }
         else
         {
-            // 기본 정렬: BaseEntity의 Id를 사용
+            // 기본 정렬의 Id를 사용
             orderedQuery = query.OrderByDescending(e => e.Id);
         }
 

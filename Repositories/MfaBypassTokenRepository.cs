@@ -40,7 +40,7 @@ namespace AuthHive.Auth.Repositories
         }
 
         // 💡 3. [CS0534 해결] v17 BaseRepository의 추상 메서드 구현
-        protected override bool IsOrganizationScopedEntity()
+        protected override bool IsOrganizationBaseEntity()
         {
             // MfaBypassToken은 조직이 아닌 사용자(User) 범위에 속합니다.
             return false; 
@@ -77,7 +77,7 @@ namespace AuthHive.Auth.Repositories
                 }
             }
             
-            // IsOrganizationScopedEntity()가 false이므로 Query()는 조직 필터링을 하지 않습니다.
+            // IsOrganizationBaseEntity()가 false이므로 Query()는 조직 필터링을 하지 않습니다.
             var token = await Query() 
                 .Include(t => t.User)
                 .FirstOrDefaultAsync(t =>

@@ -33,7 +33,7 @@ namespace AuthHive.Auth.Repositories
             ICacheService cacheService,
             ILogger<SSOConfigurationRepository> logger,
             IDateTimeProvider dateTimeProvider,
-            IConnectedIdContext connectedIdContext) // ✅ 현재 사용자 ID 주입
+            IPrincipalAccessor connectedIdContext) // ✅ 현재 사용자 ID 주입
             : base(context, cacheService)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -43,7 +43,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// SSO 설정은 조직 범위 엔티티입니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
         /// <summary>
         /// SSO 설정 저장
         /// </summary>

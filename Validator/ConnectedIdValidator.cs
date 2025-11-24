@@ -47,7 +47,7 @@ namespace AuthHive.Auth.Validators
         private readonly ISessionRepository _sessionRepository;
         private readonly ICacheService _cacheService;
         private readonly IAuditService _auditService;
-        private readonly IEventBus _eventBus; // 추가
+        private readonly IDomainEvent _eventBus; // 추가
         private readonly IUnitOfWork _unitOfWork;
         private readonly IDateTimeProvider _dateTimeProvider;
         private readonly IInvitationRepository _invitationRepository;
@@ -68,7 +68,7 @@ namespace AuthHive.Auth.Validators
             ISessionRepository sessionRepository,
             ICacheService cacheService,
             IAuditService auditService,
-            IEventBus eventBus,
+            IDomainEvent eventBus,
             IUnitOfWork unitOfWork,
             IDateTimeProvider dateTimeProvider,
             IInvitationRepository invitationRepository,

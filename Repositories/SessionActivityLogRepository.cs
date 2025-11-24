@@ -36,7 +36,7 @@ namespace AuthHive.Auth.Repositories
             AuthDbContext context,
             ICacheService cacheService, // ✅ ICacheService 주입
             ILogger<SessionActivityLogRepository> logger,
-            IConnectedIdContext connectedIdContext) // ✅ ConnectedId 주입 유지 (감사용)
+            IPrincipalAccessor connectedIdContext) // ✅ ConnectedId 주입 유지 (감사용)
             : base(context, cacheService) // ✅ base 생성자 호출 변경
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -46,7 +46,7 @@ namespace AuthHive.Auth.Repositories
         /// <summary>
         /// SessionActivityLog 엔티티는 조직 범위에 속합니다.
         /// </summary>
-        protected override bool IsOrganizationScopedEntity() => true;
+        protected override bool IsOrganizationBaseEntity() => true;
 
 
         #region BaseRepository 오버라이드 (Include 및 감사)
@@ -56,7 +56,7 @@ namespace AuthHive.Auth.Repositories
         /// </summary>
         public override IQueryable<SessionActivityLog> Query()
         {
-            // BaseRepository.Query()는 IsDeleted=false 및 OrganizationId 필터링 (IsOrganizationScopedEntity=true 이므로)
+            // BaseRepository.Query()는 IsDeleted=false 및 OrganizationId 필터링 (IsOrganizationBaseEntity=true 이므로)
             return base.Query()
                 .Include(l => l.Session)
                 .Include(l => l.User)
@@ -442,7 +442,7 @@ namespace AuthHive.Auth.Repositories
         // BaseRepository에 IsEntityInCurrentOrganizationAsync 추가 필요 예시
         /*
         protected virtual async Task<bool> IsEntityInCurrentOrganizationAsync(TEntity entity, CancellationToken cancellationToken) {
-            if (!IsOrganizationScopedEntity()) return true; // 조직 범위 아니면 항상 참
+            if (!IsOrganizationBaseEntity()) return true; // 조직 범위 아니면 항상 참
             var orgIdProperty = typeof(TEntity).GetProperty("OrganizationId");
             if (orgIdProperty == null) return false; // OrganizationId 속성 없으면 확인 불가
 

@@ -25,8 +25,8 @@ namespace AuthHive.Auth.Repositories
             : base(context, cacheService) 
         { }
 
-        // ✅ v16.1: IsOrganizationScopedEntity()는 true가 맞습니다.
-        protected override bool IsOrganizationScopedEntity() => true;
+        // ✅ v16.1: IsOrganizationBaseEntity()는 true가 맞습니다.
+        protected override bool IsOrganizationBaseEntity() => true;
 
         #region 기본 멤버십 조회
 
