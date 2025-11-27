@@ -1,118 +1,68 @@
-// [AuthHive.Auth] GetUserByIdQueryHandler.cs
-// v17 CQRS "본보기": 플랫폼 전역 'User'를 ID로 조회하는 'GetUserByIdQuery'를 처리합니다.
-// v16의 UserService.GetByIdAsync 로직 중, v17 철학에 맞지 않는
-// '조직(Organization) 소속 검사' 로직을 의도적으로 제거합니다.
-
-using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
-using AuthHive.Core.Models.User.Common;
-using AuthHive.Core.Models.User.Queries;
-using AuthHive.Core.Models.User.Responses;
-using MediatR;
-using Microsoft.Extensions.Logging;
-using System.Collections.Generic;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
-using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
+using MediatR;
 
-namespace AuthHive.Auth.Handlers.User
+// [Interfaces]
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.Infra.Cache; // [New] 캐시 서비스
+
+// [Models]
+using AuthHive.Core.Models.User.Queries;
+using AuthHive.Core.Models.User.Responses;
+
+namespace AuthHive.Auth.Handlers.User;
+
+public class GetUserByIdQueryHandler : IRequestHandler<GetUserByIdQuery, UserResponse?>
 {
-    /// <summary>
-    /// [v17] "ID로 사용자 조회" 유스케이스 핸들러 (SOP 1-Read-D)
-    /// </summary>
-    public class GetUserByIdQueryHandler : IRequestHandler<GetUserByIdQuery, UserDetailResponse>
+    private readonly IUserRepository _userRepository;
+    private readonly ICacheService _cacheService; // [New]
+
+    public GetUserByIdQueryHandler(
+        IUserRepository userRepository, 
+        ICacheService cacheService)
     {
-        private readonly IUserRepository _userRepository;
-        private readonly IUserProfileRepository _profileRepository;
-        private readonly ILogger<GetUserByIdQueryHandler> _logger;
+        _userRepository = userRepository;
+        _cacheService = cacheService;
+    }
 
-        public GetUserByIdQueryHandler(
-            IUserRepository userRepository,
-            IUserProfileRepository profileRepository,
-            ILogger<GetUserByIdQueryHandler> logger)
+    public async Task<UserResponse?> Handle(GetUserByIdQuery request, CancellationToken cancellationToken)
+    {
+        // 1. [Cache Read] DTO 캐시 확인 (Fastest Path)
+        // Key Format: "UserResponse:{Guid}"
+        string cacheKey = $"UserResponse:{request.UserId}";
+        var cachedResponse = await _cacheService.GetAsync<UserResponse>(cacheKey, cancellationToken);
+        
+        if (cachedResponse != null) 
         {
-            _userRepository = userRepository;
-            _profileRepository = profileRepository;
-            _logger = logger;
+            return cachedResponse;
         }
 
-        public async Task<UserDetailResponse> Handle(GetUserByIdQuery query, CancellationToken cancellationToken)
+        // 2. [DB Read] 캐시 없으면 DB 조회
+        var user = await _userRepository.GetByIdAsync(request.UserId, cancellationToken);
+        
+        if (user == null) 
         {
-            _logger.LogInformation("Handling GetUserByIdQuery for User {UserId}", query.UserId);
-
-            // 1. User 엔티티 조회 (v16 로직)
-            var user = await _userRepository.GetByIdAsync(query.UserId, cancellationToken);
-            if (user == null)
-            {
-                // [v17 수정] ServiceResult.Failure 대신 표준 예외 사용
-                throw new KeyNotFoundException($"User not found: {query.UserId}");
-            }
-
-            // 2. UserProfile 엔티티 조회 (v17 응답 DTO 구성을 위해)
-            // UserProfile은 1:1 관계이며, 아직 생성되지 않았을 수 있음 (null 허용)
-            var profile = await _profileRepository.GetByIdAsync(query.UserId, cancellationToken);
-
-            // 3. v17 철학 적용
-            // [v17 수정] v16 UserService의 '조직 검사' 로직(IsUserInOrganizationAsync)을
-            // v17 철학(User는 전역 엔티티)에 따라 의도적으로 "제거"함.
-
-            // 4. 응답 DTO 반환
-            // (Create/Update 핸들러에서 사용한 MapToDto 헬퍼 사용)
-            return MapToDto(profile, user);
+            return null; // 404 처리는 Controller의 몫
         }
 
-        /// <summary>
-        /// 엔티티(User, UserProfile)를 v17 응답 DTO (UserDetailResponse)로 매핑
-        /// </summary>
-        private UserDetailResponse MapToDto(UserProfile? profile, UserEntity user)
-        {
-            return new UserDetailResponse
-            {
-                // BaseDto (required)
-                Id = user.Id,
+        // 3. [Mapping] Entity -> DTO 변환
+        var response = new UserResponse(
+            user.Id, 
+            user.Email, 
+            user.Username, 
+            user.IsEmailVerified,
+            user.PhoneNumber, 
+            user.IsTwoFactorEnabled, 
+            user.Status,
+            user.CreatedAt, 
+            user.LastLoginAt
+        );
 
-                // UserResponse
-                Status = user.Status,
-                Email = user.Email,
-                Username = user.Username,
-                DisplayName = user.DisplayName,
-                EmailVerified = user.IsEmailVerified,
-                IsTwoFactorEnabled = user.IsTwoFactorEnabled,
-                LastLoginAt = user.LastLoginAt,
-                CreatedAt = user.CreatedAt,
+        // 4. [Cache Write] 조회된 DTO 캐싱 (TTL 15분)
+        // 변경(Update/Delete) 발생 시 Handler에서 이 키를 무효화해야 함을 명심해야 합니다.
+        await _cacheService.SetAsync(cacheKey, response, TimeSpan.FromMinutes(15), cancellationToken);
 
-                // UserDetailResponse
-                ExternalUserId = user.ExternalUserId,
-                ExternalSystemType = user.ExternalSystemType,
-                UpdatedAt = user.UpdatedAt,
-                CreatedByConnectedId = user.CreatedByConnectedId,
-                UpdatedByConnectedId = user.UpdatedByConnectedId,
-                
-                // Profile 정보 (Profile이 null일 수 있음)
-                Profile = profile == null ? null : new UserProfileInfo
-                {
-                     UserId = profile.UserId,
-                     PhoneNumber = profile.PhoneNumber,
-                     PhoneVerified = profile.PhoneVerified,
-                     ProfileImageUrl = profile.ProfileImageUrl,
-                     TimeZone = profile.TimeZone,
-                     PreferredLanguage = profile.PreferredLanguage,
-                     PreferredCurrency = profile.PreferredCurrency,
-                     Bio = profile.Bio,
-                     WebsiteUrl = profile.WebsiteUrl,
-                     Location = profile.Location,
-                     DateOfBirth = profile.DateOfBirth,
-                     Gender = profile.Gender,
-                     CompletionPercentage = profile.CompletionPercentage,
-                     IsPublic = profile.IsPublic,
-                     LastProfileUpdateAt = profile.LastProfileUpdateAt
-                },
-                
-                // 이 쿼리는 조직/세션 정보를 조회할 책임이 없음
-                Organizations = new (), 
-                ActiveSessionCount = 0,
-                TotalConnectedIdCount = 0 
-            };
-        }
+        return response;
     }
 }

@@ -1,105 +1,125 @@
-// [AuthHive.Auth] SuspendUserCommandHandler.cs
-// v17 CQRS "본보기": 'User'의 Status를 'Suspended'로 변경하는 'SuspendUserCommand'를 처리합니다.
-// (SOP 1-Write-P, v16의 UpdateUserCommand에서 분리됨)
-
-using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repository;
-using AuthHive.Core.Interfaces.User.Validator;
-using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Models.User.Events.Lifecycle; // UserAccountSuspendedEvent
-using MediatR;
-using Microsoft.Extensions.Logging;
-using System.ComponentModel.DataAnnotations; // ValidationException
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using static AuthHive.Core.Enums.Core.UserEnums; // UserStatus
-using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
+using MediatR;
+using Microsoft.Extensions.Logging;
 
-namespace AuthHive.Auth.Handlers.User
+// [Interfaces]
+using AuthHive.Core.Interfaces.Base;
+using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Validator; // [Fix] 특화 Validator 인터페이스
+using AuthHive.Core.Interfaces.Infra.Cache;
+
+// [Models]
+using AuthHive.Core.Models.User.Commands;
+using AuthHive.Core.Models.User.Responses;
+using AuthHive.Core.Models.User.Events.Lifecycle;
+
+// [Entities]
+using AuthHive.Core.Entities.User;
+
+// [Exceptions]
+using AuthHive.Core.Exceptions;
+using AuthHive.Core.Enums.Core;
+using AuthHive.Core.Interfaces.Infra;
+using static AuthHive.Core.Enums.Core.UserEnums;
+
+namespace AuthHive.Auth.Handlers.User;
+
+public class SuspendUserCommandHandler : IRequestHandler<CreateUserSuspensionCommand, UserSuspensionResponse>
 {
-    /// <summary>
-    /// [v17] "사용자 정지" 유스케이스 핸들러 (SOP 1-Write-P)
-    /// v17 CQRS 철학에 따라 데이터를 반환하지 않습니다 (Unit).
-    /// </summary>
-    public class SuspendUserCommandHandler : IRequestHandler<SuspendUserCommand, Unit>
+    private readonly IUserRepository _userRepository;
+    private readonly IUserSuspensionRepository _suspensionRepository;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IUserSuspensionValidator _validator; // [Fix] 타입 변경
+    private readonly IMediator _mediator;
+    private readonly IDateTimeProvider _timeProvider;
+    private readonly ICacheService _cacheService;
+    private readonly ILogger<SuspendUserCommandHandler> _logger;
+
+    public SuspendUserCommandHandler(
+        IUserRepository userRepository,
+        IUserSuspensionRepository suspensionRepository,
+        IUnitOfWork unitOfWork,
+        IUserSuspensionValidator validator, // [Fix] 주입 변경
+        IMediator mediator,
+        IDateTimeProvider timeProvider,
+        ICacheService cacheService,
+        ILogger<SuspendUserCommandHandler> logger)
     {
-        private readonly IUserRepository _userRepository;
-        private readonly IUnitOfWork _unitOfWork;
-        private readonly IMediator _mediator;
-        private readonly ILogger<SuspendUserCommandHandler> _logger;
-        private readonly IUserValidator _userValidator;
+        _userRepository = userRepository;
+        _suspensionRepository = suspensionRepository;
+        _unitOfWork = unitOfWork;
+        _validator = validator;
+        _mediator = mediator;
+        _timeProvider = timeProvider;
+        _cacheService = cacheService;
+        _logger = logger;
+    }
 
-        public SuspendUserCommandHandler(
-            IUserRepository userRepository,
-            IUnitOfWork unitOfWork,
-            IMediator mediator,
-            ILogger<SuspendUserCommandHandler> logger,
-            IUserValidator userValidator)
+    public async Task<UserSuspensionResponse> Handle(CreateUserSuspensionCommand command, CancellationToken cancellationToken)
+    {
+        // 1. 유효성 검사 (특화 메서드 호출)
+        var validationResult = await _validator.ValidateCreateAsync(command, cancellationToken);
+        if (!validationResult.IsValid)
         {
-            _userRepository = userRepository;
-            _unitOfWork = unitOfWork;
-            _mediator = mediator;
-            _logger = logger;
-            _userValidator = userValidator;
+            throw new DomainValidationException("User suspension failed.", validationResult.Errors);
         }
 
-        public async Task<Unit> Handle(SuspendUserCommand command, CancellationToken cancellationToken)
+        // 2. 사용자 조회
+        var user = await _userRepository.GetByIdAsync(command.UserId, cancellationToken);
+        if (user == null)
         {
-            _logger.LogInformation("Handling SuspendUserCommand for User {UserId}, Reason: {Reason}", 
-                command.UserId, command.SuspensionReason);
-
-            // 1. 유효성 검사 (Validator로 책임 이관)
-            var validationResult = await _userValidator.ValidateSuspendAsync(command);
-            if (!validationResult.IsSuccess)
-            {
-                throw new ValidationException(validationResult.ErrorMessage ?? "User suspension validation failed.");
-            }
-
-            // 2. 엔티티 조회 (Validator가 이미 조회했지만, 상태 변경을 위해 다시 조회)
-            var user = await _userRepository.GetByIdAsync(command.UserId, cancellationToken);
-            if (user == null)
-            {
-                // Validator가 통과했으므로 이론적으로 발생하면 안 됨
-                throw new KeyNotFoundException($"User not found: {command.UserId}");
-            }
-
-            // 3. 변경 사항 적용
-            if (user.Status == UserStatus.Suspended)
-            {
-                _logger.LogInformation("User {UserId} is already suspended. Skipping.", command.UserId);
-                return Unit.Value; // 멱등성(Idempotency)
-            }
-
-            // [v17 정합성] Command 데이터를 v16 엔티티 필드에 매핑
-            user.Status = UserStatus.Suspended;
-            user.LockReason = command.SuspensionReason;
-            user.AccountLockedUntil = command.SuspensionEndsAt;
-            // (v16 엔티티에는 SuspensionType 필드가 없음 )
-
-            // 4. 데이터베이스 저장 (Update)
-            await _userRepository.UpdateAsync(user, cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-            _logger.LogInformation("User {UserId} suspended successfully.", command.UserId);
-
-            // 5. 이벤트 발행 (Notify)
-            var suspendedEvent = new UserAccountSuspendedEvent(
-                userId: user.Id,
-                suspendedByConnectedId: command.TriggeredBy, // 요청자
-                organizationId: command.OrganizationId, // BaseCommand에서 상속 (작업 컨텍스트)
-                suspensionReason: command.SuspensionReason,
-                suspensionType: command.SuspensionType,
-                suspensionEndsAt: command.SuspensionEndsAt,
-                appealProcess: null, // (추후 Command에 추가 가능)
-                correlationId: command.CorrelationId,
-                source: "UserCommandHandler" // v17 표준
-            );
-            await _mediator.Publish(suspendedEvent, cancellationToken);
-            
-            // 6. 응답 DTO 반환 (데이터 반환 안 함)
-            return Unit.Value;
+            throw new DomainEntityNotFoundException("User", command.UserId);
         }
+
+        // 3. 상태 변경 (DDD)
+        user.ChangeStatus(UserStatus.Suspended, command.Reason);
+        await _userRepository.UpdateAsync(user, cancellationToken);
+
+        // 4. 제재 이력 기록
+        var suspensionLog = new UserSuspension
+        {
+            UserId = user.Id,
+            SuspendedAt = _timeProvider.UtcNow,
+            SuspendedUntil = command.SuspendedUntil,
+            SuspensionReason = command.Reason,
+            SuspendedBy = command.SuspendedBy
+        };
+
+        await _suspensionRepository.AddAsync(suspensionLog, cancellationToken);
+
+        // 5. 트랜잭션 커밋
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // 6. 캐시 무효화
+        string cacheKey = $"UserResponse:{user.Id}";
+        await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+
+        // 7. 이벤트 발행
+        var suspendedEvent = new UserAccountSuspendedEvent
+        {
+            AggregateId = user.Id,
+            OccurredOn = _timeProvider.UtcNow,
+            TriggeredBy = command.SuspendedBy,
+            UserId = user.Id,
+            SuspendedUntil = command.SuspendedUntil,
+            Reason = command.Reason,
+            SuspendedBy = command.SuspendedBy
+        };
+
+        await _mediator.Publish(suspendedEvent, cancellationToken);
+
+        _logger.LogWarning("User {UserId} suspended. Reason: {Reason}", user.Id, command.Reason);
+
+        // 8. 응답
+        return new UserSuspensionResponse(
+            suspensionLog.Id,
+            suspensionLog.UserId,
+            suspensionLog.SuspendedAt,
+            suspensionLog.SuspendedUntil,
+            suspensionLog.SuspensionReason,
+            suspensionLog.SuspendedBy
+        );
     }
 }
