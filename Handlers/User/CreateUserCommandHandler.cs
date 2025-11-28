@@ -21,6 +21,7 @@ using AuthHive.Core.Exceptions;
 // [Alias]
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Models.User.Commands.Lifecycle;
 
 namespace AuthHive.Auth.Handlers.User;
 
@@ -103,17 +104,18 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserR
         _logger.LogInformation("User created successfully. ID: {UserId}", user.Id);
 
         // 5. 응답 생성
-        var response = new UserResponse(
-            Id: user.Id,
-            Email: user.Email,
-            Username: user.Username,
-            IsEmailVerified: user.IsEmailVerified,
-            PhoneNumber: user.PhoneNumber,
-            IsTwoFactorEnabled: user.IsTwoFactorEnabled,
-            Status: user.Status,
-            CreatedAt: user.CreatedAt,
-            LastLoginAt: user.LastLoginAt
-        );
+        var response = new UserResponse
+        {
+            Id = user.Id,
+            Email = user.Email,
+            Username = user.Username,
+            IsEmailVerified = user.IsEmailVerified,
+            PhoneNumber = user.PhoneNumber,
+            IsTwoFactorEnabled = user.IsTwoFactorEnabled,
+            Status = user.Status,
+            CreatedAt = user.CreatedAt,
+            LastLoginAt = user.LastLoginAt
+        };
 
         // 6. [New] 캐시 프리워밍 (Cache Pre-warming)
         // 가입 직후 로그인이나 조회가 발생할 확률이 높으므로 미리 캐싱해둠.

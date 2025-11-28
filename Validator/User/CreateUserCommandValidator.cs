@@ -9,7 +9,8 @@ using AuthHive.Core.Interfaces.User.Repository;
 
 // [Models]
 using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Models.Common.Validation; // ValidationResult
+using AuthHive.Core.Models.Common.Validation;
+using AuthHive.Core.Models.User.Commands.Lifecycle; // ValidationResult
 
 namespace AuthHive.Auth.Validators.User;
 

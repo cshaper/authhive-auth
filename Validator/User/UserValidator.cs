@@ -8,7 +8,10 @@ using AuthHive.Core.Interfaces.User.Validator; // IUserValidator (Core)
 
 // [Models]
 using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Models.Common.Validation; // ValidationResult (Core)
+using AuthHive.Core.Models.Common.Validation;
+using AuthHive.Core.Models.User.Commands.Lifecycle;
+using AuthHive.Core.Models.User.Commands.Profile;
+using AuthHive.Core.Models.User.Commands.Settings; // ValidationResult (Core)
 
 namespace AuthHive.Auth.Validators.User;
 
