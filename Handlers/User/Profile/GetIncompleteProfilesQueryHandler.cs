@@ -1,15 +1,16 @@
-// [AuthHive.Auth] GetUserByExternalIdQueryHandler.cs
-// v17 CQRS "본보기": 'GetUserByExternalIdQuery'를 처리하여 사용자를 외부 ID(소셜)로 조회합니다.
-// v16 UserService의 '조직 검사' 로직을 v17 철학에 따라 의도적으로 제거합니다.
+// [AuthHive.Auth] GetIncompleteProfilesQueryHandler.cs
+// v17 CQRS "본보기": 'GetIncompleteProfilesQuery'를 처리하여 미완성 프로필 목록을 조회합니다.
+// v16 UserProfileService.GetIncompleteProfilesAsync (전역) 로직을 이관합니다.
 
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Models.User.Common;
 using AuthHive.Core.Models.User.Queries;
 using AuthHive.Core.Models.User.Responses;
 using MediatR;
 using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
+using System.Linq; // .Select()
 using System.Threading;
 using System.Threading.Tasks;
 using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
@@ -17,52 +18,63 @@ using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
 namespace AuthHive.Auth.Handlers.User
 {
     /// <summary>
-    /// [v17] "외부 ID로 사용자 조회" 유스케이스 핸들러 (SOP 1-Read-M)
+    /// [v17] "미완성 프로필 조회" 유스케이스 핸들러 (SOP 1-Read-K)
     /// </summary>
-    public class GetUserByExternalIdQueryHandler : IRequestHandler<GetUserByExternalIdQuery, UserDetailResponse>
+    public class GetIncompleteProfilesQueryHandler : IRequestHandler<GetIncompleteProfilesQuery, IReadOnlyList<UserDetailResponse>>
     {
-        private readonly IUserRepository _userRepository;
         private readonly IUserProfileRepository _profileRepository;
-        private readonly ILogger<GetUserByExternalIdQueryHandler> _logger;
+        private readonly IUserRepository _userRepository;
+        private readonly ILogger<GetIncompleteProfilesQueryHandler> _logger;
 
-        public GetUserByExternalIdQueryHandler(
-            IUserRepository userRepository,
+        public GetIncompleteProfilesQueryHandler(
             IUserProfileRepository profileRepository,
-            ILogger<GetUserByExternalIdQueryHandler> logger)
+            IUserRepository userRepository,
+            ILogger<GetIncompleteProfilesQueryHandler> logger)
         {
-            _userRepository = userRepository;
             _profileRepository = profileRepository;
+            _userRepository = userRepository;
             _logger = logger;
         }
 
-        public async Task<UserDetailResponse> Handle(GetUserByExternalIdQuery query, CancellationToken cancellationToken)
+        public async Task<IReadOnlyList<UserDetailResponse>> Handle(GetIncompleteProfilesQuery query, CancellationToken cancellationToken)
         {
-            _logger.LogInformation("Handling GetUserByExternalIdQuery for {ExternalSystemType}:{ExternalUserId}", 
-                query.ExternalSystemType, query.ExternalUserId);
+            _logger.LogInformation(
+                "Handling GetIncompleteProfilesQuery (Global): Threshold < {Threshold}, Limit {Limit}",
+                query.MaxCompletenessThreshold, query.Limit);
 
-            // 1. User 엔티티 조회 (v16 로직)
-            // [v17 로직 수정] v16 IUserRepository의 FindByExternalIdAsync 사용
-            var user = await _userRepository.FindByExternalIdAsync(query.ExternalSystemType, query.ExternalUserId, cancellationToken);
-            if (user == null)
+            // 1. DB 조회 (v16 로직 이관)
+            var profiles = await _profileRepository.FindAsync(
+                p => p.CompletionPercentage < query.MaxCompletenessThreshold,
+                cancellationToken);
+
+            // [v16 로직] .Take(limit) 적용
+            var limitedProfiles = profiles.Take(query.Limit).ToList();
+
+            var result = new List<UserDetailResponse>();
+
+            // 2. 응답 DTO 매핑
+            // [v17 정합성] N+1 쿼리 문제가 있으나, 우선 v16 로직을 그대로 이관
+            foreach (var profile in limitedProfiles)
             {
-                throw new KeyNotFoundException($"User not found with ExternalId: {query.ExternalSystemType}:{query.ExternalUserId}");
+                var user = await _userRepository.GetByIdAsync(profile.UserId, cancellationToken);
+                if (user != null)
+                {
+                    result.Add(MapToDto(profile, user));
+                }
+                else
+                {
+                    _logger.LogWarning("Orphaned profile found (ProfileId: {ProfileId}) for missing User (UserId: {UserId})",
+                        profile.Id, profile.UserId);
+                }
             }
 
-            // 2. UserProfile 엔티티 조회 (null 허용)
-            var profile = await _profileRepository.GetByIdAsync(user.Id, cancellationToken);
-
-            // 3. v17 철학 적용
-            // [v17 수정] v16 UserService의 '조직 검사' 로직(IsUserInOrganizationAsync)을
-            // v17 철학(User는 전역 엔티티)에 따라 의도적으로 "제거"함.
-
-            // 4. 응답 DTO 반환
-            return MapToDto(profile, user);
+            return result;
         }
 
         /// <summary>
         /// 엔티티(User, UserProfile)를 v17 응답 DTO (UserDetailResponse)로 매핑
         /// </summary>
-        private UserDetailResponse MapToDto(UserProfile? profile, UserEntity user)
+        private UserDetailResponse MapToDto(UserProfile profile, UserEntity user)
         {
             return new UserDetailResponse
             {
@@ -80,7 +92,7 @@ namespace AuthHive.Auth.Handlers.User
                 UpdatedAt = user.UpdatedAt,
                 CreatedByConnectedId = user.CreatedByConnectedId,
                 UpdatedByConnectedId = user.UpdatedByConnectedId,
-                Profile = profile == null ? null : new UserProfileInfo
+                Profile = new UserProfileInfo
                 {
                      UserId = profile.UserId,
                      PhoneNumber = profile.PhoneNumber,

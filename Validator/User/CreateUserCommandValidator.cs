@@ -4,8 +4,8 @@ using System.Threading.Tasks;
 using FluentValidation; // RuleFor
 
 // [Interfaces]
-using AuthHive.Core.Interfaces.User.Validator; // IUserValidator
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Validators; // IUserValidator
+using AuthHive.Core.Interfaces.User.Repositories;
 
 // [Models]
 using AuthHive.Core.Models.User.Commands;

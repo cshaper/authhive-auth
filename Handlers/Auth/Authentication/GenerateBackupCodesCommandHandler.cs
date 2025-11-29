@@ -10,7 +10,7 @@
 
 // using AuthHive.Core.Entities.User;
 // using AuthHive.Core.Interfaces.Base;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Interfaces.Security; // IPasswordHashProvider
 // using AuthHive.Core.Models.Auth.Authentication.Commands;
 // using AuthHive.Core.Models.Auth.Authentication.Common; // BackupCodesResult

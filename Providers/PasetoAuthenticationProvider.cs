@@ -18,7 +18,7 @@
 // using static AuthHive.Core.Enums.Auth.SessionEnums;
 // using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 // using AuthHive.Core.Constants.Auth;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Interfaces.Security; // AuthConstants 사용을 위해 추가
 
 // namespace AuthHive.Auth.Providers.Authentication

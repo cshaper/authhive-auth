@@ -7,7 +7,7 @@
 // using AuthHive.Core.Entities.User;
 // using AuthHive.Core.Entities.Auth.ConnectedId; // [CS0246 해결]
 // using AuthHive.Core.Interfaces.Base;
-// // using AuthHive.Core.Interfaces.User.Repository;
+// // using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Interfaces.Organization.Repository;
 // using AuthHive.Core.Interfaces.Auth.Provider; // [v17] ITokenProvider
 // using AuthHive.Core.Interfaces.Infra.Security; // IPasswordHashProvider

@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 
 // [Interfaces]
 using AuthHive.Core.Interfaces.Base; // IUnitOfWork, IValidator
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Interfaces.Infra.Cache; // [New] 캐시 서비스
 
 // [Models]

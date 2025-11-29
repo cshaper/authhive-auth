@@ -3,7 +3,7 @@
 // v16 UserProfileService.CalculateCompletenessAsync의 로직과 캐싱(Redis)을 이관합니다.
 
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Interfaces.Infra.Cache; // [v17] Redis 캐시 서비스 주입
 using AuthHive.Core.Models.User.Queries;
 using AuthHive.Core.Models.User.Common; // ProfileCompletenessInfo

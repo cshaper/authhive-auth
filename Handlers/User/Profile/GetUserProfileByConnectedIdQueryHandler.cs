@@ -3,7 +3,7 @@
 // [v17 철학] L1(IMemoryCache)를 제거하고, L2(ICacheService - Redis) 캐시만 사용하도록 단순화합니다.
 
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Interfaces.Infra.Cache; // [v17] Redis 캐시 서비스 주입
 using AuthHive.Core.Models.User.Queries;
 using AuthHive.Core.Models.User.Responses;

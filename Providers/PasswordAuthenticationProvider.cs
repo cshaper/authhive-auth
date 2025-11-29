@@ -16,7 +16,7 @@
 // using AuthHive.Core.Interfaces.Audit;
 // using AuthHive.Core.Interfaces.Base;
 // using AuthHive.Core.Interfaces.Infra.Cache;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Interfaces.Business.Platform;
 // using AuthHive.Core.Models.Auth.Authentication;
 // using AuthHive.Core.Models.Auth.Authentication.Requests;

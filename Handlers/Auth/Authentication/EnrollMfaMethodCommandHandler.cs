@@ -13,7 +13,7 @@
 // using AuthHive.Core.Enums.Auth; // AuthenticationMethod
 // using AuthHive.Core.Enums.Business; // ConfigurationActionType
 // using AuthHive.Core.Interfaces.Base;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Models.Auth.Authentication.Commands;
 // using AuthHive.Core.Models.Auth.Authentication.Events;
 // using AuthHive.Core.Models.Auth.Authentication.Responses;

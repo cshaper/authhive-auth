@@ -5,7 +5,7 @@
 // using Microsoft.Extensions.Logging;
 // using Microsoft.Extensions.Configuration;
 // using AuthHive.Core.Interfaces.Auth.Provider;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Interfaces.Infra;
 // using AuthHive.Core.Models.Common;
 // using AuthHive.Core.Models.Auth.Authentication.Common;

@@ -3,7 +3,7 @@
 // v16 UserProfileService.GetByUserIdAsync의 '조직 보안 검사' 및 '캐싱' 로직을 이관합니다.
 
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Interfaces.Auth.Service; // [v16 의존성] IConnectedIdService
 using AuthHive.Core.Interfaces.Infra.Cache; // [v17] Redis 캐시
 using AuthHive.Core.Models.User.Queries;

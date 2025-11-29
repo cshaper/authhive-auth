@@ -6,8 +6,8 @@ using Microsoft.Extensions.Logging;
 
 // [Interfaces]
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repository;
-using AuthHive.Core.Interfaces.User.Validator; // [Fix] 특화 Validator 인터페이스
+using AuthHive.Core.Interfaces.User.Repositories;
+using AuthHive.Core.Interfaces.User.Validators; // [Fix] 특화 Validator 인터페이스
 using AuthHive.Core.Interfaces.Infra.Cache;
 
 // [Models]

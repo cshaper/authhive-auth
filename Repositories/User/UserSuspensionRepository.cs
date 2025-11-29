@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 
 // [Base]
 using AuthHive.Core.Entities.User; // UserSuspension Entity
-using AuthHive.Core.Interfaces.User.Repository; // Interface
+using AuthHive.Core.Interfaces.User.Repositories; // Interface
 using AuthHive.Infra.Persistence.Repositories.Base; // BaseRepository
 using AuthHive.Auth.Data.Context; // DbContext
 using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService

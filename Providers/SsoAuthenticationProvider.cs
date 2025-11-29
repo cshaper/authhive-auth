@@ -14,7 +14,7 @@
 // using AuthHive.Core.Interfaces.Base; // IUnitOfWork 등
 // using AuthHive.Core.Interfaces.Infra; // IDateTimeProvider, IAuditService 등
 // using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService
-// using AuthHive.Core.Interfaces.User.Repository; // IUserRepository
+// using AuthHive.Core.Interfaces.User.Repositories; // IUserRepository
 // using AuthHive.Core.Interfaces.Business.Platform; // IPlanRestrictionService
 // using AuthHive.Core.Models.Auth.Authentication;
 // using AuthHive.Core.Models.Common;

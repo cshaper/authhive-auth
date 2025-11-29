@@ -16,7 +16,7 @@
 // using AuthHive.Core.Interfaces.Business.Platform; // IPlanRestrictionService에 필요
 // using AuthHive.Core.Interfaces.Infra; // IDateTimeProvider에 필요
 // using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService에 필요
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Models.Auth.Authentication;
 // using AuthHive.Core.Models.Auth.Authentication.Common;
 // using AuthHive.Core.Models.Auth.Authentication.Requests;

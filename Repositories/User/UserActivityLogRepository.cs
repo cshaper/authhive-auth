@@ -8,14 +8,15 @@ using Microsoft.Extensions.Logging;
 
 // [Base]
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Infra.Persistence.Repositories.Base;
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Infra.Cache;
 using AuthHive.Core.Models.User.Queries; // SearchUserActivityLogsQuery
 using AuthHive.Core.Models.Base; // PaginationResponse
 using AuthHive.Core.Models.User.Responses;
-using AuthHive.Infra.Persistence.Context; // UserActivityLogResponse
+using AuthHive.Infra.Persistence.Context;
+using AuthHive.Core.Models.User.Queries.Activity; // UserActivityLogResponse
 
 namespace AuthHive.Auth.Repositories.User;
 

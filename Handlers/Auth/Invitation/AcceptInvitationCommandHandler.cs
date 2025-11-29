@@ -10,7 +10,7 @@
 // using AuthHive.Core.Interfaces.Auth.Validator;
 // using AuthHive.Core.Interfaces.Base;
 // using AuthHive.Core.Interfaces.Infra;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Models.Auth.Invitation.Commands;
 // using AuthHive.Core.Models.Auth.Invitation.Events;
 // using AuthHive.Core.Models.Auth.Invitation.Responses;

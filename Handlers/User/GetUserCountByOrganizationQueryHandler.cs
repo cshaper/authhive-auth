@@ -2,7 +2,7 @@
 // v17 CQRS "본보기": 'GetUserCountByOrganizationQuery'를 처리하여 조직의 사용자 수를 조회합니다.
 // v16 UserService.CountAsync 로직을 이관합니다.
 
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Models.User.Queries;
 using MediatR;
 using Microsoft.Extensions.Logging;

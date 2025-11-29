@@ -5,11 +5,12 @@ using System.Text.Json; // JSON 검증용
 using FluentValidation; 
 
 // [Interfaces]
-using AuthHive.Core.Interfaces.User.Validator;
+using AuthHive.Core.Interfaces.User.Validators;
 
 // [Models]
 using AuthHive.Core.Models.User.Commands;
 using AuthHive.Core.Models.Common.Validation;
+using AuthHive.Core.Models.User.Commands.Settings;
 
 namespace AuthHive.Auth.Validators.User;
 

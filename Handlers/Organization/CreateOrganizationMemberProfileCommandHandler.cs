@@ -5,7 +5,7 @@
 // using AuthHive.Core.Entities.Organization;
 // using AuthHive.Core.Interfaces.Base;
 // using AuthHive.Core.Interfaces.Organization.Repository;
-// using AuthHive.Core.Interfaces.User.Repository; // UserId 확인용
+// using AuthHive.Core.Interfaces.User.Repositories; // UserId 확인용
 // using AuthHive.Core.Models.Organization.Commands;
 // using AuthHive.Core.Models.Organization.Events; // MemberProfileCreatedEvent
 // using AuthHive.Core.Models.Organization.Responses;

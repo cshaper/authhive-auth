@@ -4,7 +4,7 @@
 
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Models.User.Commands;
 using AuthHive.Core.Models.User.Events.Settings; // MetadataModeChangedEvent
 using MediatR;

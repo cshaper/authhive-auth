@@ -4,7 +4,7 @@
 
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Models.User.Commands;
 using AuthHive.Core.Models.User.Events.Profile; // ProfileDataAnonymizedEvent
 using MediatR;
@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using AuthHive.Core.Models.User.Commands.Data;
 
 namespace AuthHive.Auth.Handlers.User
 {

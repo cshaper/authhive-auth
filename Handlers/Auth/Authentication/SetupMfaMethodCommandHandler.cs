@@ -11,7 +11,7 @@
 // using AuthHive.Core.Interfaces.Security; // ITotpService
 // using AuthHive.Core.Entities.User;
 // using AuthHive.Core.Interfaces.Base;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Models.Auth.Authentication.Commands;
 // using AuthHive.Core.Models.Auth.Authentication.Events; // [v17] TwoFactorStatusChangedEvent
 // using AuthHive.Core.Models.Auth.Authentication.Common; // [v17] MfaMethodSetupResult

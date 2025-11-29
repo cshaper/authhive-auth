@@ -13,7 +13,7 @@
 // using AuthHive.Core.Interfaces.Base;
 // using AuthHive.Core.Interfaces.Infra;
 // using AuthHive.Core.Interfaces.Organization.Repository;
-// using AuthHive.Core.Interfaces.User.Repository;
+// using AuthHive.Core.Interfaces.User.Repositories;
 // using AuthHive.Core.Models.Auth.Authentication.Commands;
 // using AuthHive.Core.Models.Auth.Authentication.Common; // AuthenticationResult
 // using AuthHive.Core.Models.Auth.Authentication.Events; // MfaSuccessEvent

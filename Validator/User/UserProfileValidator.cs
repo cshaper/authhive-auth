@@ -2,10 +2,11 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentValidation;
-using AuthHive.Core.Interfaces.User.Validator;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Validators;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Models.User.Commands;
 using AuthHive.Core.Models.Common.Validation;
+using AuthHive.Core.Models.User.Commands.Profile;
 
 namespace AuthHive.Auth.Validators.User;
 

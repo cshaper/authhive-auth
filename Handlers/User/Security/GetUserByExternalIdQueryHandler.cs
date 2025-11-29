@@ -1,9 +1,9 @@
-// [AuthHive.Auth] GetUserByEmailQueryHandler.cs
-// v17 CQRS "본보기": 'GetUserByEmailQuery'를 처리하여 사용자를 Email로 조회합니다.
+// [AuthHive.Auth] GetUserByExternalIdQueryHandler.cs
+// v17 CQRS "본보기": 'GetUserByExternalIdQuery'를 처리하여 사용자를 외부 ID(소셜)로 조회합니다.
 // v16 UserService의 '조직 검사' 로직을 v17 철학에 따라 의도적으로 제거합니다.
 
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Models.User.Common;
 using AuthHive.Core.Models.User.Queries;
 using AuthHive.Core.Models.User.Responses;
@@ -17,34 +17,35 @@ using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
 namespace AuthHive.Auth.Handlers.User
 {
     /// <summary>
-    /// [v17] "Email로 사용자 조회" 유스케이스 핸들러 (SOP 1-Read-F)
+    /// [v17] "외부 ID로 사용자 조회" 유스케이스 핸들러 (SOP 1-Read-M)
     /// </summary>
-    public class GetUserByEmailQueryHandler : IRequestHandler<GetUserByEmailQuery, UserDetailResponse>
+    public class GetUserByExternalIdQueryHandler : IRequestHandler<GetUserByExternalIdQuery, UserDetailResponse>
     {
         private readonly IUserRepository _userRepository;
         private readonly IUserProfileRepository _profileRepository;
-        private readonly ILogger<GetUserByEmailQueryHandler> _logger;
+        private readonly ILogger<GetUserByExternalIdQueryHandler> _logger;
 
-        public GetUserByEmailQueryHandler(
+        public GetUserByExternalIdQueryHandler(
             IUserRepository userRepository,
             IUserProfileRepository profileRepository,
-            ILogger<GetUserByEmailQueryHandler> logger)
+            ILogger<GetUserByExternalIdQueryHandler> logger)
         {
             _userRepository = userRepository;
             _profileRepository = profileRepository;
             _logger = logger;
         }
 
-        public async Task<UserDetailResponse> Handle(GetUserByEmailQuery query, CancellationToken cancellationToken)
+        public async Task<UserDetailResponse> Handle(GetUserByExternalIdQuery query, CancellationToken cancellationToken)
         {
-            _logger.LogInformation("Handling GetUserByEmailQuery for {Email}", query.Email);
+            _logger.LogInformation("Handling GetUserByExternalIdQuery for {ExternalSystemType}:{ExternalUserId}", 
+                query.ExternalSystemType, query.ExternalUserId);
 
             // 1. User 엔티티 조회 (v16 로직)
-            // [v17 로직 수정] v16 IUserRepository의 FindByEmailAsync 사용
-            var user = await _userRepository.FindByEmailAsync(query.Email, false, cancellationToken);
+            // [v17 로직 수정] v16 IUserRepository의 FindByExternalIdAsync 사용
+            var user = await _userRepository.FindByExternalIdAsync(query.ExternalSystemType, query.ExternalUserId, cancellationToken);
             if (user == null)
             {
-                throw new KeyNotFoundException($"User not found with email: {query.Email}");
+                throw new KeyNotFoundException($"User not found with ExternalId: {query.ExternalSystemType}:{query.ExternalUserId}");
             }
 
             // 2. UserProfile 엔티티 조회 (null 허용)

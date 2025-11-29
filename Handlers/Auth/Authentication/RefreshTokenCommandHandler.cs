@@ -15,7 +15,7 @@
 // using AuthHive.Core.Interfaces.Base;
 // using AuthHive.Core.Interfaces.Infra;
 // using AuthHive.Core.Interfaces.Auth.Provider; // ITokenProvider
-// using AuthHive.Core.Interfaces.User.Repository; // IUserRepository
+// using AuthHive.Core.Interfaces.User.Repositories; // IUserRepository
 // using AuthHive.Core.Models.Auth.Authentication.Commands;
 // using AuthHive.Core.Models.Auth.Authentication.Common; // AuthenticationResult, TokenInfo
 // using AuthHive.Core.Models.Auth.Authentication.Events; // TokenRefreshedEvent

@@ -1,5 +1,6 @@
 using FluentValidation;
 using AuthHive.Core.Models.User.Commands;
+using AuthHive.Core.Models.User.Commands.Profile;
 
 namespace AuthHive.Auth.Validators.User;
 

@@ -14,7 +14,7 @@ using AuthHive.Core.Interfaces.Auth.Repository;
 using AuthHive.Core.Interfaces.Auth.Validator;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Core.Interfaces.Organization.Repository;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
 using AuthHive.Core.Interfaces.Business.Platform.Service;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.Common;

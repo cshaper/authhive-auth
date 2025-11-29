@@ -8,13 +8,14 @@ using Microsoft.Extensions.Logging;
 
 // [Base]
 using AuthHive.Core.Entities.User; // UserFeatureProfile
-using AuthHive.Core.Interfaces.User.Repository; // Interface
+using AuthHive.Core.Interfaces.User.Repositories; // Interface
 using AuthHive.Infra.Persistence.Repositories.Base; // BaseRepository
 using AuthHive.Auth.Data.Context; // DbContext
 using AuthHive.Core.Interfaces.Infra.Cache; // ICacheService
 using AuthHive.Core.Models.User.Queries; // Search Query DTO
 using AuthHive.Core.Models.Base;
-using AuthHive.Infra.Persistence.Context; // PaginationResponse
+using AuthHive.Infra.Persistence.Context;
+using AuthHive.Core.Models.User.Queries.Settings; // PaginationResponse
 
 namespace AuthHive.Auth.Repositories.User;
 

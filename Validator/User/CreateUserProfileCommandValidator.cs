@@ -3,7 +3,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using FluentValidation;
 using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Interfaces.User.Repository;
+using AuthHive.Core.Interfaces.User.Repositories;
+using AuthHive.Core.Models.User.Commands.Profile;
 
 namespace AuthHive.Auth.Validators.User;
 
