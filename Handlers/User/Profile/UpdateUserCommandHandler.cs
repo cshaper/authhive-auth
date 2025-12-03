@@ -2,87 +2,107 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-// [Interfaces]
-using AuthHive.Core.Interfaces.Base; // IUnitOfWork, IValidator
-using AuthHive.Core.Interfaces.User.Repositories;
-using AuthHive.Core.Interfaces.Infra.Cache; // [New] 캐시 서비스
+// [Core & Infra]
+using AuthHive.Core.Interfaces.Base; // IValidator
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Infra.Persistence.Context; // [중요] AuthDbContext
 
 // [Models]
-using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Models.User.Responses;
-using AuthHive.Core.Models.User.Events.Lifecycle; // UserUpdatedEvent 필요 시 사용
+using AuthHive.Core.Models.User.Commands.Profile; // UpdateUserCommand (namespace 확인 필요)
+using AuthHive.Core.Models.User.Responses; // UserResponse
+using AuthHive.Core.Models.User.Events.Lifecycle; // UserUpdatedEvent
 
 // [Exceptions]
 using AuthHive.Core.Exceptions;
+using FluentValidation;
 
-namespace AuthHive.Auth.Handlers.User;
+namespace AuthHive.Core.Handlers.User.Lifecycle;
 
 public class UpdateUserCommandHandler : IRequestHandler<UpdateUserCommand, UserResponse>
 {
-    private readonly IUserRepository _userRepository;
-    private readonly IUnitOfWork _unitOfWork;
-    private readonly IValidator<UpdateUserCommand> _validator; // [New]
-    private readonly ICacheService _cacheService; // [New]
-    private readonly IMediator _mediator;
+    private readonly AuthDbContext _context; // [변경] Repository -> DbContext
+    private readonly IValidator<UpdateUserCommand> _validator;
+    private readonly ICacheService _cacheService;
+    private readonly IPublisher _publisher; // [추가] 이벤트 발행용
     private readonly ILogger<UpdateUserCommandHandler> _logger;
 
     public UpdateUserCommandHandler(
-        IUserRepository userRepository,
-        IUnitOfWork unitOfWork,
+        AuthDbContext context,
         IValidator<UpdateUserCommand> validator,
         ICacheService cacheService,
-        IMediator mediator,
+        IPublisher publisher,
         ILogger<UpdateUserCommandHandler> logger)
     {
-        _userRepository = userRepository;
-        _unitOfWork = unitOfWork;
+        _context = context;
         _validator = validator;
         _cacheService = cacheService;
-        _mediator = mediator;
+        _publisher = publisher;
         _logger = logger;
     }
 
     public async Task<UserResponse> Handle(UpdateUserCommand command, CancellationToken cancellationToken)
     {
-        // 1. 유효성 검사
+        // 1. 유효성 검사 (FluentValidation)
         var validationResult = await _validator.ValidateAsync(command, cancellationToken);
+
         if (!validationResult.IsValid)
         {
-            throw new DomainValidationException("User update failed.", validationResult.Errors);
-        }
+            // [Fix CS1503] ValidationFailure 객체에서 ErrorMessage(string)만 추출하여 전달
+            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
 
-        // 2. 조회
-        var user = await _userRepository.GetByIdAsync(command.UserId, cancellationToken);
+            throw new DomainValidationException("User update failed.", errorMessages);
+        }
+        // 2. 조회 (DbContext 직접 사용)
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.Id == command.UserId, cancellationToken);
+
         if (user == null)
         {
             throw new DomainEntityNotFoundException("User", command.UserId);
         }
 
-        // 3. 수정 (DDD 메서드 호출)
-        // User.cs에 UpdateProfile 메서드가 있다고 가정 (앞서 추가함)
+        // 3. 수정 (DDD 도메인 메서드 호출)
+        // User Entity에 UpdateProfile 메서드가 구현되어 있어야 합니다.
         user.UpdateProfile(command.Username, command.PhoneNumber);
 
         // 4. 저장
-        await _userRepository.UpdateAsync(user, cancellationToken);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-        // 5. 캐시 무효화 (Cache Invalidation)
-        string cacheKey = $"UserResponse:{user.Id}";
-        await _cacheService.RemoveAsync(cacheKey, cancellationToken);
-        // 검색 캐시도 무효화하는 것이 안전함 (패턴 삭제 권장)
-        // await _cacheService.RemoveByPatternAsync("SearchUsers:*", cancellationToken);
-
-        // 6. 이벤트 발행 (선택 사항 - 변경 알림 등)
-        // await _mediator.Publish(new UserUpdatedEvent { ... });
+        await _context.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("User updated. ID: {UserId}", user.Id);
 
-        return new UserResponse(
-            user.Id, user.Email, user.Username, user.IsEmailVerified,
-            user.PhoneNumber, user.IsTwoFactorEnabled, user.Status,
-            user.CreatedAt, user.LastLoginAt
-        );
+        // 5. 캐시 무효화
+        string cacheKey = $"UserResponse:{user.Id}";
+        await _cacheService.RemoveAsync(cacheKey, cancellationToken);
+
+        // 6. 이벤트 발행 (선택 사항이지만 권장됨)
+        // 다른 서비스(알림, 로그 등)가 이 변경사항을 알 수 있게 합니다.
+        await _publisher.Publish(new UserUpdatedEvent
+        {
+            // [BaseEvent 필수 속성]
+            AggregateId = user.Id,
+            OccurredOn = DateTime.UtcNow,
+
+            UserId = user.Id,
+            NewUsername = user.Username,
+            NewPhoneNumber = user.PhoneNumber,
+            UpdatedAt = DateTime.UtcNow // Entity의 UpdatedAt 사용 가능
+        }, cancellationToken);
+
+        // 7. 응답 반환
+        return new UserResponse
+        {
+            Id = user.Id,
+            Email = user.Email,
+            Username = user.Username,
+            IsEmailVerified = user.IsEmailVerified,
+            PhoneNumber = user.PhoneNumber,
+            IsTwoFactorEnabled = user.IsTwoFactorEnabled,
+            Status = user.Status,
+            CreatedAt = user.CreatedAt,
+            LastLoginAt = user.LastLoginAt
+        };
     }
 }

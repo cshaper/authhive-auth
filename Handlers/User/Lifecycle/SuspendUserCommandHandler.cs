@@ -1,37 +1,39 @@
 using System;
+using System.Linq; // [필수] Select 사용
 using System.Threading;
 using System.Threading.Tasks;
+
 using MediatR;
 using Microsoft.Extensions.Logging;
+using FluentValidation; // [필수] 표준 Validator
 
 // [Interfaces]
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories;
-using AuthHive.Core.Interfaces.User.Validators; // [Fix] 특화 Validator 인터페이스
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; // IUserRepository, IUserSuspensionRepository 위치
 using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Infra;
 
 // [Models]
-using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Models.User.Responses;
+using AuthHive.Core.Models.User.Commands.Lifecycle;
+using AuthHive.Core.Models.User.Responses.Lifecycle;
 using AuthHive.Core.Models.User.Events.Lifecycle;
 
 // [Entities]
 using AuthHive.Core.Entities.User;
+using AuthHive.Core.Enums.Core; // UserStatus
 
 // [Exceptions]
 using AuthHive.Core.Exceptions;
-using AuthHive.Core.Enums.Core;
-using AuthHive.Core.Interfaces.Infra;
 using static AuthHive.Core.Enums.Core.UserEnums;
 
-namespace AuthHive.Auth.Handlers.User;
+namespace AuthHive.Auth.Handlers.User.Lifecycle;
 
 public class SuspendUserCommandHandler : IRequestHandler<CreateUserSuspensionCommand, UserSuspensionResponse>
 {
     private readonly IUserRepository _userRepository;
     private readonly IUserSuspensionRepository _suspensionRepository;
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IUserSuspensionValidator _validator; // [Fix] 타입 변경
+    private readonly IValidator<CreateUserSuspensionCommand> _validator; // [수정] 표준 Validator
     private readonly IMediator _mediator;
     private readonly IDateTimeProvider _timeProvider;
     private readonly ICacheService _cacheService;
@@ -41,7 +43,7 @@ public class SuspendUserCommandHandler : IRequestHandler<CreateUserSuspensionCom
         IUserRepository userRepository,
         IUserSuspensionRepository suspensionRepository,
         IUnitOfWork unitOfWork,
-        IUserSuspensionValidator validator, // [Fix] 주입 변경
+        IValidator<CreateUserSuspensionCommand> validator, // [수정] 주입 타입 변경
         IMediator mediator,
         IDateTimeProvider timeProvider,
         ICacheService cacheService,
@@ -59,11 +61,14 @@ public class SuspendUserCommandHandler : IRequestHandler<CreateUserSuspensionCom
 
     public async Task<UserSuspensionResponse> Handle(CreateUserSuspensionCommand command, CancellationToken cancellationToken)
     {
-        // 1. 유효성 검사 (특화 메서드 호출)
-        var validationResult = await _validator.ValidateCreateAsync(command, cancellationToken);
+        // 1. 유효성 검사 (표준화)
+        var validationResult = await _validator.ValidateAsync(command, cancellationToken);
+        
         if (!validationResult.IsValid)
         {
-            throw new DomainValidationException("User suspension failed.", validationResult.Errors);
+            // [수정] 에러 메시지 리스트 추출하여 예외 처리
+            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
+            throw new DomainValidationException("User suspension failed.", errorMessages);
         }
 
         // 2. 사용자 조회
@@ -92,16 +97,18 @@ public class SuspendUserCommandHandler : IRequestHandler<CreateUserSuspensionCom
         // 5. 트랜잭션 커밋
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // 6. 캐시 무효화
+        // 6. 캐시 무효화 (사용자 정보가 변경되었으므로)
         string cacheKey = $"UserResponse:{user.Id}";
         await _cacheService.RemoveAsync(cacheKey, cancellationToken);
 
         // 7. 이벤트 발행
         var suspendedEvent = new UserAccountSuspendedEvent
         {
+            EventId = Guid.NewGuid(),
             AggregateId = user.Id,
             OccurredOn = _timeProvider.UtcNow,
             TriggeredBy = command.SuspendedBy,
+            
             UserId = user.Id,
             SuspendedUntil = command.SuspendedUntil,
             Reason = command.Reason,

@@ -1,5 +1,6 @@
 using AuthHive.Auth.Data.Context;
 using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Infra.Persistence.Context;
 using System.Security.Claims;
 
 namespace AuthHive.Auth.Middleware

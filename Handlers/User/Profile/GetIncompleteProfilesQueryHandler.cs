@@ -1,119 +1,117 @@
-// [AuthHive.Auth] GetIncompleteProfilesQueryHandler.cs
-// v17 CQRS "본보기": 'GetIncompleteProfilesQuery'를 처리하여 미완성 프로필 목록을 조회합니다.
-// v16 UserProfileService.GetIncompleteProfilesAsync (전역) 로직을 이관합니다.
-
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repositories;
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
+using AuthHive.Core.Interfaces.User.Repositories.Profile;
+using AuthHive.Core.Interfaces.User.Repositories.Security;
 using AuthHive.Core.Models.User.Common;
-using AuthHive.Core.Models.User.Queries;
-using AuthHive.Core.Models.User.Responses;
+using AuthHive.Core.Models.User.Queries.Profile;
+using AuthHive.Core.Models.User.Responses.Profile;
 using MediatR;
 using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
-using System.Linq; // .Select()
+using System.Linq; 
 using System.Threading;
 using System.Threading.Tasks;
-using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
+using UserEntity = AuthHive.Core.Entities.User.User;
 
-namespace AuthHive.Auth.Handlers.User
+namespace AuthHive.Auth.Handlers.User.Profile;
+
+public class GetIncompleteProfilesQueryHandler : IRequestHandler<GetIncompleteProfilesQuery, IReadOnlyList<UserDetailResponse>>
 {
-    /// <summary>
-    /// [v17] "미완성 프로필 조회" 유스케이스 핸들러 (SOP 1-Read-K)
-    /// </summary>
-    public class GetIncompleteProfilesQueryHandler : IRequestHandler<GetIncompleteProfilesQuery, IReadOnlyList<UserDetailResponse>>
+    private readonly IUserProfileRepository _profileRepository;
+    private readonly IUserRepository _userRepository;
+    private readonly IUserSocialAccountRepository _socialRepository; 
+    private readonly ILogger<GetIncompleteProfilesQueryHandler> _logger;
+
+    public GetIncompleteProfilesQueryHandler(
+        IUserProfileRepository profileRepository,
+        IUserRepository userRepository,
+        IUserSocialAccountRepository socialRepository,
+        ILogger<GetIncompleteProfilesQueryHandler> logger)
     {
-        private readonly IUserProfileRepository _profileRepository;
-        private readonly IUserRepository _userRepository;
-        private readonly ILogger<GetIncompleteProfilesQueryHandler> _logger;
+        _profileRepository = profileRepository;
+        _userRepository = userRepository;
+        _socialRepository = socialRepository;
+        _logger = logger;
+    }
 
-        public GetIncompleteProfilesQueryHandler(
-            IUserProfileRepository profileRepository,
-            IUserRepository userRepository,
-            ILogger<GetIncompleteProfilesQueryHandler> logger)
+    public async Task<IReadOnlyList<UserDetailResponse>> Handle(GetIncompleteProfilesQuery query, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Handling GetIncompleteProfilesQuery...");
+
+        var profiles = await _profileRepository.FindAsync(
+            p => true,
+            cancellationToken);
+
+        var incompleteProfiles = profiles
+            .Where(p => CalculateCompletionPercentage(p) < query.MaxCompletenessThreshold)
+            .Take(query.Limit)
+            .ToList();
+
+        var result = new List<UserDetailResponse>();
+
+        foreach (var profile in incompleteProfiles)
         {
-            _profileRepository = profileRepository;
-            _userRepository = userRepository;
-            _logger = logger;
-        }
-
-        public async Task<IReadOnlyList<UserDetailResponse>> Handle(GetIncompleteProfilesQuery query, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation(
-                "Handling GetIncompleteProfilesQuery (Global): Threshold < {Threshold}, Limit {Limit}",
-                query.MaxCompletenessThreshold, query.Limit);
-
-            // 1. DB 조회 (v16 로직 이관)
-            var profiles = await _profileRepository.FindAsync(
-                p => p.CompletionPercentage < query.MaxCompletenessThreshold,
-                cancellationToken);
-
-            // [v16 로직] .Take(limit) 적용
-            var limitedProfiles = profiles.Take(query.Limit).ToList();
-
-            var result = new List<UserDetailResponse>();
-
-            // 2. 응답 DTO 매핑
-            // [v17 정합성] N+1 쿼리 문제가 있으나, 우선 v16 로직을 그대로 이관
-            foreach (var profile in limitedProfiles)
+            var user = await _userRepository.GetByIdAsync(profile.UserId, cancellationToken);
+            if (user != null)
             {
-                var user = await _userRepository.GetByIdAsync(profile.UserId, cancellationToken);
-                if (user != null)
-                {
-                    result.Add(MapToDto(profile, user));
-                }
-                else
-                {
-                    _logger.LogWarning("Orphaned profile found (ProfileId: {ProfileId}) for missing User (UserId: {UserId})",
-                        profile.Id, profile.UserId);
-                }
+                var socialAccounts = await _socialRepository.GetByUserIdAsync(user.Id, cancellationToken);
+                result.Add(MapToDto(profile, user, socialAccounts));
             }
-
-            return result;
         }
 
-        /// <summary>
-        /// 엔티티(User, UserProfile)를 v17 응답 DTO (UserDetailResponse)로 매핑
-        /// </summary>
-        private UserDetailResponse MapToDto(UserProfile profile, UserEntity user)
+        return result;
+    }
+
+    private UserDetailResponse MapToDto(
+        UserProfile profile, 
+        UserEntity user, 
+        IEnumerable<UserSocialAccount> socialAccounts)
+    {
+        var primarySocial = socialAccounts.FirstOrDefault();
+
+        return new UserDetailResponse
         {
-            return new UserDetailResponse
+            Id = user.Id,
+            Status = user.Status,
+            Email = user.Email,
+            Username = user.Username,
+            IsEmailVerified = user.IsEmailVerified,
+            PhoneNumber = user.PhoneNumber,
+            IsTwoFactorEnabled = user.IsTwoFactorEnabled,
+            LastLoginAt = user.LastLoginAt,
+            CreatedAt = user.CreatedAt,
+
+            // [Fix CS1061] ProviderUserId -> ProviderId
+            ExternalUserId = primarySocial?.ProviderId, 
+            ExternalSystemType = primarySocial?.Provider.ToString(),
+            
+            UpdatedAt = user.UpdatedAt,
+
+            Profile = new UserProfileInfo
             {
-                Id = user.Id,
-                Status = user.Status,
-                Email = user.Email,
-                Username = user.Username,
-                DisplayName = user.DisplayName,
-                EmailVerified = user.IsEmailVerified,
-                IsTwoFactorEnabled = user.IsTwoFactorEnabled,
-                LastLoginAt = user.LastLoginAt,
-                CreatedAt = user.CreatedAt,
-                ExternalUserId = user.ExternalUserId,
-                ExternalSystemType = user.ExternalSystemType,
-                UpdatedAt = user.UpdatedAt,
-                CreatedByConnectedId = user.CreatedByConnectedId,
-                UpdatedByConnectedId = user.UpdatedByConnectedId,
-                Profile = new UserProfileInfo
-                {
-                     UserId = profile.UserId,
-                     PhoneNumber = profile.PhoneNumber,
-                     PhoneVerified = profile.PhoneVerified,
-                     ProfileImageUrl = profile.ProfileImageUrl,
-                     TimeZone = profile.TimeZone,
-                     PreferredLanguage = profile.PreferredLanguage,
-                     PreferredCurrency = profile.PreferredCurrency,
-                     Bio = profile.Bio,
-                     WebsiteUrl = profile.WebsiteUrl,
-                     Location = profile.Location,
-                     DateOfBirth = profile.DateOfBirth,
-                     Gender = profile.Gender,
-                     CompletionPercentage = profile.CompletionPercentage,
-                     IsPublic = profile.IsPublic,
-                     LastProfileUpdateAt = profile.LastProfileUpdateAt
-                },
-                Organizations = new (), 
-                ActiveSessionCount = 0,
-                TotalConnectedIdCount = 0 
-            };
-        }
+                 UserId = profile.UserId,
+                 ProfileImageUrl = profile.ProfileImageUrl,
+                 TimeZone = profile.TimeZone,
+                 PreferredLanguage = profile.PreferredLanguage,
+                 PreferredCurrency = profile.PreferredCurrency,
+                 Bio = profile.Bio,
+                 WebsiteUrl = profile.WebsiteUrl,
+                 Location = profile.Location,
+                 CompletionPercentage = CalculateCompletionPercentage(profile),
+            },
+            
+            Organizations = new List<UserOrganizationInfo>(), 
+            ActiveSessionCount = 0,
+            TotalConnectedIdCount = 0 
+        };
+    }
+
+    private int CalculateCompletionPercentage(UserProfile profile)
+    {
+        int score = 0;
+        if (!string.IsNullOrEmpty(profile.Bio)) score += 20;
+        if (!string.IsNullOrEmpty(profile.Location)) score += 20;
+        if (!string.IsNullOrEmpty(profile.ProfileImageUrl)) score += 20;
+        return score;
     }
 }

@@ -1,104 +1,104 @@
-// [AuthHive.Auth] ChangeTwoFactorCommandHandler.cs
-// v17 CQRS "본보기": 'User'의 2FA 설정을 변경하는 'ChangeTwoFactorCommand'를 처리합니다.
-// (SOP 1-Write-Q, v16의 UpdateUserCommand에서 분리됨)
-
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories;
-using AuthHive.Core.Interfaces.User.Validator;
-using AuthHive.Core.Models.User.Commands;
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; // IUserRepository
+using AuthHive.Core.Models.User.Commands.Security;
 using AuthHive.Core.Models.User.Events.Settings; // TwoFactorSettingChangedEvent
 using MediatR;
 using Microsoft.Extensions.Logging;
-using System.ComponentModel.DataAnnotations; // ValidationException
+using System.ComponentModel.DataAnnotations;
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Generic;
+using AuthHive.Core.Exceptions;
+using AuthHive.Core.Interfaces.Infra; 
 using UserEntity = AuthHive.Core.Entities.User.User;
-using AuthHive.Core.Models.User.Events.Profile; // 별칭(Alias)
+using AuthHive.Core.Models.User.Events.Profile;
+using FluentValidation; // Event DTO 참조용 (필요 시)
 
-namespace AuthHive.Auth.Handlers.User
+namespace AuthHive.Auth.Handlers.User.Security;
+
+/// <summary>
+/// [v18] "2단계 인증 변경" 유스케이스 핸들러
+/// </summary>
+public class ChangeTwoFactorCommandHandler : IRequestHandler<ChangeTwoFactorCommand, Unit>
 {
-    /// <summary>
-    /// [v17] "2단계 인증 변경" 유스케이스 핸들러 (SOP 1-Write-Q)
-    /// v17 CQRS 철학에 따라 데이터를 반환하지 않습니다 (Unit).
-    /// </summary>
-    public class ChangeTwoFactorCommandHandler : IRequestHandler<ChangeTwoFactorCommand, Unit>
+    private readonly IUserRepository _userRepository;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IMediator _mediator;
+    private readonly ILogger<ChangeTwoFactorCommandHandler> _logger;
+    private readonly IDateTimeProvider _timeProvider;
+    private readonly IValidator<ChangeTwoFactorCommand> _validator;
+    public ChangeTwoFactorCommandHandler(
+        IUserRepository userRepository,
+        IUnitOfWork unitOfWork,
+        IMediator mediator,
+        ILogger<ChangeTwoFactorCommandHandler> logger,
+        IDateTimeProvider timeProvider,
+        IValidator<ChangeTwoFactorCommand> validator)
     {
-        private readonly IUserRepository _userRepository;
-        private readonly IUnitOfWork _unitOfWork;
-        private readonly IMediator _mediator;
-        private readonly ILogger<ChangeTwoFactorCommandHandler> _logger;
-        private readonly IUserValidator _userValidator;
+        _userRepository = userRepository;
+        _unitOfWork = unitOfWork;
+        _mediator = mediator;
+        _logger = logger;
+        _timeProvider = timeProvider;
+        _validator = validator;
+    }
 
-        public ChangeTwoFactorCommandHandler(
-            IUserRepository userRepository,
-            IUnitOfWork unitOfWork,
-            IMediator mediator,
-            ILogger<ChangeTwoFactorCommandHandler> logger,
-            IUserValidator userValidator)
+    public async Task<Unit> Handle(ChangeTwoFactorCommand command, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Handling ChangeTwoFactorCommand for User {UserId}: Enabled={IsEnabled}, Type={Type}", 
+            command.UserId, command.IsEnabled, command.TwoFactorMethod);
+
+        // 1. 유효성 검사 (FluentValidation 표준 메서드 사용)
+        var validationResult = await _validator.ValidateAsync(command, cancellationToken);
+        
+        if (!validationResult.IsValid)
         {
-            _userRepository = userRepository;
-            _unitOfWork = unitOfWork;
-            _mediator = mediator;
-            _logger = logger;
-            _userValidator = userValidator;
-        }
-
-        public async Task<Unit> Handle(ChangeTwoFactorCommand command, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation("Handling ChangeTwoFactorCommand for User {UserId}: Enabled={IsEnabled}, Type={Type}", 
-                command.UserId, command.IsEnabled, command.TwoFactorType);
-
-            // 1. 유효성 검사 (Validator로 책임 이관)
-            var validationResult = await _userValidator.ValidateTwoFactorChangeAsync(command);
-            if (!validationResult.IsSuccess)
-            {
-                throw new ValidationException(validationResult.ErrorMessage ?? "2FA setting validation failed.");
-            }
-
-            // 2. 엔티티 조회
-            var user = await _userRepository.GetByIdAsync(command.UserId, cancellationToken);
-            if (user == null)
-            {
-                throw new KeyNotFoundException($"User not found: {command.UserId}");
-            }
-
-            // 3. 변경 사항 적용
-            string currentType = user.TwoFactorMethod ?? "None";
-            if (user.IsTwoFactorEnabled == command.IsEnabled && currentType == command.TwoFactorType)
-            {
-                _logger.LogInformation("2FA setting is already same for User {UserId}. Skipping.", command.UserId);
-                return Unit.Value; // 멱등성(Idempotency)
-            }
-
-            // [v17 정합성] Command 데이터를 v16 엔티티 필드에 매핑
-            user.IsTwoFactorEnabled = command.IsEnabled;
-            user.TwoFactorMethod = command.IsEnabled ? command.TwoFactorType : null; // 비활성화 시 Type도 null로
-            user.TwoFactorEnabledAt = command.IsEnabled ? DateTime.UtcNow : null; // v16 엔티티 필드
-
-            // 4. 데이터베이스 저장 (Update)
-            await _userRepository.UpdateAsync(user, cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-            _logger.LogInformation("2FA settings changed successfully for User {UserId}", command.UserId);
-
-            // 5. 이벤트 발행 (Notify)
-            var twoFactorChangedEvent = new TwoFactorSettingChangedEvent(
-                userId: user.Id,
-                enabled: user.IsTwoFactorEnabled,
-                twoFactorType: command.TwoFactorType,
-                changedByConnectedId: command.TriggeredBy, // 요청자
-                organizationId: command.OrganizationId, // BaseCommand에서 상속 (작업 컨텍스트)
-                backupCodes: null, // (별도 Command가 담당)
-                correlationId: command.CorrelationId,
-                ipAddress: command.IpAddress,
-                source: "UserCommandHandler" // v17 표준
-            );
-            await _mediator.Publish(twoFactorChangedEvent, cancellationToken);
+            // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
+            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
             
-            // 6. 응답 DTO 반환 (데이터 반환 안 함)
-            return Unit.Value;
+            throw new DomainValidationException("Activity log validation failed.", errorMessages);
         }
+
+        // 2. 엔티티 조회
+        var user = await _userRepository.GetByIdAsync(command.UserId, cancellationToken);
+        if (user == null)
+        {
+            throw new KeyNotFoundException($"User not found: {command.UserId}");
+        }
+
+        // 3. 변경 사항 적용 (DDD 메서드 호출)
+        // [Fix CS0272] 직접 대입 코드 제거 및 SetTwoFactorStatus() 호출로 대체
+        user.SetTwoFactorStatus(command.IsEnabled, command.TwoFactorMethod);
+
+        // 4. 데이터베이스 저장 (Update)
+        await _userRepository.UpdateAsync(user, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation("2FA settings changed successfully for User {UserId}", command.UserId);
+
+        // 5. 이벤트 발행 (Notify)
+        var twoFactorChangedEvent = new TwoFactorSettingChangedEvent
+        {
+            // BaseEvent Props
+            EventId = Guid.NewGuid(),
+            AggregateId = user.Id,
+            OccurredOn = _timeProvider.UtcNow,
+            TriggeredBy = command.TriggeredBy, 
+            OrganizationId = command.OrganizationId, 
+            CorrelationId = command.CorrelationId?.ToString(), 
+
+            // Event Props
+            UserId = user.Id,
+            IsEnabled = user.IsTwoFactorEnabled,
+            Method = user.TwoFactorMethod!, // Fix: SetTwoFactorStatus가 값을 설정했으므로 사용 가능
+            ChangedAt = _timeProvider.UtcNow
+        };
+        
+        await _mediator.Publish(twoFactorChangedEvent, cancellationToken);
+        
+        return Unit.Value;
     }
 }

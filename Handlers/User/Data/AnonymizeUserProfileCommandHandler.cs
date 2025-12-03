@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Models.User.Commands.Data;
 using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.User.Repositories.Profile;
 
 namespace AuthHive.Auth.Handlers.User.Data
 {

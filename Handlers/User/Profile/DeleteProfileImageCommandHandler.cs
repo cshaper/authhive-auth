@@ -14,6 +14,8 @@ using System.ComponentModel.DataAnnotations; // ValidationException
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using AuthHive.Core.Interfaces.User.Repositories.Profile;
+using AuthHive.Core.Models.User.Commands.Profile;
 
 namespace AuthHive.Auth.Handlers.User
 {
@@ -54,9 +56,9 @@ namespace AuthHive.Auth.Handlers.User
                 _logger.LogWarning("Profile not found or image already empty for User {UserId}. Skipping.", command.UserId);
                 return Unit.Value; // 멱등성(Idempotency): 이미 삭제된 상태이므로 성공 처리
             }
-            
+
             // [v17 로직] v16 Validator는 별도 로직이 없었으므로 검증 단계 생략
-            
+
             string oldImageUrl = profile.ProfileImageUrl;
 
             // 2. [철학 적용] 엔티티 도메인 메서드 호출 (상태 변경)
@@ -78,8 +80,8 @@ namespace AuthHive.Auth.Handlers.User
                 {
                     // objectName 추출 (URL -> GCS 경로)
                     // (이 로직은 IStorageService 또는 헬퍼가 담당해야 함)
-                    string objectName = ExtractObjectNameFromUrl(oldImageUrl); 
-                    
+                    string objectName = ExtractObjectNameFromUrl(oldImageUrl);
+
                     await _storageService.DeleteAsync(objectName, cancellationToken);
                     _logger.LogInformation("Old image deleted from GCS: {ObjectName}", objectName);
                 }
@@ -90,23 +92,30 @@ namespace AuthHive.Auth.Handlers.User
                 // (또는 이 이벤트를 구독하는 별도 핸들러가 GCS 삭제를 재시도하도록 큐에 넣음)
                 _logger.LogError(ex, "Failed to delete old image from GCS for User {UserId}: {OldUrl}", command.UserId, oldImageUrl);
             }
+            // 5. 이벤트 발행
+            var imageDeletedEvent = new ProfileImageDeletedEvent
+            {
+                // BaseEvent Props
+                EventId = Guid.NewGuid(),
+                AggregateId = profile.UserId,
+                OccurredOn = DateTime.UtcNow,
+                TriggeredBy = command.TriggeredBy, // Command에 추가됨
+                OrganizationId = command.OrganizationId, // Command에 추가됨
+                CorrelationId = command.CorrelationId?.ToString(),
 
-            // 5. 이벤트 발행 (Notify)
-            var imageDeletedEvent = new ProfileImageDeletedEvent(
-                userId: profile.UserId,
-                deletedByConnectedId: command.TriggeredBy ?? command.UserId,
-                deletedImageUrl: oldImageUrl, // [정합성] 삭제된 URL을 이벤트에 전달
-                organizationId: command.OrganizationId,
-                correlationId: command.CorrelationId,
-                ipAddress: command.IpAddress, // BaseCommand에서 상속
-                source: "UserProfileHandler" // v17 표준
-            );
+                // Domain Props
+                UserId = profile.UserId,
+                DeletedAt = DateTime.UtcNow,
+                DeletedByConnectedId = command.TriggeredBy,
+                DeletedImageUrl = oldImageUrl,
+                IpAddress = command.IpAddress
+            };
             await _mediator.Publish(imageDeletedEvent, cancellationToken);
-            
+
             // 6. 응답 DTO 반환 (데이터 반환 안 함)
             return Unit.Value;
         }
-        
+
         /// <summary>
         /// (임시 헬퍼) Public URL에서 GCS Object Name을 추출합니다.
         /// 이 로직은 IStorageService로 이동해야 합니다.

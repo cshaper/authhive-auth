@@ -1,106 +1,126 @@
-// [AuthHive.Auth] GetUserByUsernameQueryHandler.cs
-// v17 CQRS "본보기": 'GetUserByUsernameQuery'를 처리하여 사용자를 Username으로 조회합니다.
-// v16 UserService의 '조직 검사' 로직을 v17 철학에 따라 의도적으로 제거합니다.
-
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repositories;
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
+using AuthHive.Core.Interfaces.User.Repositories.Profile;
+using AuthHive.Core.Interfaces.User.Repositories.Security; // [New]
 using AuthHive.Core.Models.User.Common;
-using AuthHive.Core.Models.User.Queries;
-using AuthHive.Core.Models.User.Responses;
+using AuthHive.Core.Models.User.Queries.Profile;
+using AuthHive.Core.Models.User.Responses.Profile;
 using MediatR;
 using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
+using System.Linq; 
 using System.Threading;
 using System.Threading.Tasks;
-using UserEntity = AuthHive.Core.Entities.User.User; // 별칭(Alias)
+using UserEntity = AuthHive.Core.Entities.User.User; // Alias
 
-namespace AuthHive.Auth.Handlers.User
+namespace AuthHive.Auth.Handlers.User.Profile; // Correct Namespace
+
+/// <summary>
+/// [v18] "Username으로 사용자 조회" 유스케이스 핸들러 (SOP 1-Read-G)
+/// </summary>
+public class GetUserByUsernameQueryHandler : IRequestHandler<GetUserByUsernameQuery, UserDetailResponse>
 {
-    /// <summary>
-    /// [v17] "Username으로 사용자 조회" 유스케이스 핸들러 (SOP 1-Read-G)
-    /// </summary>
-    public class GetUserByUsernameQueryHandler : IRequestHandler<GetUserByUsernameQuery, UserDetailResponse>
+    private readonly IUserRepository _userRepository;
+    private readonly IUserProfileRepository _profileRepository;
+    private readonly IUserSocialAccountRepository _socialRepository; // [New]
+    private readonly ILogger<GetUserByUsernameQueryHandler> _logger;
+
+    public GetUserByUsernameQueryHandler(
+        IUserRepository userRepository,
+        IUserProfileRepository profileRepository,
+        IUserSocialAccountRepository socialRepository,
+        ILogger<GetUserByUsernameQueryHandler> logger)
     {
-        private readonly IUserRepository _userRepository;
-        private readonly IUserProfileRepository _profileRepository;
-        private readonly ILogger<GetUserByUsernameQueryHandler> _logger;
+        _userRepository = userRepository;
+        _profileRepository = profileRepository;
+        _socialRepository = socialRepository;
+        _logger = logger;
+    }
 
-        public GetUserByUsernameQueryHandler(
-            IUserRepository userRepository,
-            IUserProfileRepository profileRepository,
-            ILogger<GetUserByUsernameQueryHandler> logger)
+    public async Task<UserDetailResponse> Handle(GetUserByUsernameQuery query, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Handling GetUserByUsernameQuery for {Username}", query.Username);
+
+        // 1. User Entity Lookup
+        // [Fix CS1061] Use GetByUsernameAsync as defined in IUserRepository
+        var user = await _userRepository.GetByUsernameAsync(query.Username, cancellationToken);
+        
+        if (user == null)
         {
-            _userRepository = userRepository;
-            _profileRepository = profileRepository;
-            _logger = logger;
+            throw new KeyNotFoundException($"User not found with username: {query.Username}");
         }
 
-        public async Task<UserDetailResponse> Handle(GetUserByUsernameQuery query, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation("Handling GetUserByUsernameQuery for {Username}", query.Username);
+        // 2. UserProfile Lookup
+        var profile = await _profileRepository.GetByIdAsync(user.Id, cancellationToken);
 
-            // 1. User 엔티티 조회 (v16 로직)
-            // [v17 로직 수정] v16 IUserRepository의 FindByUsernameAsync 사용
-            var user = await _userRepository.FindByUsernameAsync(query.Username, false, cancellationToken);
-            if (user == null)
+        // 3. Social Account Lookup
+        var socialAccounts = await _socialRepository.GetByUserIdAsync(user.Id, cancellationToken);
+
+        // 4. Map to Response DTO
+        return MapToDto(profile, user, socialAccounts);
+    }
+
+    private UserDetailResponse MapToDto(
+        UserProfile? profile, 
+        UserEntity user, 
+        IEnumerable<UserSocialAccount> socialAccounts)
+    {
+        var primarySocial = socialAccounts.FirstOrDefault();
+
+        return new UserDetailResponse
+        {
+            // --- Basic User Info ---
+            Id = user.Id,
+            Status = user.Status,
+            Email = user.Email,
+            Username = user.Username,
+            // [Fix] DisplayName removed
+            IsEmailVerified = user.IsEmailVerified,
+            IsTwoFactorEnabled = user.IsTwoFactorEnabled,
+            LastLoginAt = user.LastLoginAt,
+            CreatedAt = user.CreatedAt,
+            PhoneNumber = user.PhoneNumber, // From User Entity
+
+            // --- External Info (from SocialAccount) ---
+            ExternalUserId = primarySocial?.ProviderId,
+            ExternalSystemType = primarySocial?.Provider.ToString(),
+            
+            UpdatedAt = user.UpdatedAt,
+            // CreatedByConnectedId, UpdatedByConnectedId Removed
+
+            // --- Profile Info ---
+            Profile = profile == null ? null : new UserProfileInfo
             {
-                throw new KeyNotFoundException($"User not found with username: {query.Username}");
-            }
+                 UserId = profile.UserId,
+                 // PhoneNumber = profile.PhoneNumber, // Removed (on User)
+                 // PhoneVerified = profile.PhoneVerified, // Removed (on User)
+                 ProfileImageUrl = profile.ProfileImageUrl,
+                 TimeZone = profile.TimeZone,
+                 PreferredLanguage = profile.PreferredLanguage,
+                 PreferredCurrency = profile.PreferredCurrency,
+                 Bio = profile.Bio,
+                 WebsiteUrl = profile.WebsiteUrl,
+                 Location = profile.Location,
+                 DateOfBirth = profile.DateOfBirth,
+                 Gender = profile.Gender,
+                 IsPublic = profile.IsPublic,
+                 LastProfileUpdateAt = profile.LastProfileUpdateAt,
+                 
+                 CompletionPercentage = CalculateCompletionPercentage(profile)
+            },
+            
+            Organizations = new List<UserOrganizationInfo>(), 
+            ActiveSessionCount = 0,
+            TotalConnectedIdCount = 0 
+        };
+    }
 
-            // 2. UserProfile 엔티티 조회 (null 허용)
-            var profile = await _profileRepository.GetByIdAsync(user.Id, cancellationToken);
-
-            // 3. v17 철학 적용
-            // [v17 수정] v16 UserService의 '조직 검사' 로직(IsUserInOrganizationAsync)을
-            // v17 철학(User는 전역 엔티티)에 따라 의도적으로 "제거"함.
-
-            // 4. 응답 DTO 반환
-            return MapToDto(profile, user);
-        }
-
-        /// <summary>
-        /// 엔티티(User, UserProfile)를 v17 응답 DTO (UserDetailResponse)로 매핑
-        /// </summary>
-        private UserDetailResponse MapToDto(UserProfile? profile, UserEntity user)
-        {
-            return new UserDetailResponse
-            {
-                Id = user.Id,
-                Status = user.Status,
-                Email = user.Email,
-                Username = user.Username,
-                DisplayName = user.DisplayName,
-                EmailVerified = user.IsEmailVerified,
-                IsTwoFactorEnabled = user.IsTwoFactorEnabled,
-                LastLoginAt = user.LastLoginAt,
-                CreatedAt = user.CreatedAt,
-                ExternalUserId = user.ExternalUserId,
-                ExternalSystemType = user.ExternalSystemType,
-                UpdatedAt = user.UpdatedAt,
-                CreatedByConnectedId = user.CreatedByConnectedId,
-                UpdatedByConnectedId = user.UpdatedByConnectedId,
-                Profile = profile == null ? null : new UserProfileInfo
-                {
-                     UserId = profile.UserId,
-                     PhoneNumber = profile.PhoneNumber,
-                     PhoneVerified = profile.PhoneVerified,
-                     ProfileImageUrl = profile.ProfileImageUrl,
-                     TimeZone = profile.TimeZone,
-                     PreferredLanguage = profile.PreferredLanguage,
-                     PreferredCurrency = profile.PreferredCurrency,
-                     Bio = profile.Bio,
-                     WebsiteUrl = profile.WebsiteUrl,
-                     Location = profile.Location,
-                     DateOfBirth = profile.DateOfBirth,
-                     Gender = profile.Gender,
-                     CompletionPercentage = profile.CompletionPercentage,
-                     IsPublic = profile.IsPublic,
-                     LastProfileUpdateAt = profile.LastProfileUpdateAt
-                },
-                Organizations = new (), 
-                ActiveSessionCount = 0,
-                TotalConnectedIdCount = 0 
-            };
-        }
+    private int CalculateCompletionPercentage(UserProfile profile)
+    {
+        int score = 0;
+        if (!string.IsNullOrEmpty(profile.Bio)) score += 20;
+        if (!string.IsNullOrEmpty(profile.Location)) score += 20;
+        if (!string.IsNullOrEmpty(profile.ProfileImageUrl)) score += 20;
+        return score;
     }
 }

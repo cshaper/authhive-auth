@@ -1,23 +1,25 @@
 using System;
+using System.Linq; // [필수] .Select() 사용을 위해 추가
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
+
 using MediatR;
 using Microsoft.Extensions.Logging;
-using System.Text.Json;
+using FluentValidation; // [필수] IValidator<T> 사용을 위해 추가
 
 // [Interfaces]
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories;
-using AuthHive.Core.Interfaces.User.Validators;
 using AuthHive.Core.Exceptions;
+using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Interfaces.User.Repositories.Activity;
 
 // [Models]
 using AuthHive.Core.Models.User.Commands.Activity;
-using AuthHive.Core.Models.User.Events.Activity; // Event 위치 수정
+using AuthHive.Core.Models.User.Events.Activity;
 
 // [Entities]
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.Infra;
 
 namespace AuthHive.Auth.Handlers.User.Activity;
 
@@ -31,7 +33,9 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
     private readonly IDateTimeProvider _timeProvider;
     private readonly IMediator _mediator;
     private readonly ILogger<CreateUserActivityLogCommandHandler> _logger;
-    private readonly IUserActivityLogValidator _validator;
+    
+    // [수정] 표준 FluentValidation 인터페이스 사용
+    private readonly IValidator<CreateUserActivityLogCommand> _validator;
 
     public CreateUserActivityLogCommandHandler(
         IUserActivityLogRepository logRepository,
@@ -39,7 +43,7 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
         IDateTimeProvider timeProvider,
         IMediator mediator,
         ILogger<CreateUserActivityLogCommandHandler> logger,
-        IUserActivityLogValidator validator)
+        IValidator<CreateUserActivityLogCommand> validator) // [수정] 주입 타입 변경
     {
         _logRepository = logRepository;
         _unitOfWork = unitOfWork;
@@ -51,11 +55,15 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
 
     public async Task<Guid> Handle(CreateUserActivityLogCommand command, CancellationToken cancellationToken)
     {
-        // 1. 유효성 검사
-        var validationResult = await _validator.ValidateCreateAsync(command, cancellationToken);
+        // 1. 유효성 검사 (FluentValidation 표준 메서드 사용)
+        var validationResult = await _validator.ValidateAsync(command, cancellationToken);
+        
         if (!validationResult.IsValid)
         {
-            throw new DomainValidationException("Activity log validation failed.", validationResult.Errors);
+            // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
+            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
+            
+            throw new DomainValidationException("Activity log validation failed.", errorMessages);
         }
         
         var now = _timeProvider.UtcNow;
@@ -71,7 +79,7 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
 
             // 활동 내용 (Mapping)
             ActivityType = command.ActivityType,
-            Description = command.Summary, // Entity: Description <-> Command: Summary
+            Description = command.Summary, 
             ResourceType = command.TargetResourceType,
             // Guid? -> String 변환
             ResourceId = command.TargetResourceId?.ToString(), 
@@ -82,8 +90,8 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
             Location = command.Location,
 
             // 결과 (Mapping)
-            IsSuccessful = command.IsSuccess, // Entity: IsSuccessful <-> Command: IsSuccess
-            ErrorMessage = command.FailureReason, // Entity: ErrorMessage <-> Command: FailureReason
+            IsSuccessful = command.IsSuccess, 
+            ErrorMessage = command.FailureReason, 
             
             // Metadata (Dictionary -> JSON String)
             Metadata = command.Metadata != null 
@@ -100,18 +108,16 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
         {
             // BaseEvent Props
             EventId = Guid.NewGuid(),
-            // [Fix] AggregateId (Guid) 처리
             AggregateId = log.UserId ?? log.ConnectedId ?? Guid.Empty, 
             OccurredOn = log.CreatedAt == default ? now : log.CreatedAt,
-            // [Fix] TriggeredBy (Guid) 처리: Nullable일 경우 Empty 할당
             TriggeredBy = log.ConnectedId ?? log.UserId ?? Guid.Empty,
             OrganizationId = log.OrganizationId,
 
-            // Domain Props (Event Definition과 일치시킴)
+            // Domain Props
             LogId = log.Id,
-            UserId = log.UserId ?? Guid.Empty, // [Fix] Guid? -> Guid
+            UserId = log.UserId ?? Guid.Empty,
             ActivityType = log.ActivityType,
-            IsSuccess = log.IsSuccessful, 
+            IsSuccess = log.IsSuccessful,
             
             ConnectedId = log.ConnectedId,
             ApplicationId = log.ApplicationId,
@@ -119,7 +125,6 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
             Summary = log.Description,
             FailureReason = log.ErrorMessage,
 
-            // Entity는 String으로 저장했으나, Event는 Guid/Type 원본을 원하므로 Command 값을 사용
             TargetResourceId = command.TargetResourceId,
             TargetResourceType = command.TargetResourceType,
 
@@ -127,7 +132,6 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
             UserAgent = log.UserAgent,
             Location = log.Location,
 
-            // Entity는 JSON String이나, Event는 Dictionary를 원하므로 Command 값을 사용
             Metadata = command.Metadata
         };
 

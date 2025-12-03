@@ -1,32 +1,36 @@
-// [AuthHive.Auth] GetUserProfileByConnectedIdQueryHandler.cs
-// v17 CQRS "본보기": 'GetUserProfileByConnectedIdQuery'를 처리하여 'UserDetailResponse'를 조회합니다.
-// [v17 철학] L1(IMemoryCache)를 제거하고, L2(ICacheService - Redis) 캐시만 사용하도록 단순화합니다.
-
 using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.User.Repositories;
-using AuthHive.Core.Interfaces.Infra.Cache; // [v17] Redis 캐시 서비스 주입
-using AuthHive.Core.Models.User.Queries;
-using AuthHive.Core.Models.User.Responses;
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
+using AuthHive.Core.Interfaces.User.Repositories.Profile;
+using AuthHive.Core.Interfaces.User.Repositories.Security;
+using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Organization.Repository; // 🚨 공식 인터페이스 참조
+using AuthHive.Core.Models.User.Common;
+using AuthHive.Core.Models.User.Queries.Profile;
+using AuthHive.Core.Models.User.Responses.Profile;
 using MediatR;
 using Microsoft.Extensions.Logging;
-// using Microsoft.Extensions.Caching.Memory; // [v17 수정] L1 로컬 캐시 제거
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UserEntity = AuthHive.Core.Entities.User.User;
-using AuthHive.Core.Models.User.Common; // 별칭(Alias)
+using System;
+using AuthHive.Core.Exceptions;
 
-namespace AuthHive.Auth.Handlers.User
+namespace AuthHive.Auth.Handlers.User.Profile
 {
+    // 🚨 임시 로컬 인터페이스 정의 삭제됨
+
     /// <summary>
-    /// [v17] "ConnectedId로 프로필 조회" 유스케이스 핸들러 (SOP 1-Read-I)
-    /// v17 철학에 따라 ICacheService(Redis)만 사용하도록 단순화됨.
+    /// [v18] "ConnectedId로 프로필 조회" 유스케이스 핸들러 (SOP 1-Read-I)
     /// </summary>
     public class GetUserProfileByConnectedIdQueryHandler : IRequestHandler<GetUserProfileByConnectedIdQuery, UserDetailResponse>
     {
         private readonly IUserRepository _userRepository;
         private readonly IUserProfileRepository _profileRepository;
-        private readonly ICacheService _cacheService; // [v17 수정] Redis (L2)만 사용
+        private readonly IUserSocialAccountRepository _socialRepository; // 외부 연동 정보용
+        private readonly IOrganizationMembershipRepository _membershipRepository; // [New] ConnectedId 매핑용
+        private readonly ICacheService _cacheService;
         private readonly ILogger<GetUserProfileByConnectedIdQueryHandler> _logger;
         
         private const string CACHE_KEY_CONNECTED_PREFIX = "user:profile:connected:";
@@ -35,11 +39,15 @@ namespace AuthHive.Auth.Handlers.User
         public GetUserProfileByConnectedIdQueryHandler(
             IUserRepository userRepository,
             IUserProfileRepository profileRepository,
-            ICacheService cacheService, // [v17 수정]
+            IUserSocialAccountRepository socialRepository,
+            IOrganizationMembershipRepository membershipRepository,
+            ICacheService cacheService,
             ILogger<GetUserProfileByConnectedIdQueryHandler> logger)
         {
             _userRepository = userRepository;
             _profileRepository = profileRepository;
+            _socialRepository = socialRepository;
+            _membershipRepository = membershipRepository; 
             _cacheService = cacheService;
             _logger = logger;
         }
@@ -50,64 +58,71 @@ namespace AuthHive.Auth.Handlers.User
 
             var cacheKey = $"{CACHE_KEY_CONNECTED_PREFIX}{query.ConnectedId}";
 
-            // 1. [v17 수정] L1(로컬) 캐시 조회 로직 "제거"
-            
-            // 2. 분산 캐시(Redis) 조회
+            // 1. 분산 캐시(Redis) 조회
             var cachedProfile = await _cacheService.GetAsync<UserDetailResponse>(cacheKey, cancellationToken);
             if (cachedProfile != null)
             {
-                _logger.LogDebug("Profile retrieved from distributed cache (Redis) for ConnectedId {ConnectedId}", query.ConnectedId);
                 return cachedProfile;
             }
 
-            // 3. DB 조회 (Cache Miss)
-            var profile = await _profileRepository.GetByConnectedIdAsync(query.ConnectedId, cancellationToken);
-            if (profile == null)
+            // 2. DB 조회 (Cache Miss) - ConnectedId로 UserId 조회 (공식 인터페이스 메서드)
+            var connectedIdEntity = await _membershipRepository.GetByIdAsync(query.ConnectedId, cancellationToken);
+            
+            if (connectedIdEntity == null)
             {
-                throw new KeyNotFoundException($"Profile not found for ConnectedId: {query.ConnectedId}");
+                throw new KeyNotFoundException($"Membership (ConnectedId: {query.ConnectedId}) not found.");
             }
+            
+            // ConnectedId Entity에서 UserId 추출
+            var userId = connectedIdEntity.UserId;
 
-            var user = await _userRepository.GetByIdAsync(profile.UserId, cancellationToken);
-             if (user == null)
+            // 3. User 및 UserProfile 조회 
+            var user = await _userRepository.GetByIdAsync(userId, cancellationToken);
+            var profile = await _profileRepository.GetByUserIdAsync(userId, cancellationToken);
+            var socialAccounts = await _socialRepository.GetByUserIdAsync(userId, cancellationToken);
+
+            if (user == null)
             {
-                throw new KeyNotFoundException($"User (UserId: {profile.UserId}) not found for ConnectedId: {query.ConnectedId}");
+                throw new KeyNotFoundException($"User (UserId: {userId}) not found.");
             }
-
+            
             // 4. 응답 DTO 매핑
-            var responseDto = MapToDto(profile, user);
+            var responseDto = MapToDto(profile, user, socialAccounts);
 
-            // 5. 캐시 저장 (Redis에만)
+            // 5. 캐시 저장
             await _cacheService.SetAsync(cacheKey, responseDto, TimeSpan.FromMinutes(CACHE_EXPIRATION_MINUTES), cancellationToken);
 
             return responseDto;
         }
         
-        // [v17 수정] 불필요한 L1(로컬) 캐시 헬퍼 메서드 제거
-
-        // --- v17 표준 MapToDto ---
-        private UserDetailResponse MapToDto(UserProfile profile, UserEntity user)
+        private UserDetailResponse MapToDto(
+            UserProfile? profile, 
+            UserEntity user, 
+            IEnumerable<UserSocialAccount> socialAccounts)
         {
+            var primarySocial = socialAccounts.FirstOrDefault();
+            
             return new UserDetailResponse
             {
+                // User & Base Info
                 Id = user.Id,
                 Status = user.Status,
                 Email = user.Email,
                 Username = user.Username,
-                DisplayName = user.DisplayName,
-                EmailVerified = user.IsEmailVerified,
+                IsEmailVerified = user.IsEmailVerified,
+                PhoneNumber = user.PhoneNumber, 
                 IsTwoFactorEnabled = user.IsTwoFactorEnabled,
                 LastLoginAt = user.LastLoginAt,
                 CreatedAt = user.CreatedAt,
-                ExternalUserId = user.ExternalUserId,
-                ExternalSystemType = user.ExternalSystemType,
                 UpdatedAt = user.UpdatedAt,
-                CreatedByConnectedId = user.CreatedByConnectedId,
-                UpdatedByConnectedId = user.UpdatedByConnectedId,
-                Profile = new UserProfileInfo
+
+                // Mapping
+                ExternalUserId = primarySocial?.ProviderId, 
+                ExternalSystemType = primarySocial?.Provider.ToString(),
+                
+                Profile = profile == null ? null : new UserProfileInfo
                 {
                      UserId = profile.UserId,
-                     PhoneNumber = profile.PhoneNumber,
-                     PhoneVerified = profile.PhoneVerified,
                      ProfileImageUrl = profile.ProfileImageUrl,
                      TimeZone = profile.TimeZone,
                      PreferredLanguage = profile.PreferredLanguage,
@@ -117,14 +132,23 @@ namespace AuthHive.Auth.Handlers.User
                      Location = profile.Location,
                      DateOfBirth = profile.DateOfBirth,
                      Gender = profile.Gender,
-                     CompletionPercentage = profile.CompletionPercentage,
                      IsPublic = profile.IsPublic,
-                     LastProfileUpdateAt = profile.LastProfileUpdateAt
+                     LastProfileUpdateAt = profile.LastProfileUpdateAt,
+                     CompletionPercentage = CalculateCompletionPercentage(profile)
                 },
-                Organizations = new (), 
+                Organizations = new List<UserOrganizationInfo>(), 
                 ActiveSessionCount = 0,
                 TotalConnectedIdCount = 0 
             };
+        }
+        
+        private int CalculateCompletionPercentage(UserProfile profile)
+        {
+            int score = 0;
+            if (!string.IsNullOrEmpty(profile.Bio)) score += 20;
+            if (!string.IsNullOrEmpty(profile.Location)) score += 20;
+            if (!string.IsNullOrEmpty(profile.ProfileImageUrl)) score += 20;
+            return score;
         }
     }
 }

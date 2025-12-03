@@ -1,7 +1,13 @@
 using AuthHive.Core.Interfaces.Auth.Provider;
-using AuthHive.Core.Models.Auth.Authentication.Responses;
 using AuthHive.Auth.Data.Context;
 using System.Security.Claims;
+using System; // Exception
+using System.Linq; // FirstOrDefault
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using AuthHive.Infra.Persistence.Context;
 
 namespace AuthHive.Auth.Middleware
 {
@@ -33,21 +39,24 @@ namespace AuthHive.Auth.Middleware
 
                 try
                 {
-                    var validationResult = await tokenProvider.ValidateAccessTokenAsync(token);
+                    // [Fix CS1061] 메서드 이름 수정 (ValidateAccessTokenAsync -> ValidateTokenAsync)
+                    // [Fix Logic] 반환 타입 변경 대응 (Result<T> -> ClaimsPrincipal?)
+                    var claimsPrincipal = await tokenProvider.ValidateTokenAsync(token);
 
-                    if (validationResult.IsSuccess && validationResult.Data != null)
+                    if (claimsPrincipal != null)
                     {
-                        var claimsPrincipal = validationResult.Data;
                         context.User = claimsPrincipal;
 
                         // Claims에서 ID들 추출
                         var userIdClaim = claimsPrincipal.FindFirst(ClaimTypes.NameIdentifier) ?? 
-                                         claimsPrincipal.FindFirst("sub");
+                                          claimsPrincipal.FindFirst("sub");
                         var connectedIdClaim = claimsPrincipal.FindFirst("connected_id");
                         var orgIdClaim = claimsPrincipal.FindFirst("org_id");
-                        var sessionIdClaim = claimsPrincipal.FindFirst("session_id");
+                        
+                        // (필요하다면 session_id도 추출)
+                        // var sessionIdClaim = claimsPrincipal.FindFirst("session_id");
 
-                        // AuthDbContext에 현재 컨텍스트 설정
+                        // AuthDbContext에 현재 컨텍스트 설정 (RLS)
                         if (Guid.TryParse(connectedIdClaim?.Value, out var connectedId))
                         {
                             authDbContext.CurrentConnectedId = connectedId;
@@ -64,7 +73,7 @@ namespace AuthHive.Auth.Middleware
                     }
                     else
                     {
-                        _logger.LogWarning("Token validation failed: {ErrorMessage}", validationResult.ErrorMessage);
+                        _logger.LogWarning("Token validation failed: Invalid token or signature.");
                     }
                 }
                 catch (Exception ex)

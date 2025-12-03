@@ -25,6 +25,9 @@ using AuthHive.Core.Interfaces.Auth.Provider;
 using AuthHive.Core.Interfaces.Auth.Service;
 using AuthHive.Infra.Services.Auth;
 using Asp.Versioning;
+using AuthHive.Auth.Providers.Hashing;
+using AuthHive.Infra.Providers.Tokens;
+using AuthHive.Infra.Persistence.Repositories.Auth.Authentication;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
@@ -107,7 +110,7 @@ try
     builder.Services.AddScoped<ITokenProvider, PasetoTokenProvider>();
     builder.Services.AddSingleton<ITokenService, TokenService>();
     builder.Services.AddSingleton<IPasswordHashProvider, Argon2PasswordHashProvider>();
-
+    builder.Services.AddScoped<ISSOConfigurationRepository, SSOConfigurationRepository>();
 
     // --- Context Accessors ---
     // (Middleware가 채워준 값을 꺼내 쓰는 서비스들)
