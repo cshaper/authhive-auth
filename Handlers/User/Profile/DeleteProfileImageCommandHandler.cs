@@ -1,135 +1,136 @@
-// [AuthHive.Auth] DeleteProfileImageCommandHandler.cs
-// v17 CQRS "본보기": 'UserProfile'의 프로필 이미지를 삭제(GCS)하고
-// 엔티티는 '기본 이미지'로 되돌리는 'DeleteProfileImageCommand'를 처리합니다.
-
-using AuthHive.Core.Entities.User;
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories;
-using AuthHive.Core.Interfaces.Infra.Storage; // [v17] GCS 서비스 주입
-using AuthHive.Core.Models.User.Commands;
-using AuthHive.Core.Models.User.Events.Profile; // ProfileImageDeletedEvent
-using MediatR;
-using Microsoft.Extensions.Logging;
-using System.ComponentModel.DataAnnotations; // ValidationException
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using AuthHive.Core.Interfaces.User.Repositories.Profile;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+
+// [Core & Infra]
+using AuthHive.Infra.Persistence.Context; // [v18] AuthDbContext 직접 사용
+using AuthHive.Core.Interfaces.Infra.Storage; // GCS 서비스
+using AuthHive.Core.Exceptions;
+
+// [Models]
 using AuthHive.Core.Models.User.Commands.Profile;
+using AuthHive.Core.Models.User.Events.Profile;
 
-namespace AuthHive.Auth.Handlers.User
+namespace AuthHive.Core.Handlers.User.Profile;
+
+/// <summary>
+/// [v18] "프로필 이미지 삭제" 핸들러
+/// 프로필 이미지를 제거(기본 이미지로 변경)하고, 실제 스토리지(GCS)에서도 파일을 삭제합니다.
+/// </summary>
+public class DeleteProfileImageCommandHandler : IRequestHandler<DeleteProfileImageCommand, Unit>
 {
-    /// <summary>
-    /// [v17] "프로필 이미지 삭제" 유스케이스 핸들러 (SOP 1-Write-H)
-    /// v17 CQRS 철학에 따라 데이터를 반환하지 않습니다 (Unit).
-    /// </summary>
-    public class DeleteProfileImageCommandHandler : IRequestHandler<DeleteProfileImageCommand, Unit>
+    private readonly AuthDbContext _context;          // [변경] Repository -> DbContext
+    private readonly IStorageService _storageService; // [유지] 외부 스토리지 서비스
+    private readonly IPublisher _publisher;           // [변경] IMediator -> IPublisher
+    private readonly ILogger<DeleteProfileImageCommandHandler> _logger;
+
+    public DeleteProfileImageCommandHandler(
+        AuthDbContext context,
+        IStorageService storageService,
+        IPublisher publisher,
+        ILogger<DeleteProfileImageCommandHandler> logger)
     {
-        private readonly IUserProfileRepository _profileRepository;
-        private readonly IStorageService _storageService; // [v17] GCS 전문가
-        private readonly IUnitOfWork _unitOfWork;
-        private readonly IMediator _mediator;
-        private readonly ILogger<DeleteProfileImageCommandHandler> _logger;
+        _context = context;
+        _storageService = storageService;
+        _publisher = publisher;
+        _logger = logger;
+    }
 
-        public DeleteProfileImageCommandHandler(
-            IUserProfileRepository profileRepository,
-            IStorageService storageService, // [v17] GCS 전문가 주입
-            IUnitOfWork unitOfWork,
-            IMediator mediator,
-            ILogger<DeleteProfileImageCommandHandler> logger)
+    public async Task<Unit> Handle(DeleteProfileImageCommand command, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Handling DeleteProfileImageCommand for User {UserId}", command.UserId);
+
+        // 1. 엔티티 조회 (DbContext 직접 사용)
+        // UserProfiles 테이블에서 조회 (User와 1:1 관계이므로 Profile이 없을 수도 있음을 고려)
+        var profile = await _context.UserProfiles
+            .FirstOrDefaultAsync(p => p.UserId == command.UserId, cancellationToken);
+
+        // 2. 멱등성(Idempotency) 체크
+        // 프로필이 없거나, 이미 이미지가 없는 경우 성공으로 간주하고 종료
+        if (profile == null || string.IsNullOrEmpty(profile.ProfileImageUrl))
         {
-            _profileRepository = profileRepository;
-            _storageService = storageService;
-            _unitOfWork = unitOfWork;
-            _mediator = mediator;
-            _logger = logger;
-        }
-
-        public async Task<Unit> Handle(DeleteProfileImageCommand command, CancellationToken cancellationToken)
-        {
-            _logger.LogInformation("Handling DeleteProfileImageCommand for User {UserId}", command.UserId);
-
-            // 1. 엔티티 조회
-            var profile = await _profileRepository.GetByIdAsync(command.UserId, cancellationToken);
-            if (profile == null || string.IsNullOrEmpty(profile.ProfileImageUrl))
-            {
-                _logger.LogWarning("Profile not found or image already empty for User {UserId}. Skipping.", command.UserId);
-                return Unit.Value; // 멱등성(Idempotency): 이미 삭제된 상태이므로 성공 처리
-            }
-
-            // [v17 로직] v16 Validator는 별도 로직이 없었으므로 검증 단계 생략
-
-            string oldImageUrl = profile.ProfileImageUrl;
-
-            // 2. [철학 적용] 엔티티 도메인 메서드 호출 (상태 변경)
-            // (v16 UserProfileService.DeleteProfileImageAsync 로직 이관)
-            profile.DeleteProfileImage(); // ProfileImageUrl을 "기본 아바타"로 설정
-
-            // 3. 데이터베이스 저장 (Update)
-            await _profileRepository.UpdateAsync(profile, cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-            _logger.LogInformation("Profile image URL reset to default for User {UserId}", command.UserId);
-
-            // 4. 인프라 작업 (GCS 파일 삭제)
-            // [정합성] DB 트랜잭션이 성공한 후에 실제 파일을 삭제 (실패 시 롤백 방지)
-            try
-            {
-                // TODO: oldImageUrl이 "기본 아바타" URL이 아닐 경우에만 삭제하는 로직 필요
-                if (oldImageUrl != profile.ProfileImageUrl) // profile.ProfileImageUrl은 이제 기본 URL
-                {
-                    // objectName 추출 (URL -> GCS 경로)
-                    // (이 로직은 IStorageService 또는 헬퍼가 담당해야 함)
-                    string objectName = ExtractObjectNameFromUrl(oldImageUrl);
-
-                    await _storageService.DeleteAsync(objectName, cancellationToken);
-                    _logger.LogInformation("Old image deleted from GCS: {ObjectName}", objectName);
-                }
-            }
-            catch (Exception ex)
-            {
-                // [정합성] GCS 삭제에 실패해도 DB는 이미 롤백되었으므로, 로깅만 하고 에러를 던지지 않음
-                // (또는 이 이벤트를 구독하는 별도 핸들러가 GCS 삭제를 재시도하도록 큐에 넣음)
-                _logger.LogError(ex, "Failed to delete old image from GCS for User {UserId}: {OldUrl}", command.UserId, oldImageUrl);
-            }
-            // 5. 이벤트 발행
-            var imageDeletedEvent = new ProfileImageDeletedEvent
-            {
-                // BaseEvent Props
-                EventId = Guid.NewGuid(),
-                AggregateId = profile.UserId,
-                OccurredOn = DateTime.UtcNow,
-                TriggeredBy = command.TriggeredBy, // Command에 추가됨
-                OrganizationId = command.OrganizationId, // Command에 추가됨
-                CorrelationId = command.CorrelationId?.ToString(),
-
-                // Domain Props
-                UserId = profile.UserId,
-                DeletedAt = DateTime.UtcNow,
-                DeletedByConnectedId = command.TriggeredBy,
-                DeletedImageUrl = oldImageUrl,
-                IpAddress = command.IpAddress
-            };
-            await _mediator.Publish(imageDeletedEvent, cancellationToken);
-
-            // 6. 응답 DTO 반환 (데이터 반환 안 함)
+            _logger.LogWarning("Profile not found or image already empty. User {UserId}", command.UserId);
             return Unit.Value;
         }
 
-        /// <summary>
-        /// (임시 헬퍼) Public URL에서 GCS Object Name을 추출합니다.
-        /// 이 로직은 IStorageService로 이동해야 합니다.
-        /// </summary>
-        private string ExtractObjectNameFromUrl(string url)
+        string oldImageUrl = profile.ProfileImageUrl;
+
+        // 3. [Domain Logic] 상태 변경 (Entity 메서드 호출)
+        profile.DeleteProfileImage(); // ProfileImageUrl = null 처리
+
+        // 4. [Persistence] DB 저장
+        // EF Core Change Tracking이 작동하므로 Update 호출 불필요
+        await _context.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation("Profile image reset to default in DB. User {UserId}", command.UserId);
+
+        // 5. [Infra] 실제 파일 삭제 (GCS)
+        // DB 커밋 후에 실행하여, DB 실패 시 파일이 지워지는 것을 방지 (정합성)
+        if (!string.IsNullOrEmpty(oldImageUrl))
         {
-            // 예: "https://storage.googleapis.com/BUCKET_NAME/profiles/user-123/avatar.png"
-            // -> "profiles/user-123/avatar.png"
             try
             {
-                var uri = new Uri(url);
-                return string.Join("/", uri.Segments.Skip(2)); // "BUCKET_NAME/" 스킵
+                // URL에서 Object Name 추출 (간단한 파싱)
+                string objectName = ExtractObjectNameFromUrl(oldImageUrl);
+                
+                await _storageService.DeleteAsync(objectName, cancellationToken);
+                _logger.LogInformation("Deleted GCS object: {ObjectName}", objectName);
             }
-            catch { return url; } // URL 형식이 아닐 경우
+            catch (Exception ex)
+            {
+                // 파일 삭제 실패는 비즈니스 로직(DB 갱신)을 롤백시키지 않음 (로그만 남김)
+                // 추후 "GCS 고아 파일 정리 배치" 등이 처리할 영역
+                _logger.LogError(ex, "Failed to delete GCS object. User {UserId}, Url {Url}", command.UserId, oldImageUrl);
+            }
+        }
+
+        // 6. [Event] 이벤트 발행
+        var imageDeletedEvent = new ProfileImageDeletedEvent
+        {
+            // BaseEvent Required
+            AggregateId = profile.UserId,
+            OccurredOn = DateTime.UtcNow,
+            
+            // Context
+            EventId = Guid.NewGuid(),
+            TriggeredBy = command.TriggeredBy,
+            OrganizationId = command.OrganizationId,
+            CorrelationId = command.CorrelationId?.ToString(),
+
+            // Payload
+            UserId = profile.UserId,
+            DeletedImageUrl = oldImageUrl,
+            DeletedAt = DateTime.UtcNow,
+            DeletedByConnectedId = command.TriggeredBy,
+            IpAddress = command.IpAddress
+        };
+
+        await _publisher.Publish(imageDeletedEvent, cancellationToken);
+
+        return Unit.Value;
+    }
+
+    /// <summary>
+    /// URL에서 GCS Object Key를 추출하는 헬퍼 메서드
+    /// </summary>
+    private static string ExtractObjectNameFromUrl(string url)
+    {
+        try
+        {
+            // 예: https://storage.googleapis.com/bucket/profiles/user-1/img.png
+            // -> profiles/user-1/img.png
+            var uri = new Uri(url);
+            // 경로의 첫 번째 세그먼트(버킷명 등)를 제외하고 나머지 경로 조합
+            // (실제 스토리지 구조에 따라 조정 필요)
+            return string.Join("", uri.Segments.Skip(2)); 
+        }
+        catch
+        {
+            return url; // 파싱 실패 시 원본 반환 시도
         }
     }
 }

@@ -1,8 +1,7 @@
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
-using AuthHive.Core.Interfaces.User.Repositories.Profile; // UserProfileRepo
-using AuthHive.Core.Interfaces.User.Validators;
+using AuthHive.Core.Interfaces.User.Repositories.Profile; 
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Models.User.Commands.Settings;
 using AuthHive.Core.Models.User.Events.Settings;
@@ -14,7 +13,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Exceptions;
 using System.Collections.Generic; // KeyNotFoundException용
-using UserProfileEntity = AuthHive.Core.Entities.User.UserProfile; // UserProfile Entity
+using UserProfileEntity = AuthHive.Core.Entities.User.UserProfile;
+using FluentValidation; // UserProfile Entity
 
 namespace AuthHive.Auth.Handlers.User.Settings;
 
@@ -25,15 +25,15 @@ public class ChangeTimeZoneCommandHandler : IRequestHandler<ChangeTimeZoneComman
 {
     private readonly IUserProfileRepository _profileRepository;
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IUserValidator _validator; // Facade
     private readonly IMediator _mediator;
     private readonly IDateTimeProvider _timeProvider;
     private readonly ILogger<ChangeTimeZoneCommandHandler> _logger;
+    private readonly IValidator<ChangeTimeZoneCommand> _validator;
 
     public ChangeTimeZoneCommandHandler(
         IUserProfileRepository profileRepository,
         IUnitOfWork unitOfWork,
-        IUserValidator validator,
+        IValidator<ChangeTimeZoneCommand> validator,
         IMediator mediator,
         IDateTimeProvider timeProvider,
         ILogger<ChangeTimeZoneCommandHandler> logger)
@@ -51,11 +51,15 @@ public class ChangeTimeZoneCommandHandler : IRequestHandler<ChangeTimeZoneComman
         _logger.LogInformation("Handling ChangeTimeZoneCommand for User {UserId}: NewTimeZone={NewTimeZone}", 
             command.UserId, command.NewTimeZone);
 
-        // 1. 유효성 검사 (타임존 형식 유효성, 조직 정책 등)
-        var validationResult = await _validator.ValidateChangeTimeZoneAsync(command, cancellationToken);
+        // 1. 유효성 검사 (FluentValidation 표준 메서드 사용)
+        var validationResult = await _validator.ValidateAsync(command, cancellationToken);
+
         if (!validationResult.IsValid)
         {
-            throw new DomainValidationException(validationResult.Errors.First());
+            // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
+            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
+
+            throw new DomainValidationException("Validation failed.", errorMessages);
         }
 
         // 2. UserProfile 엔티티 조회

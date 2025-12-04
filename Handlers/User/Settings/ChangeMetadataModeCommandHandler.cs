@@ -8,7 +8,6 @@ using Microsoft.Extensions.Logging;
 // [Core Interfaces]
 using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
-using AuthHive.Core.Interfaces.User.Validators;
 using AuthHive.Core.Interfaces.Infra;
 
 // [Models & Entities]
@@ -16,7 +15,8 @@ using AuthHive.Core.Models.User.Commands.Settings;
 using AuthHive.Core.Models.User.Events.Settings;
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Exceptions;
-using static AuthHive.Core.Enums.Core.UserEnums; // UserMetadataMode 포함
+using static AuthHive.Core.Enums.Core.UserEnums;
+using FluentValidation; // UserMetadataMode 포함
 
 namespace AuthHive.Auth.Handlers.User.Settings;
 
@@ -27,15 +27,15 @@ public class ChangeMetadataModeCommandHandler : IRequestHandler<ChangeMetadataMo
 {
     private readonly IUserRepository _userRepository;
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IUserValidator _validator;
     private readonly IMediator _mediator;
     private readonly IDateTimeProvider _timeProvider;
     private readonly ILogger<ChangeMetadataModeCommandHandler> _logger;
+    private readonly IValidator<ChangeMetadataModeCommand> _validator;
 
     public ChangeMetadataModeCommandHandler(
         IUserRepository userRepository,
         IUnitOfWork unitOfWork,
-        IUserValidator validator,
+        IValidator<ChangeMetadataModeCommand> validator,
         IMediator mediator,
         IDateTimeProvider timeProvider,
         ILogger<ChangeMetadataModeCommandHandler> logger)
@@ -53,11 +53,15 @@ public class ChangeMetadataModeCommandHandler : IRequestHandler<ChangeMetadataMo
         _logger.LogInformation("Handling ChangeMetadataModeCommand for User {UserId}: NewMode={NewMode}",
             command.UserId, command.NewMode);
 
-        // 1. 유효성 검사
-        var validationResult = await _validator.ValidateChangeMetadataModeAsync(command, cancellationToken);
+        // 1. 유효성 검사 (FluentValidation 표준 메서드 사용)
+        var validationResult = await _validator.ValidateAsync(command, cancellationToken);
+
         if (!validationResult.IsValid)
         {
-            throw new DomainValidationException(validationResult.Errors.First());
+            // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
+            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
+
+            throw new DomainValidationException("Validation failed.", errorMessages);
         }
 
         // 2. 엔티티 조회

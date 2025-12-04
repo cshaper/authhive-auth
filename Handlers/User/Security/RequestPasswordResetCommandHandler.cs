@@ -64,7 +64,7 @@ public class RequestPasswordResetCommandHandler : IRequestHandler<RequestPasswor
             // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
             var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
             
-            throw new DomainValidationException("Activity log validation failed.", errorMessages);
+            throw new DomainValidationException("Validation failed.", errorMessages);
         }
 
         // 2. 사용자 조회 (정규화된 이메일 사용)
