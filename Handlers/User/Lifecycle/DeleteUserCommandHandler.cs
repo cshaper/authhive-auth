@@ -1,15 +1,15 @@
 using System;
-using System.Linq; // Select 사용
+using System.Linq; 
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using FluentValidation;
 
-// [Core & Infra]
-using AuthHive.Infra.Persistence.Context; // [v18] AuthDbContext 직접 사용
+// [Core Interfaces]
+// ✅ Infra(DbContext) 제거 -> Repository Interface 추가
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; 
 using AuthHive.Core.Exceptions;
 
 // [Models]
@@ -19,23 +19,24 @@ using AuthHive.Core.Models.User.Events.Lifecycle;
 namespace AuthHive.Core.Handlers.User.Lifecycle;
 
 /// <summary>
-/// [v18] "사용자 삭제" 유스케이스 핸들러
-/// Repository를 제거하고 DbContext와 Entity 메서드를 통해 Soft Delete를 수행합니다.
+/// [v18] "사용자 삭제" 유스케이스 핸들러 (Refactored)
+/// Repository 패턴을 적용하여 Soft Delete를 수행합니다.
 /// </summary>
 public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Unit>
 {
-    private readonly AuthDbContext _context;          // [변경] Repository -> DbContext
+    // ❌ private readonly AuthDbContext _context;
+    private readonly IUserRepository _repository; // ✅ Lifecycle은 IUserRepository 담당
     private readonly IValidator<DeleteUserCommand> _validator;
-    private readonly IPublisher _publisher;           // [변경] IMediator -> IPublisher
+    private readonly IPublisher _publisher;
     private readonly ILogger<DeleteUserCommandHandler> _logger;
 
     public DeleteUserCommandHandler(
-        AuthDbContext context,
+        IUserRepository repository, // ✅ 생성자 주입 변경
         IValidator<DeleteUserCommand> validator,
         IPublisher publisher,
         ILogger<DeleteUserCommandHandler> logger)
     {
-        _context = context;
+        _repository = repository;
         _validator = validator;
         _publisher = publisher;
         _logger = logger;
@@ -53,9 +54,10 @@ public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Unit>
             throw new DomainValidationException("Validation failed", errorMessages);
         }
 
-        // 2. 엔티티 조회 (DbContext 직접 사용)
-        var user = await _context.Users
-            .FirstOrDefaultAsync(u => u.Id == command.UserId, cancellationToken);
+        // 2. 엔티티 조회 (Repository 사용)
+        // ✅ _context.Users.FirstOrDefaultAsync(...) 대체
+        // BaseRepository에 보통 GetByIdAsync가 있으므로 그것을 사용합니다.
+        var user = await _repository.GetByIdAsync(command.UserId, cancellationToken);
         
         if (user == null)
         {
@@ -63,17 +65,12 @@ public class DeleteUserCommandHandler : IRequestHandler<DeleteUserCommand, Unit>
         }
         
         // 3. [Domain Logic] 상태 변경 (Soft Delete)
-        // Repository에 숨겨져 있던 로직을 Entity 메서드 호출로 변경 (또는 속성 직접 변경)
-        // 예: User Entity에 SoftDelete 메서드가 있다고 가정
+        // User Entity 내부의 비즈니스 로직 호출
         user.SoftDelete(deletedBy: command.TriggeredBy); 
-        
-        // 만약 Entity에 메서드가 없다면 아래와 같이 직접 설정:
-        // user.IsDeleted = true;
-        // user.DeletedAt = DateTime.UtcNow;
-        // user.Status = UserStatus.Deleted; 
 
-        // 4. [Persistence] 저장 (Change Tracking)
-        await _context.SaveChangesAsync(cancellationToken);
+        // 4. [Persistence] 저장 (Repository Update)
+        // ✅ Soft Delete는 DB 행을 지우는게 아니라 상태를 업데이트하는 것이므로 UpdateAsync 호출
+        await _repository.UpdateAsync(user, cancellationToken);
 
         _logger.LogInformation("User soft-deleted successfully: {UserId}", user.Id);
 

@@ -1,8 +1,8 @@
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; // IUserRepository
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; 
 using AuthHive.Core.Models.User.Commands.Security;
-using AuthHive.Core.Models.User.Events.Settings; // TwoFactorSettingChangedEvent
+using AuthHive.Core.Models.User.Events.Settings; 
 using MediatR;
 using Microsoft.Extensions.Logging;
 using System.ComponentModel.DataAnnotations;
@@ -15,7 +15,8 @@ using AuthHive.Core.Exceptions;
 using AuthHive.Core.Interfaces.Infra; 
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Models.User.Events.Profile;
-using FluentValidation; // Event DTO 참조용 (필요 시)
+using FluentValidation; 
+using IPublisher = MediatR.IPublisher; // ✅ IPublisher 사용 명확화
 
 namespace AuthHive.Auth.Handlers.User.Security;
 
@@ -26,21 +27,22 @@ public class ChangeTwoFactorCommandHandler : IRequestHandler<ChangeTwoFactorComm
 {
     private readonly IUserRepository _userRepository;
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IMediator _mediator;
+    private readonly IPublisher _publisher; // ✅ IMediator -> IPublisher 변경
     private readonly ILogger<ChangeTwoFactorCommandHandler> _logger;
     private readonly IDateTimeProvider _timeProvider;
     private readonly IValidator<ChangeTwoFactorCommand> _validator;
+
     public ChangeTwoFactorCommandHandler(
         IUserRepository userRepository,
         IUnitOfWork unitOfWork,
-        IMediator mediator,
+        IPublisher publisher, // ✅ IMediator -> IPublisher 변경
         ILogger<ChangeTwoFactorCommandHandler> logger,
         IDateTimeProvider timeProvider,
         IValidator<ChangeTwoFactorCommand> validator)
     {
         _userRepository = userRepository;
         _unitOfWork = unitOfWork;
-        _mediator = mediator;
+        _publisher = publisher; // ✅ 필드 대입
         _logger = logger;
         _timeProvider = timeProvider;
         _validator = validator;
@@ -51,14 +53,12 @@ public class ChangeTwoFactorCommandHandler : IRequestHandler<ChangeTwoFactorComm
         _logger.LogInformation("Handling ChangeTwoFactorCommand for User {UserId}: Enabled={IsEnabled}, Type={Type}", 
             command.UserId, command.IsEnabled, command.TwoFactorMethod);
 
-        // 1. 유효성 검사 (FluentValidation 표준 메서드 사용)
+        // 1. 유효성 검사
         var validationResult = await _validator.ValidateAsync(command, cancellationToken);
         
         if (!validationResult.IsValid)
         {
-            // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
             var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
-            
             throw new DomainValidationException("Validation failed.", errorMessages);
         }
 
@@ -70,12 +70,12 @@ public class ChangeTwoFactorCommandHandler : IRequestHandler<ChangeTwoFactorComm
         }
 
         // 3. 변경 사항 적용 (DDD 메서드 호출)
-        // [Fix CS0272] 직접 대입 코드 제거 및 SetTwoFactorStatus() 호출로 대체
         user.SetTwoFactorStatus(command.IsEnabled, command.TwoFactorMethod);
 
         // 4. 데이터베이스 저장 (Update)
+        // UpdateAsync는 Change Tracking만 위임하고, SaveChangesAsync가 커밋을 담당합니다.
         await _userRepository.UpdateAsync(user, cancellationToken);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken); // ✅ UoW를 통한 커밋
 
         _logger.LogInformation("2FA settings changed successfully for User {UserId}", command.UserId);
 
@@ -93,11 +93,12 @@ public class ChangeTwoFactorCommandHandler : IRequestHandler<ChangeTwoFactorComm
             // Event Props
             UserId = user.Id,
             IsEnabled = user.IsTwoFactorEnabled,
-            Method = user.TwoFactorMethod!, // Fix: SetTwoFactorStatus가 값을 설정했으므로 사용 가능
+            Method = user.TwoFactorMethod!, 
             ChangedAt = _timeProvider.UtcNow
         };
         
-        await _mediator.Publish(twoFactorChangedEvent, cancellationToken);
+        // ✅ _mediator.Publish(...) -> _publisher.Publish(...) 변경
+        await _publisher.Publish(twoFactorChangedEvent, cancellationToken);
         
         return Unit.Value;
     }

@@ -1,5 +1,4 @@
 using AuthHive.Core.Interfaces.Auth.Provider;
-using AuthHive.Auth.Data.Context;
 using System.Security.Claims;
 using System; // Exception
 using System.Linq; // FirstOrDefault

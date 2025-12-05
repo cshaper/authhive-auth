@@ -1,7 +1,7 @@
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
-using AuthHive.Core.Interfaces.User.Repositories.Profile; 
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; // ✅ IUserRepository
+using AuthHive.Core.Interfaces.User.Repositories.Profile;
 using AuthHive.Core.Interfaces.Infra;
 using AuthHive.Core.Models.User.Commands.Settings;
 using AuthHive.Core.Models.User.Events.Settings;
@@ -12,66 +12,70 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AuthHive.Core.Exceptions;
-using System.Collections.Generic; // KeyNotFoundException용
-using UserProfileEntity = AuthHive.Core.Entities.User.UserProfile;
-using FluentValidation; // UserProfile Entity
+using System.Collections.Generic;
+using FluentValidation;
+using IPublisher = MediatR.IPublisher;
 
 namespace AuthHive.Auth.Handlers.User.Settings;
 
-/// <summary>
-/// [v18] "타임존 변경" 유스케이스 핸들러
-/// </summary>
 public class ChangeTimeZoneCommandHandler : IRequestHandler<ChangeTimeZoneCommand, Unit>
 {
     private readonly IUserProfileRepository _profileRepository;
+    private readonly IUserRepository _userRepository; // ✅ User 엔티티 동기화를 위해 추가
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IMediator _mediator;
+    private readonly IPublisher _publisher;
     private readonly IDateTimeProvider _timeProvider;
     private readonly ILogger<ChangeTimeZoneCommandHandler> _logger;
     private readonly IValidator<ChangeTimeZoneCommand> _validator;
 
     public ChangeTimeZoneCommandHandler(
         IUserProfileRepository profileRepository,
+        IUserRepository userRepository, // ✅ 주입
         IUnitOfWork unitOfWork,
         IValidator<ChangeTimeZoneCommand> validator,
-        IMediator mediator,
+        IPublisher publisher,
         IDateTimeProvider timeProvider,
         ILogger<ChangeTimeZoneCommandHandler> logger)
     {
         _profileRepository = profileRepository;
+        _userRepository = userRepository; // ✅ 필드 대입
         _unitOfWork = unitOfWork;
         _validator = validator;
-        _mediator = mediator;
+        _publisher = publisher;
         _timeProvider = timeProvider;
         _logger = logger;
     }
 
     public async Task<Unit> Handle(ChangeTimeZoneCommand command, CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Handling ChangeTimeZoneCommand for User {UserId}: NewTimeZone={NewTimeZone}", 
+        _logger.LogInformation("Handling ChangeTimeZoneCommand for User {UserId}: NewTimeZone={NewTimeZone}",
             command.UserId, command.NewTimeZone);
 
-        // 1. 유효성 검사 (FluentValidation 표준 메서드 사용)
+        // 1. 유효성 검사
         var validationResult = await _validator.ValidateAsync(command, cancellationToken);
-
         if (!validationResult.IsValid)
         {
-            // [수정] ValidationFailure 객체 리스트를 string 컬렉션으로 변환 (CS1503 해결)
             var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
-
             throw new DomainValidationException("Validation failed.", errorMessages);
         }
 
         // 2. UserProfile 엔티티 조회
-        // UserProfile은 UserId와 PK가 동일하므로 GetByIdAsync를 사용하거나 GetByUserIdAsync를 사용 (여기서는 GetByUserIdAsync가 명확)
         var profile = await _profileRepository.GetByUserIdAsync(command.UserId, cancellationToken);
         if (profile == null)
         {
-            throw new KeyNotFoundException($"UserProfile not found for user: {command.UserId}");
+            throw new DomainEntityNotFoundException("UserProfile", command.UserId);
+        }
+        // 2.5. User 엔티티 조회 (동기화 대상)
+        var user = await _userRepository.GetByIdAsync(command.UserId, cancellationToken);
+        if (user == null)
+        {
+            // 프로필만 있고 User가 없으면 데이터 정합성 오류이므로 예외 처리
+            throw new DomainEntityNotFoundException("User", command.UserId, "Primary User entity is missing.");
         }
 
+
         var oldTimeZone = profile.TimeZone;
-        
+
         if (oldTimeZone == command.NewTimeZone)
         {
             _logger.LogInformation("TimeZone is already {NewTimeZone}. Skipping.", command.NewTimeZone);
@@ -79,45 +83,40 @@ public class ChangeTimeZoneCommandHandler : IRequestHandler<ChangeTimeZoneComman
         }
 
         // 3. 변경 사항 적용 (DDD - Entity Logic)
-        // [Fix CS1061] UpdateDetails 메서드 호출
-        profile.UpdateDetails(
-            bio: profile.Bio, // 기존 값 유지
-            location: profile.Location,
-            imageUrl: profile.ProfileImageUrl,
-            language: profile.PreferredLanguage,
-            timeZone: command.NewTimeZone, // 변경 값
-            websiteUrl: profile.WebsiteUrl
-        );
+        // [Fix CS1061 대비] UserProfile에 UpdateTimeZone 메서드 호출
+        profile.UpdateTimeZone(command.NewTimeZone);
 
-        // 4. 데이터베이스 저장
+        // ✅ User 엔티티 동기화 로직 (User 애그리거트의 LastUpdatedAt 등을 갱신한다고 가정)
+        user.MarkAsUpdated(); // User 엔티티에 감사(Audit) 필드 갱신을 위한 도메인 메서드 호출
+
+        // 4. 데이터베이스 저장 (Multi-Aggregate Update)
+        // 두 Repository 모두 업데이트를 위임
         await _profileRepository.UpdateAsync(profile, cancellationToken);
+        await _userRepository.UpdateAsync(user, cancellationToken); // ✅ User 엔티티 업데이트
+
+        // UoW를 통해 두 Repository의 변경사항을 하나의 트랜잭션으로 커밋
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         // 5. 이벤트 발행 (Notify)
-        // [Fix CS1739] Object Initializer 사용
         var timeZoneChangedEvent = new TimeZoneChangedEvent
         {
-            // BaseEvent Props
-            EventId = Guid.NewGuid(),
+            // ... (이벤트 속성 매핑 로직) ...
             AggregateId = profile.UserId,
             OccurredOn = _timeProvider.UtcNow,
-            // [Fix CS1061] Command에서 Audit 필드 매핑
-            TriggeredBy = command.TriggeredBy, 
-            OrganizationId = command.OrganizationId, 
-            IpAddress = command.IpAddress, 
-
-            // Event Props
+            TriggeredBy = command.TriggeredBy,
+            OrganizationId = command.OrganizationId,
+            IpAddress = command.IpAddress,
             UserId = profile.UserId,
             OldTimeZone = oldTimeZone,
-            NewTimeZone = profile.TimeZone, // 엔티티에 반영된 최신 값
+            NewTimeZone = profile.TimeZone,
             ChangedAt = _timeProvider.UtcNow
         };
-        
-        await _mediator.Publish(timeZoneChangedEvent, cancellationToken);
-        
-        _logger.LogInformation("TimeZone changed successfully for User {UserId}: {Old} -> {New}", 
+
+        await _publisher.Publish(timeZoneChangedEvent, cancellationToken);
+
+        _logger.LogInformation("TimeZone changed successfully for User {UserId}: {Old} -> {New}",
             command.UserId, oldTimeZone, profile.TimeZone);
-        
+
         return Unit.Value;
     }
 }

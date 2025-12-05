@@ -1,33 +1,39 @@
 using System;
+using System.Linq; 
 using System.Threading;
 using System.Threading.Tasks;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using FluentValidation;
+
+// [Core Interfaces]
+// ✅ Infra(DbContext) 제거 -> Repository Interface 추가
+using AuthHive.Core.Interfaces.User.Repositories.Profile; 
+using AuthHive.Core.Exceptions;
+
+// [Models & Entities]
 using AuthHive.Core.Entities.User;
 using AuthHive.Core.Models.User.Commands.Profile;
 using AuthHive.Core.Models.User.Events.Profile;
 using AuthHive.Core.Models.User.Responses.Profile;
-using AuthHive.Core.Interfaces;
-using AuthHive.Infra.Persistence.Context;
-using FluentValidation;
-using AuthHive.Core.Exceptions;
 
 namespace AuthHive.Core.Handlers.User.Profile;
 
 public class CreateUserProfileCommandHandler : IRequestHandler<CreateUserProfileCommand, UserProfileResponse>
 {
-    private readonly AuthDbContext _context;
+    // ❌ private readonly AuthDbContext _context;
+    private readonly IUserProfileRepository _repository; // ✅ Repository 사용
     private readonly IPublisher _publisher;
     private readonly ILogger<CreateUserProfileCommandHandler> _logger;
     private readonly IValidator<CreateUserProfileCommand> _validator;
+
     public CreateUserProfileCommandHandler(
-            AuthDbContext context,
+            IUserProfileRepository repository, // ✅ 생성자 주입 변경
             IPublisher publisher,
             ILogger<CreateUserProfileCommandHandler> logger,
-            IValidator<CreateUserProfileCommand> validator) // [추가] 생성자 주입
+            IValidator<CreateUserProfileCommand> validator) 
     {
-        _context = context;
+        _repository = repository;
         _publisher = publisher;
         _logger = logger;
         _validator = validator;
@@ -35,16 +41,18 @@ public class CreateUserProfileCommandHandler : IRequestHandler<CreateUserProfile
 
     public async Task<UserProfileResponse> Handle(CreateUserProfileCommand command, CancellationToken cancellationToken)
     {
-        // [추가] 0. 유효성 검사 필수!
+        // 0. 유효성 검사
         var validationResult = await _validator.ValidateAsync(command, cancellationToken);
         if (!validationResult.IsValid)
         {
             var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
             throw new DomainValidationException("Profile creation failed", errorMessages);
         }
-        // 2. 중복 체크
-        bool exists = await _context.UserProfiles
-            .AnyAsync(p => p.UserId == command.UserId, cancellationToken);
+
+        // 1. 중복 체크 (Repository 메서드 사용)
+        // ✅ _context.UserProfiles.AnyAsync(...) 대체
+        // (Repository에 ExistsByUserIdAsync 메서드가 필요합니다)
+        bool exists = await _repository.ExistsByUserIdAsync(command.UserId, cancellationToken);
 
         if (exists)
         {
@@ -72,17 +80,19 @@ public class CreateUserProfileCommandHandler : IRequestHandler<CreateUserProfile
             LastProfileUpdateAt = DateTime.UtcNow
         };
 
-        _context.UserProfiles.Add(entity);
-        await _context.SaveChangesAsync(cancellationToken);
+        // 3. 저장 (Repository Add)
+        // ✅ _context.Add + SaveChangesAsync 대체
+        await _repository.AddAsync(entity, cancellationToken);
 
         _logger.LogInformation("Created UserProfile for UserId: {UserId}", command.UserId);
 
-        // 3. 이벤트 발행
+        // 4. 이벤트 발행
         await _publisher.Publish(new UserProfileCreatedEvent
         {
-            // [Fix] BaseEvent의 필수(required) 속성 초기화
-            AggregateId = entity.UserId,      // Aggregate Root ID
-            OccurredOn = DateTime.UtcNow,     // 이벤트 발생 시각
+            // [Fix] BaseEvent Required
+            AggregateId = entity.UserId,      
+            OccurredOn = DateTime.UtcNow,     
+            
             UserId = entity.UserId,
             ProfileId = entity.Id,
             Bio = entity.Bio,
@@ -95,7 +105,7 @@ public class CreateUserProfileCommandHandler : IRequestHandler<CreateUserProfile
             CreatedAt = entity.CreatedAt
         }, cancellationToken);
 
-        // 4. 응답 반환
+        // 5. 응답 반환
         return MapToResponse(entity);
     }
 
@@ -116,7 +126,7 @@ public class CreateUserProfileCommandHandler : IRequestHandler<CreateUserProfile
             TimeZone = entity.TimeZone,
             IsPublic = entity.IsPublic,
             LastProfileUpdateAt = entity.LastProfileUpdateAt,
-            CompletionPercentage = 0 // 계산 로직 필요 시 추가
+            CompletionPercentage = 0 
         };
     }
 }

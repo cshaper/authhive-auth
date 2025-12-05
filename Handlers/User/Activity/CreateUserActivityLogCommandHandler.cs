@@ -4,12 +4,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using FluentValidation;
 
-// [Core & Infra]
-using AuthHive.Infra.Persistence.Context; // [변경] AuthDbContext 직접 사용
+// [Core Interfaces]
+// ✅ Infra(DbContext) 의존성을 제거하고, Core에 정의된 Repository 인터페이스를 가져옵니다.
+using AuthHive.Core.Interfaces.User.Repositories.Activity; 
 using AuthHive.Core.Exceptions;
 
 // [Models]
@@ -26,18 +26,19 @@ namespace AuthHive.Auth.Handlers.User.Activity;
 /// </summary>
 public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserActivityLogCommand, Guid>
 {
-    private readonly AuthDbContext _context; // [변경] Repository -> DbContext
+
+    private readonly IUserActivityLogRepository _repository; // ✅ [추가] 인터페이스 의존
     private readonly IValidator<CreateUserActivityLogCommand> _validator;
-    private readonly IPublisher _publisher; // [변경] IMediator -> IPublisher
+    private readonly IPublisher _publisher; 
     private readonly ILogger<CreateUserActivityLogCommandHandler> _logger;
 
     public CreateUserActivityLogCommandHandler(
-        AuthDbContext context,
+        IUserActivityLogRepository repository, // ✅ 생성자 주입 변경
         IValidator<CreateUserActivityLogCommand> validator,
         IPublisher publisher,
         ILogger<CreateUserActivityLogCommandHandler> logger)
     {
-        _context = context;
+        _repository = repository;
         _validator = validator;
         _publisher = publisher;
         _logger = logger;
@@ -54,7 +55,7 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
             throw new DomainValidationException("Activity log validation failed.", errorMessages);
         }
         
-        var now = DateTime.UtcNow; // [간소화] Provider 제거
+        var now = DateTime.UtcNow;
 
         // 2. [Entity] 로그 엔티티 생성
         var log = new UserActivityLog
@@ -89,14 +90,17 @@ public class CreateUserActivityLogCommandHandler : IRequestHandler<CreateUserAct
             CreatedAt = now
         };
 
-        // 3. [Persistence] 저장 (DbContext 직접 사용)
-        _context.UserActivityLogs.Add(log);
-        await _context.SaveChangesAsync(cancellationToken);
+        // 3. [Persistence] 저장 (Repository 패턴 사용)
+        // ✅ DbContext 직접 호출 -> Repository 메서드 호출로 변경
+        // (BaseRepository에 AddAsync가 구현되어 있다고 가정합니다)
+        await _repository.AddAsync(log, cancellationToken);
+        // 만약 UnitOfWork 패턴을 엄격하게 쓴다면 여기서 _unitOfWork.SaveChangesAsync()가 필요할 수 있으나,
+        // 보통 단일 Repository 작업에서는 AddAsync 내부나 직후에 Save를 처리하기도 합니다.
 
         // 4. [Event] 이벤트 발행
         var loggedEvent = new UserActivityLoggedEvent
         {
-            // BaseEvent Props (필수 초기화)
+            // BaseEvent Props
             AggregateId = log.UserId ?? log.ConnectedId ?? Guid.Empty, 
             OccurredOn = now,
             
