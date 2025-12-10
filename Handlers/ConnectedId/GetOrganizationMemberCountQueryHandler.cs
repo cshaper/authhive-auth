@@ -1,4 +1,5 @@
-using AuthHive.Core.Interfaces.Auth.Repository;
+using AuthHive.Core.Interfaces.Auth.ConnectedId;
+using AuthHive.Core.Interfaces.Auth.Repositories; // [중요] Query Repository가 있는 네임스페이스
 using AuthHive.Core.Models.Auth.ConnectedId.Queries;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -15,14 +16,15 @@ namespace AuthHive.Auth.Handlers.ConnectedId.Queries
     public class GetOrganizationMemberCountQueryHandler 
         : IRequestHandler<GetOrganizationMemberCountQuery, int>
     {
-        private readonly IConnectedIdRepository _connectedIdRepository;
+        // [변경] Query 전용 리포지토리 주입
+        private readonly IConnectedIdQueryRepository _connectedIdQueryRepository;
         private readonly ILogger<GetOrganizationMemberCountQueryHandler> _logger;
 
         public GetOrganizationMemberCountQueryHandler(
-            IConnectedIdRepository connectedIdRepository,
+            IConnectedIdQueryRepository connectedIdQueryRepository, // 생성자 주입 변경
             ILogger<GetOrganizationMemberCountQueryHandler> logger)
         {
-            _connectedIdRepository = connectedIdRepository;
+            _connectedIdQueryRepository = connectedIdQueryRepository;
             _logger = logger;
         }
 
@@ -30,10 +32,9 @@ namespace AuthHive.Auth.Handlers.ConnectedId.Queries
         {
             _logger.LogInformation("Counting members for Org {OrganizationId}", query.OrganizationId);
 
-            // [수정 완료] 
-            // 아까 Repository에 구현한 메서드 이름인 'CountMembersByOrgIdAsync'로 호출해야 합니다.
-            // 파라미터 순서: (Guid organizationId, bool isActiveOnly, CancellationToken cancellationToken)
-            var count = await _connectedIdRepository.CountMembersByOrgIdAsync(
+            // [호출] Query Repository의 메서드 사용
+            // (IConnectedIdQueryRepository에 CountMembersByOrgIdAsync 메서드가 정의되어 있어야 합니다)
+            var count = await _connectedIdQueryRepository.CountMembersByOrgIdAsync(
                 query.OrganizationId,
                 query.ActiveOnly, 
                 cancellationToken

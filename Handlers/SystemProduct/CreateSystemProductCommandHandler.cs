@@ -64,7 +64,7 @@ public class CreateSystemProductCommandHandler : IRequestHandler<CreateSystemPro
         }
 
         // 2. Entity 생성 & 매핑
-        var entity = new AuthHive.Core.Entities.SystemProduct.SystemProduct
+        var entity = new AuthHive.Core.Entities.SystemProduct.Core.SystemProduct
         {
             OrganizationId = command.OrganizationId, // Provider ID
             ProductKey = command.ProductKey,
