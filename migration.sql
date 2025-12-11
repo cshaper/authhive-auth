@@ -139,7 +139,7 @@ CREATE TABLE auth."OrganizationDataPolicies" (
     CONSTRAINT "FK_OrganizationDataPolicies_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE
 );
 
-CREATE TABLE auth."PlatformApplications" (
+CREATE TABLE auth."Applications" (
     "Id" uuid NOT NULL,
     "Name" varchar NOT NULL,
     "Description" varchar,
@@ -183,8 +183,8 @@ CREATE TABLE auth."PlatformApplications" (
     "UpdatedByConnectedId" uuid,
     "DeletedByConnectedId" uuid,
     "RowVersion" bytea,
-    CONSTRAINT "PK_PlatformApplications" PRIMARY KEY ("Id"),
-    CONSTRAINT "FK_PlatformApplications_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE
+    CONSTRAINT "PK_Applications" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_Applications_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE
 );
 
 CREATE TABLE auth."ConnectedIds" (
@@ -273,10 +273,10 @@ CREATE TABLE auth."OAuthClients" (
     "DeletedByConnectedId" uuid,
     "RowVersion" bytea,
     CONSTRAINT "PK_OAuthClients" PRIMARY KEY ("Id"),
-    CONSTRAINT "FK_OAuthClients_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id") ON DELETE CASCADE
+    CONSTRAINT "FK_OAuthClients_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id") ON DELETE CASCADE
 );
 
-CREATE TABLE auth."PlatformApplicationApiKeys" (
+CREATE TABLE auth."ApplicationApiKeys" (
     "Id" uuid NOT NULL,
     "ApplicationId" uuid NOT NULL,
     "KeyName" varchar NOT NULL,
@@ -308,8 +308,8 @@ CREATE TABLE auth."PlatformApplicationApiKeys" (
     "UpdatedByConnectedId" uuid,
     "DeletedByConnectedId" uuid,
     "RowVersion" bytea,
-    CONSTRAINT "PK_PlatformApplicationApiKeys" PRIMARY KEY ("Id"),
-    CONSTRAINT "FK_PlatformApplicationApiKeys_PlatformApplications_Application~" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id") ON DELETE CASCADE
+    CONSTRAINT "PK_ApplicationApiKeys" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_ApplicationApiKeys_Applications_Application~" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id") ON DELETE CASCADE
 );
 
 CREATE TABLE auth."Roles" (
@@ -338,7 +338,7 @@ CREATE TABLE auth."Roles" (
     "DeletedByConnectedId" uuid,
     "RowVersion" bytea,
     CONSTRAINT "PK_Roles" PRIMARY KEY ("Id"),
-    CONSTRAINT "FK_Roles_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_Roles_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_Roles_Roles_ParentRoleId" FOREIGN KEY ("ParentRoleId") REFERENCES auth."Roles" ("Id") ON DELETE RESTRICT
 );
 
@@ -356,7 +356,7 @@ CREATE TABLE auth."UserFeatureProfiles" (
     "MostUsedFeature" varchar,
     "RecommendedAddons" varchar,
     "Metadata" varchar,
-    "PlatformApplicationId" uuid,
+    "ApplicationId" uuid,
     "IsDeleted" boolean NOT NULL,
     "DeletedAt" timestamp with time zone,
     "CreatedAt" timestamp with time zone NOT NULL,
@@ -367,7 +367,7 @@ CREATE TABLE auth."UserFeatureProfiles" (
     "DeletedByConnectedId" uuid,
     CONSTRAINT "PK_UserFeatureProfiles" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_UserFeatureProfiles_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_UserFeatureProfiles_PlatformApplications_PlatformApplicatio~" FOREIGN KEY ("PlatformApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_UserFeatureProfiles_Applications_PlatformApplicatio~" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_UserFeatureProfiles_Users_UserId" FOREIGN KEY ("UserId") REFERENCES auth."Users" ("Id") ON DELETE CASCADE
 );
 
@@ -652,7 +652,7 @@ CREATE TABLE auth."UserActivityLogs" (
     CONSTRAINT "PK_UserActivityLogs" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_UserActivityLogs_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_UserActivityLogs_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_UserActivityLogs_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id")
+    CONSTRAINT "FK_UserActivityLogs_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id")
 );
 
 CREATE TABLE auth."ConnectedIdRoles" (
@@ -686,7 +686,7 @@ CREATE TABLE auth."ConnectedIdRoles" (
     CONSTRAINT "FK_ConnectedIdRoles_ConnectedIds_AssignedByConnectedId" FOREIGN KEY ("AssignedByConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_ConnectedIdRoles_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_ConnectedIdRoles_ConnectedIds_ConnectedId1" FOREIGN KEY ("ConnectedId1") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_ConnectedIdRoles_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_ConnectedIdRoles_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_ConnectedIdRoles_Roles_RoleId" FOREIGN KEY ("RoleId") REFERENCES auth."Roles" ("Id") ON DELETE CASCADE
 );
 
@@ -720,7 +720,7 @@ CREATE TABLE auth."OrganizationSSO" (
     CONSTRAINT "FK_OrganizationSSO_Roles_DefaultRoleId" FOREIGN KEY ("DefaultRoleId") REFERENCES auth."Roles" ("Id")
 );
 
-CREATE TABLE auth."PlatformApplicationAccessTemplates" (
+CREATE TABLE auth."ApplicationAccessTemplates" (
     "Id" uuid NOT NULL,
     "Level" integer NOT NULL,
     "Name" varchar NOT NULL,
@@ -741,8 +741,8 @@ CREATE TABLE auth."PlatformApplicationAccessTemplates" (
     "UpdatedByConnectedId" uuid,
     "DeletedByConnectedId" uuid,
     "RowVersion" bytea,
-    CONSTRAINT "PK_PlatformApplicationAccessTemplates" PRIMARY KEY ("Id"),
-    CONSTRAINT "FK_PlatformApplicationAccessTemplates_Roles_DefaultRoleId" FOREIGN KEY ("DefaultRoleId") REFERENCES auth."Roles" ("Id")
+    CONSTRAINT "PK_ApplicationAccessTemplates" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_ApplicationAccessTemplates_Roles_DefaultRoleId" FOREIGN KEY ("DefaultRoleId") REFERENCES auth."Roles" ("Id")
 );
 
 CREATE TABLE auth."RolePermissions" (
@@ -838,7 +838,7 @@ CREATE TABLE auth."AuthenticationAttemptLogs" (
     CONSTRAINT "PK_AuthenticationAttemptLogs" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_AuthenticationAttemptLogs_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id"),
     CONSTRAINT "FK_AuthenticationAttemptLogs_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_AuthenticationAttemptLogs_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_AuthenticationAttemptLogs_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_AuthenticationAttemptLogs_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id"),
     CONSTRAINT "FK_AuthenticationAttemptLogs_Users_UserId" FOREIGN KEY ("UserId") REFERENCES auth."Users" ("Id")
 );
@@ -886,7 +886,7 @@ CREATE TABLE auth."AuthorizationAuditLogs" (
     "RowVersion" bytea,
     CONSTRAINT "PK_AuthorizationAuditLogs" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_AuthorizationAuditLogs_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_AuthorizationAuditLogs_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_AuthorizationAuditLogs_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_AuthorizationAuditLogs_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id")
 );
 
@@ -918,7 +918,7 @@ CREATE TABLE auth."ConnectedIdContexts" (
     "RowVersion" bytea,
     CONSTRAINT "PK_ConnectedIdContexts" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_ConnectedIdContexts_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_ConnectedIdContexts_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_ConnectedIdContexts_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_ConnectedIdContexts_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id")
 );
 
@@ -963,7 +963,7 @@ CREATE TABLE auth."OAuthAccessTokens" (
     CONSTRAINT "FK_OAuthAccessTokens_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_OAuthAccessTokens_OAuthAccessTokens_ParentTokenId" FOREIGN KEY ("ParentTokenId") REFERENCES auth."OAuthAccessTokens" ("Id"),
     CONSTRAINT "FK_OAuthAccessTokens_OAuthClients_ClientId" FOREIGN KEY ("ClientId") REFERENCES auth."OAuthClients" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_OAuthAccessTokens_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_OAuthAccessTokens_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_OAuthAccessTokens_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id")
 );
 
@@ -1002,7 +1002,7 @@ CREATE TABLE auth."PermissionValidationLogs" (
     CONSTRAINT "FK_PermissionValidationLogs_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_PermissionValidationLogs_Organizations_OrganizationId" FOREIGN KEY ("OrganizationId") REFERENCES auth."Organizations" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_PermissionValidationLogs_Permissions_PermissionId" FOREIGN KEY ("PermissionId") REFERENCES auth."Permissions" ("Id"),
-    CONSTRAINT "FK_PermissionValidationLogs_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_PermissionValidationLogs_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_PermissionValidationLogs_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id")
 );
 
@@ -1065,12 +1065,12 @@ CREATE TABLE auth."SessionActivityLogs" (
     "RowVersion" bytea,
     CONSTRAINT "PK_SessionActivityLogs" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_SessionActivityLogs_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_SessionActivityLogs_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_SessionActivityLogs_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_SessionActivityLogs_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_SessionActivityLogs_Users_UserId" FOREIGN KEY ("UserId") REFERENCES auth."Users" ("Id") ON DELETE CASCADE
 );
 
-CREATE TABLE auth."UserPlatformApplicationAccess" (
+CREATE TABLE auth."UserApplicationAccess" (
     "Id" uuid NOT NULL,
     "ConnectedId" uuid NOT NULL,
     "ApplicationId" uuid NOT NULL,
@@ -1098,12 +1098,12 @@ CREATE TABLE auth."UserPlatformApplicationAccess" (
     "UpdatedByConnectedId" uuid,
     "DeletedByConnectedId" uuid,
     "RowVersion" bytea,
-    CONSTRAINT "PK_UserPlatformApplicationAccess" PRIMARY KEY ("Id"),
-    CONSTRAINT "FK_UserPlatformApplicationAccess_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_UserPlatformApplicationAccess_ConnectedIds_GrantedByConnect~" FOREIGN KEY ("GrantedByConnectedId") REFERENCES auth."ConnectedIds" ("Id"),
-    CONSTRAINT "FK_UserPlatformApplicationAccess_PlatformApplicationAccessTemp~" FOREIGN KEY ("AccessTemplateId") REFERENCES auth."PlatformApplicationAccessTemplates" ("Id"),
-    CONSTRAINT "FK_UserPlatformApplicationAccess_PlatformApplications_Applicat~" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_UserPlatformApplicationAccess_Roles_RoleId" FOREIGN KEY ("RoleId") REFERENCES auth."Roles" ("Id")
+    CONSTRAINT "PK_UserApplicationAccess" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_UserApplicationAccess_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
+    CONSTRAINT "FK_UserApplicationAccess_ConnectedIds_GrantedByConnect~" FOREIGN KEY ("GrantedByConnectedId") REFERENCES auth."ConnectedIds" ("Id"),
+    CONSTRAINT "FK_UserApplicationAccess_ApplicationAccessTemp~" FOREIGN KEY ("AccessTemplateId") REFERENCES auth."ApplicationAccessTemplates" ("Id"),
+    CONSTRAINT "FK_UserApplicationAccess_Applications_Applicat~" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id") ON DELETE CASCADE,
+    CONSTRAINT "FK_UserApplicationAccess_Roles_RoleId" FOREIGN KEY ("RoleId") REFERENCES auth."Roles" ("Id")
 );
 
 CREATE TABLE auth."OAuthRefreshTokens" (
@@ -1140,7 +1140,7 @@ CREATE TABLE auth."OAuthRefreshTokens" (
     CONSTRAINT "FK_OAuthRefreshTokens_ConnectedIds_ConnectedId" FOREIGN KEY ("ConnectedId") REFERENCES auth."ConnectedIds" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_OAuthRefreshTokens_OAuthAccessTokens_AccessTokenId" FOREIGN KEY ("AccessTokenId") REFERENCES auth."OAuthAccessTokens" ("Id") ON DELETE CASCADE,
     CONSTRAINT "FK_OAuthRefreshTokens_OAuthClients_ClientId" FOREIGN KEY ("ClientId") REFERENCES auth."OAuthClients" ("Id") ON DELETE CASCADE,
-    CONSTRAINT "FK_OAuthRefreshTokens_PlatformApplications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."PlatformApplications" ("Id"),
+    CONSTRAINT "FK_OAuthRefreshTokens_Applications_ApplicationId" FOREIGN KEY ("ApplicationId") REFERENCES auth."Applications" ("Id"),
     CONSTRAINT "FK_OAuthRefreshTokens_Sessions_SessionId" FOREIGN KEY ("SessionId") REFERENCES auth."Sessions" ("Id")
 );
 
@@ -1264,11 +1264,11 @@ CREATE INDEX "IX_PermissionValidationLogs_PermissionId" ON auth."PermissionValid
 
 CREATE INDEX "IX_PermissionValidationLogs_SessionId" ON auth."PermissionValidationLogs" ("SessionId");
 
-CREATE INDEX "IX_PlatformApplicationAccessTemplates_DefaultRoleId" ON auth."PlatformApplicationAccessTemplates" ("DefaultRoleId");
+CREATE INDEX "IX_ApplicationAccessTemplates_DefaultRoleId" ON auth."ApplicationAccessTemplates" ("DefaultRoleId");
 
-CREATE INDEX "IX_PlatformApplicationApiKeys_ApplicationId" ON auth."PlatformApplicationApiKeys" ("ApplicationId");
+CREATE INDEX "IX_ApplicationApiKeys_ApplicationId" ON auth."ApplicationApiKeys" ("ApplicationId");
 
-CREATE INDEX "IX_PlatformApplications_OrganizationId" ON auth."PlatformApplications" ("OrganizationId");
+CREATE INDEX "IX_Applications_OrganizationId" ON auth."Applications" ("OrganizationId");
 
 CREATE INDEX "IX_RolePermissions_GrantedByConnectedId" ON auth."RolePermissions" ("GrantedByConnectedId");
 
@@ -1310,19 +1310,19 @@ CREATE INDEX "IX_UserActivityLogs_OrganizationId" ON auth."UserActivityLogs" ("O
 
 CREATE INDEX "IX_UserFeatureProfiles_OrganizationId" ON auth."UserFeatureProfiles" ("OrganizationId");
 
-CREATE INDEX "IX_UserFeatureProfiles_PlatformApplicationId" ON auth."UserFeatureProfiles" ("PlatformApplicationId");
+CREATE INDEX "IX_UserFeatureProfiles_ApplicationId" ON auth."UserFeatureProfiles" ("ApplicationId");
 
 CREATE UNIQUE INDEX "IX_UserFeatureProfiles_UserId" ON auth."UserFeatureProfiles" ("UserId");
 
-CREATE INDEX "IX_UserPlatformApplicationAccess_AccessTemplateId" ON auth."UserPlatformApplicationAccess" ("AccessTemplateId");
+CREATE INDEX "IX_UserApplicationAccess_AccessTemplateId" ON auth."UserApplicationAccess" ("AccessTemplateId");
 
-CREATE INDEX "IX_UserPlatformApplicationAccess_ApplicationId" ON auth."UserPlatformApplicationAccess" ("ApplicationId");
+CREATE INDEX "IX_UserApplicationAccess_ApplicationId" ON auth."UserApplicationAccess" ("ApplicationId");
 
-CREATE INDEX "IX_UserPlatformApplicationAccess_ConnectedId" ON auth."UserPlatformApplicationAccess" ("ConnectedId");
+CREATE INDEX "IX_UserApplicationAccess_ConnectedId" ON auth."UserApplicationAccess" ("ConnectedId");
 
-CREATE INDEX "IX_UserPlatformApplicationAccess_GrantedByConnectedId" ON auth."UserPlatformApplicationAccess" ("GrantedByConnectedId");
+CREATE INDEX "IX_UserApplicationAccess_GrantedByConnectedId" ON auth."UserApplicationAccess" ("GrantedByConnectedId");
 
-CREATE INDEX "IX_UserPlatformApplicationAccess_RoleId" ON auth."UserPlatformApplicationAccess" ("RoleId");
+CREATE INDEX "IX_UserApplicationAccess_RoleId" ON auth."UserApplicationAccess" ("RoleId");
 
 CREATE UNIQUE INDEX "IX_UserProfiles_UserId" ON auth."UserProfiles" ("UserId");
 
