@@ -13,6 +13,9 @@ using AuthHive.Core.Interfaces.Base;
 using AuthHive.Core.Models.User.Commands;
 using AuthHive.Core.Models.User.Queries;
 using AuthHive.Core.Models.User.Responses;
+using AuthHive.Core.Models.User.Commands.Lifecycle;
+using AuthHive.Core.Models.User.Queries.Profile;
+using AuthHive.Core.Models.User.Commands.Profile;
 
 namespace AuthHive.Auth.Controllers.v1;
 

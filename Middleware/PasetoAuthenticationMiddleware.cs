@@ -1,4 +1,3 @@
-using AuthHive.Core.Interfaces.Auth.Provider;
 using System.Security.Claims;
 using System; // Exception
 using System.Linq; // FirstOrDefault
@@ -7,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using AuthHive.Infra.Persistence.Context;
+using AuthHive.Core.Interfaces.Auth.Authentication.Provider;
 
 namespace AuthHive.Auth.Middleware
 {
