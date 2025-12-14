@@ -1,77 +1,53 @@
 using System;
-using System.Linq; // [필수] .Select() 사용을 위해 추가
 using System.Threading;
 using System.Threading.Tasks;
-using MediatR;
-using Microsoft.Extensions.Logging;
-using FluentValidation;
+using MediatR; // IPublisher
 
 // [Interfaces]
 using AuthHive.Core.Interfaces.Base; 
-using AuthHive.Core.Interfaces.User.Repositories.Lifecycle; // IUserRepository 위치 수정
+using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
 using AuthHive.Core.Interfaces.Security;
-using AuthHive.Core.Interfaces.Infra; // ICacheService가 여기 있는지 확인 필요
 
 // [Models]
 using AuthHive.Core.Models.User.Commands.Lifecycle;
 using AuthHive.Core.Models.User.Responses;
 using AuthHive.Core.Models.User.Events.Lifecycle;
 
-// [Exceptions]
-using AuthHive.Core.Exceptions;
-
 // [Alias]
 using UserEntity = AuthHive.Core.Entities.User.User;
-using AuthHive.Core.Interfaces.Infra.Cache;
+using AuthHive.Core.Interfaces.Infra;
 
-namespace AuthHive.Auth.Handlers.User.Lifecycle; // 네임스페이스 위치 수정 (User -> User.Lifecycle)
+namespace AuthHive.Auth.Handlers.User.Lifecycle;
 
 public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserResponse>
 {
-    private readonly IUserRepository _userRepository;
+    // ★ [핵심 변경] 읽기/쓰기가 분리된 Command 전용 리포지토리 주입
+    private readonly IUserCommandRepository _userCommandRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly IPasswordHashProvider _passwordHasher;
-    private readonly IValidator<CreateUserCommand> _validator;
-    private readonly IMediator _mediator;
+    private readonly IPublisher _publisher; // Mediator 대신 Publisher 사용 (ISP 준수)
     private readonly IDateTimeProvider _timeProvider;
-    private readonly ICacheService _cacheService;
-    private readonly ILogger<CreateUserCommandHandler> _logger;
 
     public CreateUserCommandHandler(
-        IUserRepository userRepository,
+        IUserCommandRepository userCommandRepository, 
         IUnitOfWork unitOfWork,
         IPasswordHashProvider passwordHasher,
-        IValidator<CreateUserCommand> validator,
-        IMediator mediator,
-        IDateTimeProvider timeProvider,
-        ICacheService cacheService,
-        ILogger<CreateUserCommandHandler> logger)
+        IPublisher publisher,
+        IDateTimeProvider timeProvider)
     {
-        _userRepository = userRepository;
+        _userCommandRepository = userCommandRepository;
         _unitOfWork = unitOfWork;
         _passwordHasher = passwordHasher;
-        _validator = validator;
-        _mediator = mediator;
+        _publisher = publisher;
         _timeProvider = timeProvider;
-        _cacheService = cacheService;
-        _logger = logger;
     }
 
     public async Task<UserResponse> Handle(CreateUserCommand command, CancellationToken cancellationToken)
     {
-        // 1. 유효성 검사 (FluentValidation)
-        var validationResult = await _validator.ValidateAsync(command, cancellationToken);
-        
-        if (!validationResult.IsValid)
-        {
-            // [Fix CS1503] ValidationFailure 객체를 string 메시지로 변환
-            var errorMessages = validationResult.Errors.Select(e => e.ErrorMessage);
-            
-            throw new DomainValidationException("Validation failed", errorMessages);
-        }
-
-        // 2. Entity 생성 & 데이터 설정 (DDD)
+        // 1. Entity 생성 (Domain Logic)
         var user = new UserEntity();
+        
+        // 도메인 규칙 적용 (Setter 대신 도메인 메서드 사용 권장)
         user.SetEmail(command.Email);
         
         if (!string.IsNullOrWhiteSpace(command.Password))
@@ -85,34 +61,35 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserR
             user.SetPhoneNumber(command.PhoneNumber);
         }
 
-        // 3. 저장
-        await _userRepository.AddAsync(user, cancellationToken);
+        // 2. 저장 (Persistence)
+        // IUserCommandRepository는 IRepository<User>를 상속받으므로 AddAsync 사용 가능
+        await _userCommandRepository.AddAsync(user, cancellationToken);
+        
+        // 트랜잭션 확정 (만약 Pipeline에 TransactionBehavior가 없다면 필수)
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // 4. 이벤트 발행
+        // 3. 도메인 이벤트 발행 (Side Effects 분리)
+        // 이 이벤트가 나가면 -> EmailSenderHandler, UserCacheHandler 등이 반응함
         var createdEvent = new UserAccountCreatedEvent
         {
-            EventId = Guid.NewGuid(), // 필수값
+            EventId = Guid.NewGuid(),
             AggregateId = user.Id,
-            OccurredOn = _timeProvider.UtcNow,
-            TriggeredBy = Guid.Empty, // 회원가입은 주체가 없거나 본인
-            OrganizationId = null, // Global User 생성 시점엔 Org 없음
-
+            OccurredAt = _timeProvider.UtcNow,
+            TriggeredBy = user.Id, // 가입 주체
+            
             UserId = user.Id,
             Email = user.Email,
             RegistrationMethod = "Email",
             EmailVerified = user.IsEmailVerified,
-            RequiresAdditionalSetup = false,
             Username = user.Username,
             PhoneNumber = user.PhoneNumber
         };
 
-        await _mediator.Publish(createdEvent, cancellationToken);
+        await _publisher.Publish(createdEvent, cancellationToken);
 
-        _logger.LogInformation("User created successfully. ID: {UserId}", user.Id);
-
-        // 5. 응답 생성
-        var response = new UserResponse
+        // 4. 응답 반환 (Response)
+        // QueryRepository를 쓰지 않고, 방금 만든 Entity에서 값을 매핑해 리턴 (속도 최적화)
+        return new UserResponse
         {
             Id = user.Id,
             Email = user.Email,
@@ -124,14 +101,5 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserR
             CreatedAt = user.CreatedAt,
             LastLoginAt = user.LastLoginAt
         };
-
-        // 6. 캐시 프리워밍
-        string cacheKey = $"UserResponse:{user.Id}";
-        
-        // [체크] ICacheService 인터페이스 정의 파일에서 ': IService' 상속을 제거했는지 확인하세요.
-        // 만약 IService 에러가 계속 나면, AuthHive.Core/Interfaces/Infra/ICacheService.cs 파일을 열어 수정해야 합니다.
-        await _cacheService.SetAsync(cacheKey, response, TimeSpan.FromMinutes(15), cancellationToken);
-
-        return response;
     }
 }
