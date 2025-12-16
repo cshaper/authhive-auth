@@ -16,6 +16,7 @@ using AuthHive.Core.Models.User.Events.Lifecycle;
 // [Alias]
 using UserEntity = AuthHive.Core.Entities.User.User;
 using AuthHive.Core.Interfaces.Infra;
+using AuthHive.Core.Exceptions;
 
 namespace AuthHive.Auth.Handlers.User.Lifecycle;
 
@@ -23,27 +24,47 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserR
 {
     // ★ [핵심 변경] 읽기/쓰기가 분리된 Command 전용 리포지토리 주입
     private readonly IUserCommandRepository _userCommandRepository;
+    private readonly IUserQueryRepository _userQueryRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly IPasswordHashProvider _passwordHasher;
     private readonly IPublisher _publisher; // Mediator 대신 Publisher 사용 (ISP 준수)
     private readonly IDateTimeProvider _timeProvider;
-
+    private readonly ILogger<CreateUserCommandHandler> _logger;
     public CreateUserCommandHandler(
         IUserCommandRepository userCommandRepository,
+        IUserQueryRepository userQueryRepository,
         IUnitOfWork unitOfWork,
         IPasswordHashProvider passwordHasher,
         IPublisher publisher,
-        IDateTimeProvider timeProvider)
+        IDateTimeProvider timeProvider,
+        ILogger<CreateUserCommandHandler> logger)
     {
+        _userQueryRepository = userQueryRepository;
         _userCommandRepository = userCommandRepository;
         _unitOfWork = unitOfWork;
         _passwordHasher = passwordHasher;
         _publisher = publisher;
         _timeProvider = timeProvider;
+        _logger = logger;
     }
 
     public async Task<UserResponse> Handle(CreateUserCommand command, CancellationToken cancellationToken)
     {
+        bool emailExists = await _userQueryRepository.ExistsByEmailAsync(
+        command.Email,
+        cancellationToken);
+
+        if (emailExists)
+        {
+            _logger.LogWarning("User registration failed: Attempt to register with duplicate email address. Email: {Email}, IP: {IpAddress}",
+                        command.Email,
+                        command.IpAddress); // IpAddress는 IRequestMetadata에서 가져옴
+
+            throw new DomainValidationException(
+                message: "User registration validation failed.",
+                errors: new List<string> { $"The email address '{command.Email}' is already registered." }
+            );
+        }
         // 1. Entity 생성 (Domain Logic)
         var user = new UserEntity();
 
