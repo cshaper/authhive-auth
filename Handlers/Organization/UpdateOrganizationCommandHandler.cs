@@ -17,7 +17,7 @@
 // using System.Linq; // FirstOrDefault
 // using System.Threading;
 // using System.Threading.Tasks;
-// using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
+// using OrganizationEntity = AuthHive.Core.Entities.Organization.Core.Organization;
 // using AuthHive.Core.Enums.Core;
 
 // namespace AuthHive.Auth.Handlers.Organization

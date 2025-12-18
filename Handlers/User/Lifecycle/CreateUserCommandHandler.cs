@@ -1,131 +1,131 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-using MediatR; // IPublisher
+// using System;
+// using System.Threading;
+// using System.Threading.Tasks;
+// using MediatR; // IPublisher
 
-// [Interfaces]
-using AuthHive.Core.Interfaces.Base;
-using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
-using AuthHive.Core.Interfaces.Security;
+// // [Interfaces]
+// using AuthHive.Core.Interfaces.Base;
+// using AuthHive.Core.Interfaces.User.Repositories.Lifecycle;
+// using AuthHive.Core.Interfaces.Security;
 
-// [Models]
-using AuthHive.Core.Models.User.Commands.Lifecycle;
-using AuthHive.Core.Models.User.Responses;
-using AuthHive.Core.Models.User.Events.Lifecycle;
+// // [Models]
+// using AuthHive.Core.Models.User.Commands.Lifecycle;
+// using AuthHive.Core.Models.User.Responses;
+// using AuthHive.Core.Models.User.Events.Lifecycle;
 
-// [Alias]
-using UserEntity = AuthHive.Core.Entities.User.User;
-using AuthHive.Core.Interfaces.Infra;
-using AuthHive.Core.Exceptions;
+// // [Alias]
+// using UserEntity = AuthHive.Core.Entities.User.User;
+// using AuthHive.Core.Interfaces.Infra;
+// using AuthHive.Core.Exceptions;
 
-namespace AuthHive.Auth.Handlers.User.Lifecycle;
+// namespace AuthHive.Auth.Handlers.User.Lifecycle;
 
-public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserResponse>
-{
-    // ★ [핵심 변경] 읽기/쓰기가 분리된 Command 전용 리포지토리 주입
-    private readonly IUserCommandRepository _userCommandRepository;
-    private readonly IUserQueryRepository _userQueryRepository;
-    private readonly IUnitOfWork _unitOfWork;
-    private readonly IPasswordHashProvider _passwordHasher;
-    private readonly IPublisher _publisher; // Mediator 대신 Publisher 사용 (ISP 준수)
-    private readonly IDateTimeProvider _timeProvider;
-    private readonly ILogger<CreateUserCommandHandler> _logger;
-    public CreateUserCommandHandler(
-        IUserCommandRepository userCommandRepository,
-        IUserQueryRepository userQueryRepository,
-        IUnitOfWork unitOfWork,
-        IPasswordHashProvider passwordHasher,
-        IPublisher publisher,
-        IDateTimeProvider timeProvider,
-        ILogger<CreateUserCommandHandler> logger)
-    {
-        _userQueryRepository = userQueryRepository;
-        _userCommandRepository = userCommandRepository;
-        _unitOfWork = unitOfWork;
-        _passwordHasher = passwordHasher;
-        _publisher = publisher;
-        _timeProvider = timeProvider;
-        _logger = logger;
-    }
+// public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserResponse>
+// {
+//     // ★ [핵심 변경] 읽기/쓰기가 분리된 Command 전용 리포지토리 주입
+//     private readonly IUserCommandRepository _userCommandRepository;
+//     private readonly IUserQueryRepository _userQueryRepository;
+//     private readonly IUnitOfWork _unitOfWork;
+//     private readonly IPasswordHashProvider _passwordHasher;
+//     private readonly IPublisher _publisher; // Mediator 대신 Publisher 사용 (ISP 준수)
+//     private readonly IDateTimeProvider _timeProvider;
+//     private readonly ILogger<CreateUserCommandHandler> _logger;
+//     public CreateUserCommandHandler(
+//         IUserCommandRepository userCommandRepository,
+//         IUserQueryRepository userQueryRepository,
+//         IUnitOfWork unitOfWork,
+//         IPasswordHashProvider passwordHasher,
+//         IPublisher publisher,
+//         IDateTimeProvider timeProvider,
+//         ILogger<CreateUserCommandHandler> logger)
+//     {
+//         _userQueryRepository = userQueryRepository;
+//         _userCommandRepository = userCommandRepository;
+//         _unitOfWork = unitOfWork;
+//         _passwordHasher = passwordHasher;
+//         _publisher = publisher;
+//         _timeProvider = timeProvider;
+//         _logger = logger;
+//     }
 
-    public async Task<UserResponse> Handle(CreateUserCommand command, CancellationToken cancellationToken)
-    {
-        bool emailExists = await _userQueryRepository.ExistsByEmailAsync(
-        command.Email,
-        cancellationToken);
+//     public async Task<UserResponse> Handle(CreateUserCommand command, CancellationToken cancellationToken)
+//     {
+//         bool emailExists = await _userQueryRepository.ExistsByEmailAsync(
+//         command.Email,
+//         cancellationToken);
 
-        if (emailExists)
-        {
-            _logger.LogWarning("User registration failed: Attempt to register with duplicate email address. Email: {Email}, IP: {IpAddress}",
-                        command.Email,
-                        command.IpAddress); // IpAddress는 IRequestMetadata에서 가져옴
+//         if (emailExists)
+//         {
+//             _logger.LogWarning("User registration failed: Attempt to register with duplicate email address. Email: {Email}, IP: {IpAddress}",
+//                         command.Email,
+//                         command.IpAddress); // IpAddress는 IRequestMetadata에서 가져옴
 
-            throw new DomainValidationException(
-                message: "User registration validation failed.",
-                errors: new List<string> { $"The email address '{command.Email}' is already registered." }
-            );
-        }
-        // 1. Entity 생성 (Domain Logic)
-        var user = new UserEntity();
+//             throw new DomainValidationException(
+//                 message: "User registration validation failed.",
+//                 errors: new List<string> { $"The email address '{command.Email}' is already registered." }
+//             );
+//         }
+//         // 1. Entity 생성 (Domain Logic)
+//         var user = new UserEntity();
 
-        // 도메인 규칙 적용 (Setter 대신 도메인 메서드 사용 권장)
-        user.SetEmail(command.Email);
+//         // 도메인 규칙 적용 (Setter 대신 도메인 메서드 사용 권장)
+//         user.SetEmail(command.Email);
 
-        // User 엔티티의 SetName(firstName, lastName)을 활용
-        if (!string.IsNullOrWhiteSpace(command.DisplayName))
-        {
-            user.SetName(command.DisplayName, null);
-        }
-        if (!string.IsNullOrWhiteSpace(command.Password))
-        {
-            string hash = await _passwordHasher.HashPasswordAsync(command.Password);
-            user.SetPasswordHash(hash);
-        }
+//         // User 엔티티의 SetName(firstName, lastName)을 활용
+//         if (!string.IsNullOrWhiteSpace(command.DisplayName))
+//         {
+//             user.SetName(command.DisplayName, null);
+//         }
+//         if (!string.IsNullOrWhiteSpace(command.Password))
+//         {
+//             string hash = await _passwordHasher.HashPasswordAsync(command.Password);
+//             user.SetPasswordHash(hash);
+//         }
 
-        if (!string.IsNullOrWhiteSpace(command.PhoneNumber))
-        {
-            user.SetPhoneNumber(command.PhoneNumber);
-        }
+//         if (!string.IsNullOrWhiteSpace(command.PhoneNumber))
+//         {
+//             user.SetPhoneNumber(command.PhoneNumber);
+//         }
 
-        // 2. 저장 (Persistence)
-        // IUserCommandRepository는 IRepository<User>를 상속받으므로 AddAsync 사용 가능
-        await _userCommandRepository.AddAsync(user, cancellationToken);
+//         // 2. 저장 (Persistence)
+//         // IUserCommandRepository는 IRepository<User>를 상속받으므로 AddAsync 사용 가능
+//         await _userCommandRepository.AddAsync(user, cancellationToken);
 
-        // 트랜잭션 확정 (만약 Pipeline에 TransactionBehavior가 없다면 필수)
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+//         // 트랜잭션 확정 (만약 Pipeline에 TransactionBehavior가 없다면 필수)
+//         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        // 3. 도메인 이벤트 발행 (Side Effects 분리)
-        // 이 이벤트가 나가면 -> EmailSenderHandler, UserCacheHandler 등이 반응함
-        var createdEvent = new UserAccountCreatedEvent
-        {
-            EventId = Guid.NewGuid(),
-            AggregateId = user.Id,
-            OccurredAt = _timeProvider.UtcNow,
-            TriggeredBy = user.Id, // 가입 주체
+//         // 3. 도메인 이벤트 발행 (Side Effects 분리)
+//         // 이 이벤트가 나가면 -> EmailSenderHandler, UserCacheHandler 등이 반응함
+//         var createdEvent = new UserAccountCreatedEvent
+//         {
+//             EventId = Guid.NewGuid(),
+//             AggregateId = user.Id,
+//             OccurredAt = _timeProvider.UtcNow,
+//             TriggeredBy = user.Id, // 가입 주체
 
-            UserId = user.Id,
-            Email = user.Email,
-            RegistrationMethod = "Email",
-            EmailVerified = user.IsEmailVerified,
-            Username = user.Username,
-            PhoneNumber = user.PhoneNumber
-        };
+//             UserId = user.Id,
+//             Email = user.Email,
+//             RegistrationMethod = "Email",
+//             EmailVerified = user.IsEmailVerified,
+//             Username = user.Username,
+//             PhoneNumber = user.PhoneNumber
+//         };
 
-        await _publisher.Publish(createdEvent, cancellationToken);
+//         await _publisher.Publish(createdEvent, cancellationToken);
 
-        // 4. 응답 반환 (Response)
-        // QueryRepository를 쓰지 않고, 방금 만든 Entity에서 값을 매핑해 리턴 (속도 최적화)
-        return new UserResponse
-        {
-            Id = user.Id,
-            Email = user.Email,
-            Username = user.Username,
-            IsEmailVerified = user.IsEmailVerified,
-            PhoneNumber = user.PhoneNumber,
-            IsTwoFactorEnabled = user.IsTwoFactorEnabled,
-            Status = user.Status,
-            CreatedAt = user.CreatedAt,
-            LastLoginAt = user.LastLoginAt
-        };
-    }
-}
+//         // 4. 응답 반환 (Response)
+//         // QueryRepository를 쓰지 않고, 방금 만든 Entity에서 값을 매핑해 리턴 (속도 최적화)
+//         return new UserResponse
+//         {
+//             Id = user.Id,
+//             Email = user.Email,
+//             Username = user.Username,
+//             IsEmailVerified = user.IsEmailVerified,
+//             PhoneNumber = user.PhoneNumber,
+//             IsTwoFactorEnabled = user.IsTwoFactorEnabled,
+//             Status = user.Status,
+//             CreatedAt = user.CreatedAt,
+//             LastLoginAt = user.LastLoginAt
+//         };
+//     }
+// }

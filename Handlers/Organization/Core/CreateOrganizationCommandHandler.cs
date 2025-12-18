@@ -11,7 +11,7 @@
 // using AuthHive.Core.Models.Auth.ConnectedId.Commands; // CreateConnectedIdCommand
 // using AuthHive.Core.Enums.Auth; // MembershipType, ConnectedIdStatus
 // using AuthHive.Core.Enums.Core; // OrganizationStatus
-// using OrganizationEntity = AuthHive.Core.Entities.Organization.Organization;
+// using OrganizationEntity = AuthHive.Core.Entities.Organization.Core.Organization;
 // using static AuthHive.Core.Enums.Auth.ConnectedIdEnums;
 // using AuthHive.Core.Interfaces.Organization.Core;
 
