@@ -28,26 +28,21 @@ public class UserRegistrationService : IUserRegistrationService
     private readonly IPointWalletCommandRepository _walletCommandRepo;
     
     // Auth DB용 트랜잭션 관리자
-    private readonly IUnitOfWork _unitOfWork; 
-    
-    // Business DB 저장용 Context (지갑 저장에 필수)
-    private readonly BusinessDbContext _businessDbContext;
-    
+    private readonly IAuthUnitOfWork _unitOfWork; 
+     
     private readonly IPublisher _publisher;
     private readonly IDateTimeProvider _timeProvider;
 
     public UserRegistrationService(
         IUserCommandRepository userCommandRepo,
         IPointWalletCommandRepository walletCommandRepo,
-        IUnitOfWork unitOfWork,
-        BusinessDbContext businessDbContext, 
+        IAuthUnitOfWork unitOfWork,
         IPublisher publisher,
         IDateTimeProvider timeProvider)
     {
         _userCommandRepo = userCommandRepo;
         _walletCommandRepo = walletCommandRepo;
         _unitOfWork = unitOfWork;
-        _businessDbContext = businessDbContext; 
         _publisher = publisher;
         _timeProvider = timeProvider;
     }
@@ -78,10 +73,6 @@ public class UserRegistrationService : IUserRegistrationService
         var wallet = PointWallet.CreateForUser(user.Id);
         
         await _walletCommandRepo.AddAsync(wallet, ct);
-
-        // Business DB 커밋 -> Wallet 테이블에 INSERT 됨
-        // 여기서는 지갑 생성 이벤트(WalletCreatedEvent)가 있다면 발송됩니다.
-        await _businessDbContext.SaveChangesAsync(ct);
 
 
         // -------------------------------------------------------

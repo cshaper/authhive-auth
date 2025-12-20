@@ -51,6 +51,8 @@ public class RegisterWithEmailCommandHandler : IRequestHandler<RegisterWithEmail
         user.SetEmail(request.Email);
         user.SetPasswordHash(passwordHash);
 
+        string autoUsername = request.Email.Split('@')[0];
+        user.SetUsername(autoUsername);
         if (!string.IsNullOrWhiteSpace(request.DisplayName))
         {
             user.SetName(request.DisplayName, null);
@@ -82,7 +84,7 @@ public class RegisterWithEmailCommandHandler : IRequestHandler<RegisterWithEmail
             RegistrationMethod = "Email",
             PhoneNumber = request.PhoneNumber,
 
-            // ✅ 상태 플래그 설정
+            // 상태 플래그 설정
             EmailVerified = false, // 이메일 가입은 기본적으로 false
             RequiresAdditionalSetup = true // 닉네임 등을 더 받아야 한다면 true
         });
@@ -108,7 +110,8 @@ public class RegisterWithEmailCommandHandler : IRequestHandler<RegisterWithEmail
             IsTwoFactorEnabled = registeredUser.IsTwoFactorEnabled,
             Status = registeredUser.Status,
             CreatedAt = registeredUser.CreatedAt,
-            LastLoginAt = registeredUser.LastLoginAt
+            LastLoginAt = registeredUser.LastLoginAt,
+            Message = "Registration successful. Please check your inbox and verify your email to activate your account."
         };
     }
 }
